@@ -3,6 +3,7 @@ import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { validatePublicHttpUrl, fetchText as realFetchText } from './http.js';
+import { buildPythonChildEnvironment } from './python-child-env.js';
 
 // ── Constants ──
 
@@ -380,6 +381,7 @@ export class ScraplingBridge {
 
     const child = this._spawn(this.options.pythonPath, [scriptPath], {
       stdio: ['pipe', 'pipe', 'inherit'],
+      env: buildPythonChildEnvironment(),
     });
     this._child = child;
 
@@ -523,6 +525,7 @@ export class ScraplingBridge {
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const child = this._spawn(this.options.pythonPath, [scriptPath], {
         stdio: ['pipe', 'pipe', 'inherit'],
+        env: buildPythonChildEnvironment(),
       });
 
       let buffer = '';

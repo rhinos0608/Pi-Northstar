@@ -1,6 +1,7 @@
 import { spawn as realSpawn, type ChildProcess } from 'node:child_process';
 import { createServer as realCreateServer } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { buildPythonChildEnvironment } from './python-child-env.js';
 
 const DEFAULT_PYTHON_PATH = 'python3';
 const DEFAULT_SCRIPT_PATH = 'sidecar/app.py';
@@ -113,6 +114,7 @@ export class SidecarManager {
 
         const child = this._spawn(this.options.pythonPath, args, {
           stdio: ['pipe', 'pipe', 'inherit'],
+          env: buildPythonChildEnvironment(),
         });
         this.process = child;
 
