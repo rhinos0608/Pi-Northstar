@@ -1,3 +1,4 @@
+import type { ImageContent } from '@earendil-works/pi-ai';
 import type { BackendCallResult } from './backend.js';
 import type { BrowserRequest } from './browser-policy.js';
 import { enrichResult } from './browser-result.js';
@@ -361,15 +362,14 @@ export class AgentBrowserAdapter {
       return jsonTextResult({ error: shotResult.error });
     }
 
+    const image: ImageContent = {
+      type: 'image',
+      mimeType: shotResult.mediaType,
+      data: shotResult.data,
+    };
+
     return {
-      content: [{
-        type: 'image',
-        mediaType: shotResult.mediaType,
-        data: shotResult.data,
-        width: shotResult.width,
-        height: shotResult.height,
-        byteLength: shotResult.byteLength,
-      }],
+      content: [image],
       details: {
         mediaType: shotResult.mediaType,
         width: shotResult.width,
