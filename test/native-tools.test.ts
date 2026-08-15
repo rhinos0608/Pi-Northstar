@@ -140,7 +140,7 @@ test('native web_search fans out configured backends and fuses duplicate URLs wi
   };
 
   try {
-    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, { env: { BRAVE_API_KEY: 'key' } });
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, { env: { PI_SEARCH_WEB_BACKENDS: 'duckduckgo,brave', BRAVE_API_KEY: 'key' } });
     const details = result.details as { results: Array<{ url: string; rrfScore?: number }>; fusion: { backends: string[] } };
 
     assert.equal(details.results.length, 1);
@@ -229,7 +229,7 @@ test('native web_search clamps CLI limit before backend calls', async () => {
   };
 
   try {
-    await callNativeTool('web_search', { query: 'example', limit: 100000 }, { env: { BRAVE_API_KEY: 'key' } });
+    await callNativeTool('web_search', { query: 'example', limit: 100000 }, { env: { PI_SEARCH_WEB_BACKENDS: 'duckduckgo,brave', BRAVE_API_KEY: 'key' } });
     assert.equal(requestedCount, '20');
   } finally {
     globalThis.fetch = savedFetch;

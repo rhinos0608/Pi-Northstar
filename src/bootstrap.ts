@@ -6,6 +6,7 @@ import { importCookiesFromCdp, loginViaCdp } from './cdp.js';
 import { importCookiesFromDefaultBrowser } from './cookie-jar.js';
 import { runSetupInstall } from './installer.js';
 import { loadedConfigSummary } from './local-config.js';
+import { codexConfigured } from './codex-search.js';
 import { liveAuthSnapshot, providerSummary, PROVIDER_DESCRIPTORS, findProvider } from './providers.js';
 import { jsonTextResult } from './tool-output.js';
 
@@ -305,7 +306,9 @@ export async function writeAuthState(env: Record<string, string | undefined>): P
   for (const desc of PROVIDER_DESCRIPTORS) {
     if (desc.envKeys.length === 0) continue;
     const present = desc.envKeys.filter((k) => typeof env[k] === 'string' && env[k]!.length > 0);
-    providers[desc.provider] = { configured: present.length > 0, keys: present };
+    let configured = present.length > 0;
+    if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
+    providers[desc.provider] = { configured, keys: present };
   }
   const state = {
     version: 1,

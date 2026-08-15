@@ -87,7 +87,7 @@ If the agent-browser download is slow or fails:
 - Use `npm install --verbose` to see download progress
 - If stuck, try clearing npm cache: `npm cache clean --force && npm install`
 
-That's it — web search works immediately via DuckDuckGo with zero configuration.
+That's it — web search works immediately via DuckDuckGo with zero configuration. If a file-backed `codex login` session is available, Pi-Atlas also detects it automatically and uses Codex results first.
 
 ## Configuration
 
@@ -109,10 +109,24 @@ export REDDIT_USER_AGENT="pi-atlas/0.1"
 export SEARXNG_BASE_URL="https://..."   # Self-hosted SearXNG
 ```
 
+### Codex/ChatGPT search
+
+Pi-Atlas automatically checks `CODEX_ACCESS_TOKEN`, then `${CODEX_HOME:-~/.codex}/auth.json` created by `codex login`. When credentials exist and no explicit backend override is set, Codex web search is primary: its ordered results appear first, then results from other configured providers are URL-normalized and deduplicated before filling remaining slots. Only search query is sent; conversation history and project files are not included.
+
+```bash
+export CODEX_ACCESS_TOKEN="..."       # Optional override
+export CODEX_ACCOUNT_ID="..."         # Optional account routing
+export CODEX_HOME="$HOME/.codex"       # Optional auth-file location
+```
+
+`PI_SEARCH_WEB_BACKENDS` is exact. If set, Codex runs only when `codex` appears in list.
+
+> **Limited-support notice:** This integration uses undocumented, reverse-engineered ChatGPT/Codex search endpoint. It is best-effort, not official OpenAI integration, and may change, become unavailable, or be limited by account eligibility and usage limits. Usage may be governed by OpenAI/ChatGPT terms and policies. Confirm your intended use complies with those terms before enabling or relying on it.
+
 ### Backend selection
 
 ```bash
-export PI_SEARCH_WEB_BACKENDS="duckduckgo,brave,searxng"  # Ordered, first succeeds wins
+export PI_SEARCH_WEB_BACKENDS="codex,duckduckgo,brave"  # Exact provider set; codex remains primary when listed
 export PI_SEARCH_BROWSER_BACKEND="cdp"                     # Deprecated: CDP fallback (no reliability checks)
 export PI_SEARCH_BROWSER_ALLOW_SENSITIVE="1"              # Enable evaluate/set_cookies
 export PI_SEARCH_DESKTOP_AUTOMATION="1"                   # Enable desktop tool
@@ -146,7 +160,7 @@ Pi-Atlas has two layers of semantic capability:
 
 When you call `fetch` with a `query` parameter, Pi-Atlas performs **hybrid search**:
 
-1. **URL discovery** — queries all configured search backends (DuckDuckGo, Brave, Exa, Tavily, SearXNG, Ollama), RRF-fuses results, deduplicates URLs
+1. **URL discovery** — queries configured search backends (Codex when detected, DuckDuckGo, Brave, Exa, Tavily, SearXNG, Ollama); Codex results lead, then remaining rankings are RRF-fused and URL-deduplicated
 2. **Page fetching** — optionally uses Scrapling (Python stealth browser) for JS-rendered pages and anti-bot bypass, falls back to plain HTTP
 3. **Chunking** — sentence-boundary-aware text splitting with overlap
 4. **BM25 ranking** — Okapi BM25 lexical scoring (TF saturation, IDF weighting, length normalization)

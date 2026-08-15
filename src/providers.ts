@@ -1,3 +1,5 @@
+import { codexConfigured } from './codex-search.js';
+
 export interface ProviderDescriptor {
   provider: string;
   channel: string;
@@ -31,6 +33,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
   { provider: 'tavily', channel: 'search', family: 'research', envKeys: ['TAVILY_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Optional: set TAVILY_API_KEY for AI-native search', description: 'Tavily AI search API' },
   { provider: 'xiaoyuzhou', channel: 'xiaoyuzhou', family: 'research', envKeys: ['GROQ_API_KEY', 'OPENAI_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set GROQ_API_KEY or OPENAI_API_KEY for transcription', description: 'Xiaoyuzhou podcast transcription' },
   { provider: 'deepResearch', channel: 'research', family: 'research', envKeys: ['DEEP_RESEARCH_API_TOKEN'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set DEEP_RESEARCH_API_TOKEN for deep research', description: 'Deep research API' },
+  { provider: 'codex', channel: 'search', family: 'research', envKeys: ['CODEX_ACCESS_TOKEN', 'CODEX_ACCOUNT_ID'], cookieDomains: [], loginFlow: 'cli_login', risk: 'medium', setup: 'Run codex login (writes ~/.codex/auth.json) or set CODEX_ACCESS_TOKEN (+ optional CODEX_ACCOUNT_ID; CODEX_HOME overrides the auth file location)', description: 'Codex/ChatGPT web search via undocumented endpoint (best-effort, unofficial, may change or stop working)' },
 
   // ── Environment variable token/secret ─────────────────────
   { provider: 'github', channel: 'github', family: 'dev', envKeys: ['GITHUB_TOKEN', 'GH_TOKEN'], cookieDomains: ['github.com'], loginFlow: 'env_var', risk: 'low', setup: 'Set GITHUB_TOKEN for authenticated API access', description: 'GitHub repositories, files, trees, search', loginUrl: 'https://github.com/login' },
@@ -57,7 +60,9 @@ export function liveAuthSnapshot(env: Record<string, string | undefined>): Recor
   const result: Record<string, { configured: boolean; keyNames: string[] }> = {};
   for (const desc of PROVIDER_DESCRIPTORS) {
     const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.length > 0);
-    result[desc.provider] = { configured: present.length > 0 || desc.loginFlow === 'none', keyNames: present };
+    let configured = present.length > 0 || desc.loginFlow === 'none';
+    if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
+    result[desc.provider] = { configured, keyNames: present };
   }
   return result;
 }
@@ -70,8 +75,10 @@ export function authForChannel(channelName: string, env: Record<string, string |
   const desc = PROVIDER_DESCRIPTORS.find(d => d.channel === channelName);
   if (!desc) return undefined;
   const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.length > 0);
+  let configured = present.length > 0 || desc.loginFlow === 'none';
+  if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
   return {
-    configured: present.length > 0 || desc.loginFlow === 'none',
+    configured,
     keyNames: present,
     loginFlow: desc.loginFlow,
     cookieDomains: desc.cookieDomains,

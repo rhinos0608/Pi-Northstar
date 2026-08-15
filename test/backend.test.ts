@@ -38,6 +38,23 @@ test('CliSearchBackend child process works from a foreign cwd', async () => {
   }
 });
 
+test('buildCliEnvironment forwards CODE* env overrides and blocks unrelated secrets', () => {
+  const env = buildCliEnvironment({
+    PATH: '/usr/bin',
+    HOME: '/home/user',
+    CODEX_ACCESS_TOKEN: 'codex-token-abc',
+    CODEX_ACCOUNT_ID: 'acct-123',
+    CODEX_HOME: '/tmp/codex-home',
+    OTHER_SECRET_TOKEN: 'should-not-pass',
+    UNRELATED_API_KEY: 'should-not-pass',
+  });
+  assert.equal(env.CODEX_ACCESS_TOKEN, 'codex-token-abc');
+  assert.equal(env.CODEX_ACCOUNT_ID, 'acct-123');
+  assert.equal(env.CODEX_HOME, '/tmp/codex-home');
+  assert.equal(env.OTHER_SECRET_TOKEN, undefined);
+  assert.equal(env.UNRELATED_API_KEY, undefined);
+});
+
 test('buildCliEnvironment forwards reach backend auth and override allowlist', () => {
   assert.deepEqual(buildCliEnvironment({
     PATH: '/usr/bin',

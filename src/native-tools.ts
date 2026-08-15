@@ -11,6 +11,7 @@ import { EmbeddingClient } from './embedding-client.js';
 import { SidecarManager } from './sidecar-manager.js';
 import { ScraplingBridge } from './scrapling-bridge.js';
 import { extractLinksFromHtml } from './link-extraction.js';
+import { codexConfigured, searchCodex } from './codex-search.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
 
@@ -39,6 +40,7 @@ const SEMANTIC_TOP_K_MAX = 20;
 const SEMANTIC_MAX_PAGES_MAX = 25;
 
 const SEARCH_BACKENDS: WebSearchBackend[] = [
+  { name: 'codex', configured: (env) => codexConfigured(env), search: searchCodex },
   { name: 'duckduckgo', configured: () => true, search: (query, limit, _env, signal) => searchDuckDuckGo(query, limit, signal) },
   { name: 'searxng', configured: (env) => Boolean(env.SEARXNG_BASE_URL?.trim()), search: searchSearxng },
   { name: 'brave', configured: (env) => Boolean(env.BRAVE_API_KEY?.trim()), search: searchBrave },
@@ -125,20 +127,8 @@ async function webSearch(args: Record<string, unknown>, options: NativeToolOptio
     return { backend: backend.name, results: results.map((result) => ({ ...result, source: result.source ?? backend.name })) };
   }));
 
-  const rankings: WebResult[][] = [];
-  const servedBackends: string[] = [];
-  settled.forEach((item, index) => {
-    if (item.status === 'fulfilled') {
-      servedBackends.push(item.value.backend);
-      rankings.push(item.value.results);
-      return;
-    }
-    failures.push({ backend: backends[index]?.name ?? 'unknown', error: item.reason instanceof Error ? item.reason.message : String(item.reason) });
-  });
-
-  const fused = rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) })
-    .slice(0, limit)
-    .map(({ item, rrfScore }) => ({ ...item, rrfScore, title: item.title || item.url, snippet: item.snippet ?? '', source: item.source ?? 'unknown' }));
+  const outcome = collectBackendOutcome(settled, backends, failures);
+  const fused = composePrimaryFirst(outcome.primary, outcome.rankings, limit);
 
   if (fused.length === 0 && failures.length > 0) {
     throw new Error(`All web search backends failed: ${failures.map((failure) => `${failure.backend}: ${failure.error}`).join('; ')}`);
@@ -149,7 +139,13 @@ async function webSearch(args: Record<string, unknown>, options: NativeToolOptio
     effectiveQuery,
     category,
     results: fused,
-    fusion: { method: 'rrf', backends: servedBackends, failures, configuredBackends: backends.map((backend) => backend.name) },
+    fusion: {
+      method: 'rrf',
+      backends: outcome.servedBackends,
+      failures,
+      configuredBackends: backends.map((backend) => backend.name),
+      ...(outcome.primary ? { primary: 'codex' } : {}),
+    },
   });
 }
 
@@ -593,21 +589,19 @@ async function semanticSourceUrls(source: Record<string, unknown>, query: string
     return { backend: backend.name, results };
   }));
 
-  // Collect rankings and RRF-fuse
-  const rankings: WebResult[][] = [];
-  settled.forEach((item) => {
-    if (item.status === 'fulfilled' && item.value.results.length > 0) rankings.push(item.value.results);
-  });
+  // Collect primary-first outcome (Codex first, RRF for the rest)
+  const outcome = collectBackendOutcome(settled, backends, []);
 
-  if (rankings.length === 0) {
+  const composed = composePrimaryFirst(outcome.primary, outcome.rankings, maxPages);
+
+  if (composed.length === 0) {
     // Fallback: only DuckDuckGo when no override was requested
     if (requested.length > 0) return [];
     const ddg = await searchDuckDuckGo(searchQuery, maxPages, signal);
     return ddg.map((r) => r.url).filter(Boolean);
   }
 
-  const fused = rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) });
-  return fused.map(({ item }) => item.url).filter(Boolean).slice(0, maxPages);
+  return composed.map(({ url }) => url).filter(Boolean).slice(0, maxPages);
 }
 
 async function researchResults(query: string, source: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
@@ -874,6 +868,77 @@ function flattenDuckDuckGoTopics(value: unknown): WebResult[] {
 function formatWebResults(query: string, results: WebResult[]): string {
   if (results.length === 0) return `No web results for: ${query}`;
   return results.map((result, index) => `## ${index + 1}. ${result.title}\n${result.url}\n${result.snippet ?? ''}`).join('\n\n');
+}
+
+interface BackendOutcome {
+  /** Codex results when it succeeded with at least one result (primary). */
+  primary: WebResult[] | undefined;
+  /** Non-Codex fulfilled rankings for RRF fusion. */
+  rankings: WebResult[][];
+  servedBackends: string[];
+}
+
+function collectBackendOutcome(
+  settled: PromiseSettledResult<{ backend: string; results: WebResult[] }>[],
+  backends: WebSearchBackend[],
+  failures: Array<{ backend: string; error: string }>,
+): BackendOutcome {
+  const outcome: BackendOutcome = { primary: undefined, rankings: [], servedBackends: [] };
+  settled.forEach((item, index) => {
+    const name = backends[index]?.name ?? 'unknown';
+    if (item.status === 'fulfilled') {
+      outcome.servedBackends.push(item.value.backend);
+      const results = item.value.results;
+      if (name === 'codex') {
+        if (results.length > 0) outcome.primary = results;
+      } else if (results.length > 0) {
+        outcome.rankings.push(results);
+      }
+      return;
+    }
+    failures.push({ backend: name, error: item.reason instanceof Error ? item.reason.message : String(item.reason) });
+  });
+  return outcome;
+}
+
+/**
+ * Primary-first result composition: Codex results keep their provider order at
+ * the front (deduped by normalized URL); remaining slots are filled by
+ * RRF-fused non-Codex rankings, appending only URLs not already present, up to
+ * the requested limit. Without Codex results, plain RRF fusion is used.
+ */
+function composePrimaryFirst(primary: WebResult[] | undefined, rankings: WebResult[][], limit: number): WebResult[] {
+  const finish = (item: WebResult, rrfScore?: number): WebResult => ({
+    ...item,
+    ...(rrfScore !== undefined ? { rrfScore } : {}),
+    title: item.title || item.url,
+    snippet: item.snippet ?? '',
+    source: item.source ?? 'unknown',
+  });
+
+  if (!primary || primary.length === 0) {
+    return rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) })
+      .slice(0, limit)
+      .map(({ item, rrfScore }) => finish(item, rrfScore));
+  }
+
+  const seen = new Set<string>();
+  const composed: WebResult[] = [];
+  for (const item of primary) {
+    const key = normalizeUrl(item.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    composed.push(finish(item));
+    if (composed.length >= limit) return composed;
+  }
+  for (const { item, rrfScore } of rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) })) {
+    const key = normalizeUrl(item.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    composed.push(finish(item, rrfScore));
+    if (composed.length >= limit) return composed;
+  }
+  return composed;
 }
 
 function requireString(value: unknown, name: string): string {
