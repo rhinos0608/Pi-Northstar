@@ -35,3 +35,51 @@ test('normalizeProviderPayload converts nested instructions arrays', () => {
     },
   });
 });
+
+test('normalizeProviderPayload preserves instructions fields inside tool schemas', () => {
+  const instructionsSchema = {
+    type: 'string',
+    description: "Server name to show that server's usage instructions",
+  };
+  const payload = {
+    instructions: [{ text: 'system prompt' }],
+    tools: [{
+      type: 'function',
+      name: 'mcp',
+      parameters: {
+        type: 'object',
+        properties: { instructions: instructionsSchema },
+      },
+    }],
+  };
+
+  assert.deepEqual(normalizeProviderPayload(payload), {
+    instructions: 'system prompt',
+    tools: [{
+      type: 'function',
+      name: 'mcp',
+      parameters: {
+        type: 'object',
+        properties: { instructions: instructionsSchema },
+      },
+    }],
+  });
+});
+
+test('normalizeProviderPayload does not mutate a nested provider payload', () => {
+  const payload = {
+    body: {
+      instructions: [{ text: 'alpha' }, { content: 'beta' }],
+      input: [],
+    },
+  };
+
+  normalizeProviderPayload(payload);
+
+  assert.deepEqual(payload, {
+    body: {
+      instructions: [{ text: 'alpha' }, { content: 'beta' }],
+      input: [],
+    },
+  });
+});
