@@ -286,7 +286,7 @@ export class AgentBrowserAdapter {
 
     // Domain containment: default to navigation hostname if not set
     if (!this.domainsFrozen) {
-      const domains = request.allowedDomains && request.allowedDomains.length > 0 ? request.allowedDomains : [hostname];
+      const domains = [hostname];
       this.setAllowedDomains(domains);
       await validateAllowedDomainsDns(this.allowedDomains, options.signal);
     }
