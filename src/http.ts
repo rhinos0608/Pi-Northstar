@@ -1,11 +1,23 @@
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 
-export function validatePublicHttpUrl(raw: string): string {
+/**
+ * Validate a URL is HTTP or HTTPS.
+ *
+ * Does NOT block private/reserved IP ranges. SSRF protection is provided by
+ * external network containerization; do not rely on this function alone if
+ * running outside a container.
+ */
+export function validateHttpUrl(raw: string): string {
   const url = new URL(raw.trim());
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Disallowed URL scheme: ${url.protocol}`);
   return url.href;
 }
+
+/**
+ * @deprecated Use {@link validateHttpUrl} instead. Kept as alias for backward compatibility.
+ */
+export const validatePublicHttpUrl = validateHttpUrl;
 
 export async function fetchJson(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<unknown> {
   const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);

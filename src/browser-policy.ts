@@ -84,14 +84,20 @@ export function extractCookieMetadata(cookies: CookieLike[]): CookieMetadata[] {
 
 export interface NavigationPolicy {
   url: string;
+  /**
+   * NOTE: Currently non-functional. Domain allowlisting was intentionally
+   * removed in commits a0fad0e and 04f373d. SSRF containment is delegated
+   * to external containerization. Retained for future re-enablement.
+   */
   allowedDomains?: string[];
 }
 
 /**
- * Validate a navigation URL for public browser use.
+ * Validate a navigation URL for browser use.
  * Rejects file:, chrome:, about:, data:, blob:, javascript:, ws:, wss:.
  * Rejects credentials in URL.
- * Rejects private/reserved hosts via http.ts validatePublicHttpUrl.
+ * Does NOT block private/reserved IP ranges. SSRF protection is provided by
+ * external network containerization; do not rely on this alone outside a container.
  */
 export function validateNavigationUrl(raw: string): string {
   const url = new URL(raw.trim());
@@ -104,12 +110,19 @@ export function validateNavigationUrl(raw: string): string {
 
 /**
  * DNS preflight is a no-op — containerization handles network containment.
+ *
+ * Hostname / domain allowlisting was intentionally removed in commits a0fad0e and 04f373d.
+ * This function is retained as a seam for future re-enablement but currently performs
+ * no DNS or hostname validation.
  */
 export async function dnsPreflight(_hostname: string, _signal?: AbortSignal): Promise<void> {
   // no-op
 }
 
 // ── Allowed domain validation — no-op: containerization handles containment ──
+// Domain allowlisting was intentionally removed in commits a0fad0e and 04f373d.
+// These functions are retained as API surfaces for future re-enablement but
+// currently perform no domain or hostname validation.
 
 export function validateAllowedDomain(pattern: string): string {
   return pattern.trim().toLowerCase();
@@ -121,10 +134,23 @@ export function freezeAllowedDomains(domains: string[]): string[] {
   return validated;
 }
 
+/**
+ * DNS validation for allowed domains — currently a no-op.
+ * Domain allowlisting was intentionally removed in commits a0fad0e and 04f373d.
+ * Retained as API surface for future re-enablement.
+ */
 export async function validateAllowedDomainsDns(_domains: string[], _signal?: AbortSignal): Promise<void> {
   // no-op
 }
 
+/**
+ * Check if a hostname is in the allowed domains list.
+ *
+ * NOTE: Currently returns true unconditionally. Domain allowlisting was
+ * intentionally removed in commits a0fad0e and 04f373d. SSRF/domain containment
+ * is delegated to external containerization. Retained as API surface for
+ * future re-enablement.
+ */
 export function checkDomainAllowed(_hostname: string, _allowedDomains: string[]): boolean {
   return true;
 }
@@ -332,7 +358,6 @@ export interface BrowserRequest {
   y?: number;
   urls?: string[];
   cookies?: unknown[];
-  allowedDomains?: string[];
   waitMs?: number;
   compact?: boolean;
   semanticAction?: SemanticActionRequest;
@@ -360,10 +385,7 @@ export function validateBrowserRequest(raw: Record<string, unknown>): BrowserReq
     request.urls = urls;
   }
   if (Array.isArray(raw.cookies)) request.cookies = raw.cookies;
-  if (Array.isArray(raw.allowedDomains)) {
-    const domains = raw.allowedDomains.filter((d): d is string => typeof d === 'string');
-    request.allowedDomains = domains;
-  }
+
   if (typeof raw.waitMs === 'number') request.waitMs = raw.waitMs;
   if (raw.compact === true) request.compact = true;
   if (typeof raw.semanticAction === 'object' && raw.semanticAction !== null) {

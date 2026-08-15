@@ -265,7 +265,6 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       y: Type.Optional(Type.Number({ description: 'Vertical scroll offset.' })),
       urls: Type.Optional(Type.Array(Type.String(), { description: 'URLs for cookies action.' })),
       cookies: Type.Optional(Type.Array(Type.Any(), { description: 'Cookie metadata/payload for set_cookies; values never returned.' })),
-      allowedDomains: Type.Optional(Type.Array(Type.String(), { description: 'Explicit public hostnames or *.subdomain patterns for session metadata. Note: does not restrict navigation — containerization handles containment.' })),
       waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 120000, description: 'Wait duration in milliseconds.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {

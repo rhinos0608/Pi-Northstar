@@ -4,6 +4,11 @@
 
 Accepted — 2026-07-16
 
+**Superseded sections noted inline below.** Domain allowlisting and DNS-based hostname
+blocking were intentionally removed in commits a0fad0e and 04f373d, making the
+strict navigation and containment sections below not currently enforced. SSRF protection
+is delegated to external containerization per [README](../../README.md).
+
 ## Context
 
 Pi-Atlas exposes one public `browser` tool through `src/index.ts`. `src/browser-tools.ts` maps 13 actions to custom CDP primitives in `src/cdp.ts`. That same CDP module also implements loopback cookie import and headed provider login. Browser automation and authentication setup therefore share code but have different security and lifecycle requirements.
@@ -43,11 +48,33 @@ Do not expose raw agent-browser CLI arguments, MCP tools, plugins, providers, da
 
 ### Navigation and sessions
 
-`navigate` continues accepting public HTTP(S) URLs only. Reject credentials, localhost, private/reserved IPv4 and IPv6, mapped IPv6, metadata endpoints, and DNS results containing private addresses.
+`navigate` continues accepting public HTTP(S) URLs only. Does not reject
+localhost, private/reserved IP ranges, or metadata endpoints — those checks
+were intentionally removed (commits a0fad0e, 04f373d).
 
-Add optional `allowedDomains: string[]`. Default is exact navigation hostname. Each entry must be a normalized public hostname or `*.` subdomain pattern whose current DNS answers are public. Allowed-domain set is fixed at owned-session launch; sorted set hashes into session key. Non-allowlisted navigation, redirects, subresources, WebSocket/EventSource, sendBeacon, workers, and WebRTC fail closed through agent-browser containment. Caller must explicitly add required CDN/IdP domains; blocked-domain errors are actionable and never auto-widen policy.
+~~Add optional `allowedDomains: string[]`. Default is exact navigation
+hostname. Each entry must be a normalized public hostname or `*.` subdomain
+pattern whose current DNS answers are public. Allowed-domain set is fixed at
+owned-session launch; sorted set hashes into session key. Non-allowlisted
+navigation, redirects, subresources, WebSocket/EventSource, sendBeacon,
+workers, and WebRTC fail closed through agent-browser containment. Caller
+must explicitly add required CDN/IdP domains; blocked-domain errors are
+actionable and never auto-widen policy.~~
 
-DNS preflight is defense in depth, not complete DNS-rebinding containment: agent-browser/Chromium resolves independently after validation. High-assurance deployments require OS/container egress policy denying private/reserved networks. ADR approval accepts this residual risk; tests must include DNS-change simulation where controllable and label live rebinding checks unverified when not enforceable.
+**SUPERSEDED:** Domain allowlisting is not currently enforced. The
+`allowedDomains` parameter is accepted but ignored; `checkDomainAllowed` and
+`validateAllowedDomainsDns` are no-ops that always return true. SSRF protection
+is delegated to external containerization.
+
+~~DNS preflight is defense in depth, not complete DNS-rebinding containment:
+agent-browser/Chromium resolves independently after validation. High-assurance
+deployments require OS/container egress policy denying private/reserved
+networks. ADR approval accepts this residual risk; tests must include DNS-change
+simulation where controllable and label live rebinding checks unverified when
+not enforceable.~~
+
+**SUPERSEDED:** DNS preflight (`dnsPreflight`) is now a no-op. See commits
+a0fad0e and 04f373d.
 
 When `endpoint` is present, call routes only to legacy loopback CDP during rollback release; it never configures agent-browser. Remote or LAN CDP stays forbidden. External CDP attach lacks owned-session subresource containment. `endpoint` and legacy backend are removed no earlier than release `0.2.0`, after one full release burn-in; project maintainer owns removal.
 
