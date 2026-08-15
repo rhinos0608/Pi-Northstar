@@ -347,7 +347,7 @@ Resolution order: `BROWSER_EXECUTABLE_PATH` if set (exact path, no fallback) →
 | `cookies` | `urls?: string[]` | Read cookie metadata (values never exposed) |
 | `set_cookies` | `cookies: Array<...>` | Set cookies (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
 | `evaluate` | `expression: string` | Run JavaScript in page context (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
-| `semanticAction` | `{ action, locator, value, ... }` | Click/fill/check/select with role/text/label locators |
+| `semanticAction` | `{ verb, locator, query, value, ... }` | Click/fill/check/select with role/text/label locators |
 | `job` | `{ steps: [...] }` | Multi-step orchestration with per-step reliability |
 | `batch` | `commands: string[][]` | Raw multi-command batching (requires sensitive flag) |
 
@@ -361,7 +361,7 @@ browser({ action: "snapshot" })
 browser({ action: "click", selector: "@e2" })
 
 # Semantic action — click by role/name
-browser({ semanticAction: { action: "click", locator: "role", role: "button", value: "Submit" } })
+browser({ semanticAction: { verb: "click", locator: "role", query: "button", value: "Submit" } })
 
 # Multi-step job with reliability
 browser({ job: { steps: [
@@ -485,12 +485,12 @@ Mutations (click, type, scroll) require a fresh `stateId` from the most recent `
 - Optional via `includeScreenshot: true` in `observe_window`
 - Returns as inline base64 image content
 - **Sensitive**: closes all apps before enabling; PII/credentials can leak
-- Returns PNG with window content, resolution capped at 2048×2048 pixels
+- Returns PNG with window content, resolution capped at 10 000×10 000 pixels (desktop screenshot via Cua Driver). Browser (`screen‑shot`) screenshots are capped at 8 000×8 000 pixels (configured in agent-browser adapter).
 
 ### Observations
 
 - AX (Accessibility) tree is AX-only by default; includes element names, roles, values, but not visual pixel data
-- Tree depth capped at 50 levels; node count capped at 5000
+- Tree depth capped at 32 levels; node count capped at 1 000
 - Redacts sensitive fields: passwords, tokens, secrets, paths
 - Screenshot bytes capped at 10 MB (prevents large binaries)
 
