@@ -17,6 +17,7 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
+    "noEmit": true,
     "skipLibCheck": true
   },
   "include": [

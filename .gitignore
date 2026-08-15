@@ -19,3 +19,4 @@ __pycache__/
 **/.pi-smartread.tags.cache/
 **/.smart-edit-undo/
 .pi-subagents/artifacts/
+.subagents/
