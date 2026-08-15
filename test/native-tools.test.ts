@@ -387,7 +387,9 @@ test('followLinks crawl visits same-domain pages and skips external', async () =
   try {
     const result = await callNativeTool('fetch', {
       url: baseUrl + '/',
-      query: 'about contact',
+      // 'about' is a BM25 stopword, so BM25-only mode would drop the about
+      // page entirely. Use non-stopword terms present on all three pages.
+      query: 'page contact',
       followLinks: true,
       maxPages: 10,
     });
