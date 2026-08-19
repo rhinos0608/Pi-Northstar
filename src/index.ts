@@ -9,6 +9,8 @@ import { loadSearchMcpEnvironment } from './local-config.js';
 import { PROVIDER_DESCRIPTORS } from './providers.js';
 import { guardText } from './tool-output.js';
 import { DesktopService } from './desktop-tools.js';
+import { DESKTOP_ACTIONS } from './desktop-contract.js';
+import { BROWSER_ACTIONS } from './browser-policy.js';
 import { closeBrowserSession } from './browser-tools.js';
 
 const searchCategoryNames = [
@@ -66,7 +68,6 @@ export default function (pi: ExtensionAPI): void {
     name: 'web_search',
     label: 'Web Search',
     description: 'Search the public web for current sources and citations, or academic/public-data/community sources via research category.',
-    promptSnippet: 'Search the web or academic/public-data/community sources for current evidence.',
     promptGuidelines: [
       'Use web_search when broad source discovery is needed before deeper retrieval.',
       'Use category "research" for academic literature and public-data sources (arXiv, Semantic Scholar, PubMed, Wikipedia, Hacker News, Stack Overflow, ...); source/yearFrom apply only there.',
@@ -87,9 +88,8 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus. Needs a url — compose with web_search first to discover candidate URLs, then call fetch with query for semantically packed results. Prefer query over fetching full pages: query returns only relevant passages, full-page fetches overload context. Omit query only when you need the complete readable text of a single URL. Use followLinks with a url and query to crawl a site by following same-domain links.',
+    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus.',
     promptSnippet: 'Fetch URL content — compose with web_search first to get URLs, then call fetch with query for semantic chunks. Prefer query over full-page fetches. Use followLinks to crawl interlinked pages on the same domain.',
-    promptGuidelines: ['Always compose fetch with web_search first — web_search discovers candidate URLs, fetch retrieves their content.', 'Prefer fetch with query for semantically packed results; only omit query when you need the complete readable text of a single URL.', 'Full-page fetches overload context — use query mode by default.', 'Use followLinks with url and query to crawl a site by following same-domain links (requires both url and query).'],
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: 'Retrieval query. Omit to get the readable text of url instead of semantic chunks.' })),
       url: Type.Optional(Type.String({ description: 'Specific URL to crawl/fetch. Required when query is omitted.' })),
@@ -108,9 +108,22 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'desktop', label: 'Desktop',
     description: 'Bounded native desktop observation and interaction through manually installed Cua Driver. Disabled by default; security is external.',
-    promptSnippet: 'Use desktop only after explicit opt-in; observe target window before mutations.',
     promptGuidelines: ['Desktop disabled unless PI_SEARCH_DESKTOP_AUTOMATION=1.', 'AX trees and screenshots may expose PII or credentials.', 'Mutations require fresh stateId and are never retried after dispatch.'],
-    parameters: Type.Object({ action: Type.Optional(Type.String()), pid: Type.Optional(Type.Number()), windowId: Type.Optional(Type.String()), stateId: Type.Optional(Type.String()), includeScreenshot: Type.Optional(Type.Boolean()), predicate: Type.Optional(Type.Object({ text: Type.Optional(Type.String()), role: Type.Optional(Type.String()) })), text: Type.Optional(Type.String()), key: Type.Optional(Type.String()), x: Type.Optional(Type.Number()), y: Type.Optional(Type.Number()), deltaX: Type.Optional(Type.Number()), deltaY: Type.Optional(Type.Number()), timeoutMs: Type.Optional(Type.Number()) }),
+    parameters: Type.Object({
+      action: Type.Optional(StringEnum(DESKTOP_ACTIONS, { description: 'Desktop action to perform.' })),
+      pid: Type.Optional(Type.Number({ description: 'Target process ID.' })),
+      windowId: Type.Optional(Type.String({ description: 'Target window identifier.' })),
+      stateId: Type.Optional(Type.String()),
+      includeScreenshot: Type.Optional(Type.Boolean()),
+      predicate: Type.Optional(Type.Object({ text: Type.Optional(Type.String()), role: Type.Optional(Type.String()) })),
+      text: Type.Optional(Type.String({ description: 'Text to type or match.' })),
+      key: Type.Optional(Type.String({ description: 'Key to press.' })),
+      x: Type.Optional(Type.Number({ description: 'X coordinate.' })),
+      y: Type.Optional(Type.Number({ description: 'Y coordinate.' })),
+      deltaX: Type.Optional(Type.Number()),
+      deltaY: Type.Optional(Type.Number()),
+      timeoutMs: Type.Optional(Type.Number()),
+    }),
     async execute(_toolCallId, params, signal) { return await desktop.execute(params as Record<string, unknown>, signal) as never; },
   });
 }
@@ -194,7 +207,6 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     name: 'social',
     label: 'Social',
     description: 'Read and search social/community platforms using native public APIs or ordered external backends.',
-    promptSnippet: 'Search/read Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram.',
     promptGuidelines: [
       'Use social for platform-specific public discussion research.',
       'For login-backed platforms, tell users they can run /reach-status first; V2EX is zero-config native.',
@@ -202,7 +214,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     ],
     parameters: Type.Object({
       platform: Type.Optional(StringEnum(socialPlatforms)),
-      action: Type.Optional(Type.String({ description: 'Platform action, e.g. search, read, user, user_posts, feed, hot, popular, subreddit, node, topic, replies, comments.' })),
+      action: Type.Optional(Type.String()),
       query: Type.Optional(Type.String()),
       url: Type.Optional(Type.String()),
       id: Type.Optional(Type.String()),
@@ -222,7 +234,6 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     name: 'media',
     label: 'Media',
     description: 'Video platforms (YouTube/Bilibili) metadata, search, subtitles + RSS/Atom feed reading.',
-    promptSnippet: 'Search YouTube/Bilibili, get video metadata, fetch subtitles, or read RSS/Atom feeds.',
     promptGuidelines: [
       'Use media to search YouTube or Bilibili, get video details, or fetch subtitles.',
       'For Bilibili, do not use yt-dlp; it uses bili-cli or OpenCLI backends.',
@@ -230,7 +241,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     ],
     parameters: Type.Object({
       platform: Type.Optional(StringEnum(['youtube','bilibili','rss'] as const)),
-      action: Type.Optional(Type.String({ description: 'search, details, transcript, hot, video, subtitle for video platforms; feed to read an RSS/Atom feed.' })),
+      action: Type.Optional(StringEnum(['search','details','transcript','hot','video','subtitle','feed'] as const)),
       query: Type.Optional(Type.String()),
       url: Type.Optional(Type.String({ description: 'Video URL, or the RSS/Atom feed URL for the feed action (required for feed).' })),
       id: Type.Optional(Type.String()),
@@ -246,7 +257,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'browser',
     label: 'Browser',
-    description: 'Closed browser automation via agent-browser: navigate, snapshot, fill, wait, get URL/title, screenshot, click, type, scroll, tabs, metadata-only cookies. Explicit cdp rollback supported.',
+    description: 'Closed browser automation via agent-browser. Explicit cdp rollback supported.',
     promptSnippet: 'Control a browser via CDP for live page interaction, screenshots, and cookie extraction.',
     promptGuidelines: [
       'Uses agent-browser backend by default; set PI_SEARCH_BROWSER_BACKEND=cdp for explicit loopback CDP rollback.',
@@ -255,7 +266,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'cookies returns metadata only (values never exposed).',
     ],
     parameters: Type.Object({
-      action: Type.Optional(Type.String({ description: 'Action: status, tabs, navigate, evaluate, text, html, screenshot, click, type, scroll, close, cookies, set_cookies, snapshot, fill, wait, get_url, get_title.' })),
+      action: Type.Optional(StringEnum(BROWSER_ACTIONS)),
       endpoint: Type.Optional(Type.String({ description: 'CDP WebSocket endpoint URL. Falls back to BROWSER_CDP_ENDPOINT env.' })),
       url: Type.Optional(Type.String({ description: 'URL for navigate action.' })),
       expression: Type.Optional(Type.String({ description: 'JavaScript expression for evaluate action.' })),

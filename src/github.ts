@@ -20,21 +20,9 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
     label: 'GitHub',
     description:
       'Work with GitHub repositories, files, directory trees, code search, trending repos, ' +
-      'and semantic code search. Choose the `action` field to select what to do: ' +
-      '`repo` for metadata + README, `file` for reading a known file, `list_dir` for listing a ' +
-      'directory, `tree` for full tree listing, ' +
-      '`search` for GitHub code search (routes to semantic code search when repo is specified), ' +
-      '`trending` for trending repos (no auth needed), ' +
-      'and `code_search` for AST-aware semantic code retrieval using embeddings and tree-sitter.',
+      'and semantic code search.',
     promptSnippet:
       'Query or explore GitHub repositories, files, and codebases with optional semantic ranking.',
-    promptGuidelines: [
-      'Use github with action=repo to understand what a repository is about.',
-      'Use action=file or action=list_dir to read specific files or browse directories.',
-      'Use action=search to find code across GitHub or within a specific repo.',
-      'Use action=code_search for deep semantic code search within a repository (requires EMBEDDING_SIDECAR_BASE_URL).',
-      'Use action=trending to discover currently popular repositories.',
-    ],
     parameters: Type.Object({
       action: StringEnum(githubActions, {
         description:
@@ -46,7 +34,7 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
         description: 'GitHub username or organisation.',
       })),
       repo: Type.Optional(Type.String({
-        description: 'Repository name (owner/repo form also accepted for code_search).',
+        description: 'Repository name (owner/repo form also accepted for code_search). Set repo with action=search to route to semantic code search.'
       })),
       repository: Type.Optional(Type.String({
         description:
@@ -66,19 +54,19 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
 
       // -- file: raw content options --
       raw: Type.Optional(Type.Boolean({
-        description: 'true = decoded UTF-8 text (default); false = base64.',
+        description: 'true = decoded UTF-8 text (default); false = base64. offset/byteOffset/byteLimit apply only when raw=true.',
       })),
       offset: Type.Optional(Type.Number({
-        description: 'Line offset (0-based). Requires raw=true.',
+        description: 'Line offset (0-based).',
       })),
       limit: Type.Optional(Type.Number({
         description: 'Maximum lines to return (file) or max items (tree/list_dir).',
       })),
       byteOffset: Type.Optional(Type.Number({
-        description: 'Byte offset (0-based) via Range header. Requires raw=true.',
+        description: 'Byte offset (0-based) via Range header.',
       })),
       byteLimit: Type.Optional(Type.Number({
-        description: 'Maximum bytes via Range header. Requires raw=true.',
+        description: 'Maximum bytes via Range header.',
       })),
 
       // -- tree --
@@ -109,7 +97,7 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
 
       // -- code_search --
       ref: Type.Optional(Type.String({
-        description: 'Git ref, branch, tag, or commit SHA.',
+        description: 'Git ref (branch, tag, or commit SHA).',
       })),
       maxFiles: Type.Optional(Type.Number({
         description: 'Max files to collect (1-500, default 100).',
