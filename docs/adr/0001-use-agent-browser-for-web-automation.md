@@ -4,14 +4,15 @@
 
 Accepted — 2026-07-16
 
-**Superseded sections noted inline below.** Domain allowlisting and DNS-based hostname
-blocking were intentionally removed in commits a0fad0e and 04f373d, making the
-strict navigation and containment sections below not currently enforced. SSRF protection
-is delegated to external containerization per [README](../../README.md).
+**Superseded sections noted inline below.** The prior removal of application URL/DNS
+controls is superseded by [ADR 0003](0003-restore-application-ssrf-guards.md).
+Scope A restores defense-in-depth blocking for user-controlled public fetch/browser URLs;
+configured local services remain operator-owned, and container egress remains the outer boundary.
+This does not claim complete SSRF containment.
 
 ## Context
 
-Pi-Atlas exposes one public `browser` tool through `src/index.ts`. `src/browser-tools.ts` maps 13 actions to custom CDP primitives in `src/cdp.ts`. That same CDP module also implements loopback cookie import and headed provider login. Browser automation and authentication setup therefore share code but have different security and lifecycle requirements.
+Pi-Northstar exposes one public `browser` tool through `src/index.ts`. `src/browser-tools.ts` maps 13 actions to custom CDP primitives in `src/cdp.ts`. That same CDP module also implements loopback cookie import and headed provider login. Browser automation and authentication setup therefore share code but have different security and lifecycle requirements.
 
 `agent-browser@0.32.0` is available from npm, licensed Apache-2.0, and requires Node.js 24 or newer. Its package postinstall downloads a platform-specific native binary. It provides session-isolated browser automation, accessibility snapshots and refs, structured JSON output, action policies, domain controls, and daemon lifecycle management.
 
@@ -19,7 +20,7 @@ Research references:
 
 - `vercel-labs/agent-browser` package metadata, CLI source, JSON output, session, and security controls.
 - `openinterpreter/openinterpreter`, which delegates web computer use to agent-browser rather than maintaining another browser driver.
-- Existing Pi-Atlas browser, setup, cookie, output-guard, and contract tests.
+- Existing Pi-Northstar browser, setup, cookie, output-guard, and contract tests.
 
 ## Decision
 
@@ -61,10 +62,9 @@ workers, and WebRTC fail closed through agent-browser containment. Caller
 must explicitly add required CDN/IdP domains; blocked-domain errors are
 actionable and never auto-widen policy.~~
 
-**SUPERSEDED:** Domain allowlisting is not currently enforced. The
-`allowedDomains` parameter is accepted but ignored; `checkDomainAllowed` and
-`validateAllowedDomainsDns` are no-ops that always return true. SSRF protection
-is delegated to external containerization.
+**SUPERSEDED by ADR 0003:** Domain allowlisting is enforced for public browser sessions.
+Loopback access is a narrow exception only in the browser-tools-created adapter backed by
+LoopbackProxy.
 
 ~~DNS preflight is defense in depth, not complete DNS-rebinding containment:
 agent-browser/Chromium resolves independently after validation. High-assurance
@@ -73,8 +73,8 @@ networks. ADR approval accepts this residual risk; tests must include DNS-change
 simulation where controllable and label live rebinding checks unverified when
 not enforceable.~~
 
-**SUPERSEDED:** DNS preflight (`dnsPreflight`) is now a no-op. See commits
-a0fad0e and 04f373d.
+**SUPERSEDED by ADR 0003:** DNS preflight resolves through system DNS and rejects any
+private/reserved answer. DNS rebinding and Chromium DNS TOCTOU remain residual risks.
 
 When `endpoint` is present, call routes only to legacy loopback CDP during rollback release; it never configures agent-browser. Remote or LAN CDP stays forbidden. External CDP attach lacks owned-session subresource containment. `endpoint` and legacy backend are removed no earlier than release `0.2.0`, after one full release burn-in; project maintainer owns removal.
 

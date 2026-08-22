@@ -6,9 +6,9 @@ Accepted — 2026-07-16
 
 ## Context
 
-Pi-Atlas controls browser pages but has no native desktop automation. Desktop authority differs materially from browser authority: accessibility trees and screenshots expose workstation data; click/type/key actions can mutate arbitrary applications; macOS grants broad Accessibility and Screen Recording permissions to an application identity.
+Pi-Northstar controls browser pages but has no native desktop automation. Desktop authority differs materially from browser authority: accessibility trees and screenshots expose workstation data; click/type/key actions can mutate arbitrary applications; macOS grants broad Accessibility and Screen Recording permissions to an application identity.
 
-Cua Driver upstream reports native application inspection and background interaction across macOS, Windows, and Linux through MCP stdio, a daemon proxy, and one-shot CLI. Pi-Atlas support remains platform-specific and unverified until fixture E2E evidence exists. Upstream main and PyPI metadata currently identify `0.8.3`, while latest inspected GitHub release evidence identified prerelease `cua-driver-rs-v0.7.1`. Version `0.7.1` is approved as initial baseline; exact release artifact, checksum, signing, and runtime contract still require preflight evidence before authority-bearing execution.
+Cua Driver upstream reports native application inspection and background interaction across macOS, Windows, and Linux through MCP stdio, a daemon proxy, and one-shot CLI. Pi-Northstar support remains platform-specific and unverified until fixture E2E evidence exists. Upstream main and PyPI metadata currently identify `0.8.3`, while latest inspected GitHub release evidence identified prerelease `cua-driver-rs-v0.7.1`. Version `0.7.1` is approved as initial baseline; exact release artifact, checksum, signing, and runtime contract still require preflight evidence before authority-bearing execution.
 
 Reference projects inform design:
 
@@ -19,7 +19,7 @@ Reference projects inform design:
 
 Add one vendor-neutral public Pi tool named `desktop`. Keep `browser` dedicated to web automation.
 
-Use dedicated Cua Driver MCP stdio client. This is intentional exception to Pi-Atlas CLI-first preference because MCP preserves typed image content, connection-scoped state, and daemon-proxy behavior needed for macOS permission attribution.
+Use dedicated Cua Driver MCP stdio client. This is intentional exception to Pi-Northstar CLI-first preference because MCP preserves typed image content, connection-scoped state, and daemon-proxy behavior needed for macOS permission attribution.
 
 Do not reuse `SearchMcpClient`; its environment and error model are inappropriate for workstation authority.
 
@@ -84,7 +84,7 @@ User manually installs official signed driver/app. Release owner must select one
 - telemetry/update-check disablement;
 - harmless fixture E2E.
 
-Version `0.7.1` is approved as baseline, but live support remains **unverified** until artifact/runtime gate passes. Tasks after version preflight must stop if gate fails. Report separately what Pi-Atlas tested versus what upstream reports. `status` uses driver's permission-health tool rather than reading OS permission databases directly, reports Accessibility/Screen Recording state, and session shutdown warns when desktop was used that OS grants may remain; Pi cannot revoke them.
+Version `0.7.1` is approved as baseline, but live support remains **unverified** until artifact/runtime gate passes. Tasks after version preflight must stop if gate fails. Report separately what Pi-Northstar tested versus what upstream reports. `status` uses driver's permission-health tool rather than reading OS permission databases directly, reports Accessibility/Screen Recording state, and session shutdown warns when desktop was used that OS grants may remain; Pi cannot revoke them.
 
 ## Alternatives considered
 
@@ -92,7 +92,7 @@ Version `0.7.1` is approved as baseline, but live support remains **unverified**
 2. **Dynamic MCP tool passthrough** — rejected because upstream additions would silently gain workstation authority.
 3. **Depend on `pi-computer-use`** — rejected. Useful design reference, but bundled helpers, postinstall, separate browser stack, and broad tool surface conflict with bounded Cua integration.
 4. **Bundle or auto-install driver** — rejected due supply-chain, signing, TCC, and platform risk.
-5. **Instructions only** — rejected because Pi-Atlas needs typed, testable policy and lifecycle boundaries.
+5. **Instructions only** — rejected because Pi-Northstar needs typed, testable policy and lifecycle boundaries.
 
 ## Consequences
 

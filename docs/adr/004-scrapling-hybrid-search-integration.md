@@ -6,7 +6,7 @@ Proposed — 2026-07-16
 
 ## Context
 
-Pi-Atlas `fetch` tool (routed through `semanticCrawl` in `src/native-tools.ts`) is named "semantic_crawl" but uses zero semantic techniques. The tool has four critical gaps:
+Pi-Northstar `fetch` tool (routed through `semanticCrawl` in `src/native-tools.ts`) is named "semantic_crawl" but uses zero semantic techniques. The tool has four critical gaps:
 
 1. **No JS rendering** — `fetchReadablePage()` (line 547) uses plain `fetchText()`, returns empty content on SPA/JS-heavy sites. No stealth/anti-bot headers, no fingerprint spoofing, no Cloudflare bypass.
 2. **No real BM25** — `scoreText()` (line 591) is boolean term-inclusion count: `query.toLowerCase().split(/\W+/).filter(Boolean).reduce((score, term) => score + (lower.includes(term) ? 1 : 0), 0)`. This produces inflated scores for long documents containing terms anywhere, not BM25 with TF saturation and IDF weighting.
@@ -20,7 +20,7 @@ Existing architecture that works well and should be reused:
 
 The `.env.example` already has `EMBEDDING_SIDECAR_*` scaffolding (for external OpenAI embeddings), and `src/cli-backend.ts` already forwards these env vars to the CLI subprocess. `src/local-config.ts` maps `embeddingSidecar.*` config keys.
 
-Pi-Atlas has a minimal-dependency philosophy (5 npm deps: pi-ai, mcp-sdk, agent-browser, tsx, typebox). Any solution must respect this.
+Pi-Northstar has a minimal-dependency philosophy (5 npm deps: pi-ai, mcp-sdk, agent-browser, tsx, typebox). Any solution must respect this.
 
 ## Decision
 

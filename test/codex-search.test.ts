@@ -92,7 +92,7 @@ test('codex search posts fixed endpoint, bearer headers, query-only payload; out
     const headers = observedInit?.headers as Record<string, string>;
     assert.equal(headers.Authorization, 'Bearer tok-leak-me');
     assert.equal(headers['ChatGPT-Account-ID'], 'acct-9');
-    assert.equal(headers['User-Agent'], 'pi-atlas/0.3.0');
+    assert.equal(headers['User-Agent'], 'pi-northstar/0.3.0');
     const body = JSON.parse(String(observedInit?.body)) as Record<string, unknown>;
     assert.equal(body.model, 'gpt-4o');
     assert.deepEqual(body.commands, { search_query: [{ q: 'hello world' }] });

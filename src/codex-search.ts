@@ -25,7 +25,7 @@ import { fetchInit, safeResponseJson } from './http.js';
 
 export const CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search';
 const CODEX_MODEL = 'gpt-4o';
-const USER_AGENT = 'pi-atlas/0.3.0';
+const USER_AGENT = 'pi-northstar/0.3.0';
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 
 export interface CodexCredentials {

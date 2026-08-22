@@ -1,7 +1,7 @@
 # Browser-ops Parity Implementation Plan
 
 Companion to `research/gap-analysis.md`. That document defines *what* is missing relative to
-`pi-agent-browser-native`; this document defines *how* to build it inside Pi-Atlas's architecture:
+`pi-agent-browser-native`; this document defines *how* to build it inside Pi-Northstar's architecture:
 a single `browser` MCP tool (`src/index.ts`) → `browser()` router (`src/browser-tools.ts`) →
 `AgentBrowserAdapter` (`src/agent-browser.ts`) → process runner (`src/agent-browser-process.ts`)
 → `agent-browser` CLI v0.32.0 subprocess.

@@ -38,7 +38,7 @@ test('runCommand rejects unknown commands', async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(result.error, {
     code: 'unknown_command',
-    message: 'Usage: pi-atlas <status|config|call TOOL JSON_ARGS>',
+    message: 'Usage: pi-northstar <status|config|call TOOL JSON_ARGS>',
   });
 });
 
@@ -132,7 +132,7 @@ test('runCommand reach_setup status reports live env presence', async () => {
   assert.doesNotMatch(text, /exa_test_val/);
 
   // authDir present
-  assert.match(text, /\.pi-atlas/);
+  assert.match(text, /\.pi-northstar/);
 });
 
 test('runCommand reach_status includes auth metadata per channel', async () => {

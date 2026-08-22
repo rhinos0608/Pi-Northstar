@@ -14,7 +14,7 @@ export interface ProviderDescriptor {
   loginUrl?: string;
 }
 
-export const AUTH_DIR = '~/.pi-atlas';
+export const AUTH_DIR = '~/.pi-northstar';
 
 /**
  * Provider descriptors: what env keys each provider needs, cookie domains,

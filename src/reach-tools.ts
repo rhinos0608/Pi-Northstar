@@ -41,7 +41,7 @@ interface ChannelDefinition {
 const COMMAND_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_CHARS = 1_000_000;
 const SIGKILL_AFTER_MS = 5_000;
-const USER_AGENT = 'pi-atlas/0.1';
+const USER_AGENT = 'pi-northstar/0.1';
 
 // Fixed first-party hosts only. No user-configurable fallback hosts.
 const REDDIT_OAUTH_BASE = 'https://oauth.reddit.com';
@@ -710,7 +710,7 @@ async function v2ex(args: Record<string, unknown>, options: ReachToolOptions): P
 async function youtubeAction(action: string, args: Record<string, unknown>, options: ReachToolOptions): Promise<BackendCallResult> {
   const env = options.env ?? process.env;
   if (action === 'transcript' || action === 'subtitle') {
-    throw new Error(`YouTube ${action} is unavailable: Pi-Atlas does not scrape transcripts or use transcript services. `
+    throw new Error(`YouTube ${action} is unavailable: Pi-Northstar does not scrape transcripts or use transcript services. `
       + 'Set YOUTUBE_API_KEY for search, details, and hot.');
   }
   if (action === 'details') {
@@ -1384,7 +1384,7 @@ export function buildPlatformWebFallbackChildEnv(env: Record<string, string | un
   // reintroduce platform/API credentials, cookies, and proxy vars. Point at a
   // path that can never exist so the child's merged environment contains only
   // the allowlisted values above.
-  childEnv.PI_SEARCH_ENV_PATH = '/dev/null/pi-atlas-web-fallback-no-env';
+  childEnv.PI_SEARCH_ENV_PATH = '/dev/null/pi-northstar-web-fallback-no-env';
   return childEnv;
 }
 

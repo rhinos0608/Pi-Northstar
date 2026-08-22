@@ -1,5 +1,5 @@
 {
-  "name": "pi-atlas",
+  "name": "pi-northstar",
   "version": "0.3.0",
   "description": "Pi extension — web search, fetch, GitHub, social, media, browser, and desktop tools with multi-provider search, academic research, and agent-browser automation.",
   "type": "module",
@@ -8,7 +8,7 @@
     "node": ">=24.0.0"
   },
   "bin": {
-    "pi-atlas": "./bin/pi-atlas.mjs"
+    "pi-northstar": "./bin/pi-northstar.mjs"
   },
   "files": [
     "bin/",
