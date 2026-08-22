@@ -14,6 +14,8 @@ export interface AgentBrowserProcessOptions {
   env?: Record<string, string | undefined>;
   signal?: AbortSignal;
   allowedDomains?: string[];
+  loopbackProxyUrl?: string;
+  loopbackProxyBypass?: string;
 }
 
 export interface AgentBrowserResult {
@@ -357,6 +359,12 @@ export async function runCommand(
   if (options.allowedDomains && options.allowedDomains.length > 0) {
     extraVars.AGENT_BROWSER_ALLOWED_DOMAINS = options.allowedDomains.join(',');
   }
+  if (options.loopbackProxyUrl) {
+    extraVars.AGENT_BROWSER_PROXY = options.loopbackProxyUrl;
+    // `<-loopback>` ensures no real hostname matches, routing all traffic
+    // (including localhost) through the enforcing proxy.
+    extraVars.AGENT_BROWSER_PROXY_BYPASS = options.loopbackProxyBypass ?? '<-loopback>';
+  }
   const sandboxEnv = buildSandboxEnvironment(options.env ?? process.env, session, extraVars);
 
   return new Promise((resolve) => {
@@ -454,6 +462,10 @@ export async function runBatchStdin(
   if (options.allowedDomains && options.allowedDomains.length > 0) {
     extraVars.AGENT_BROWSER_ALLOWED_DOMAINS = options.allowedDomains.join(',');
   }
+  if (options.loopbackProxyUrl) {
+    extraVars.AGENT_BROWSER_PROXY = options.loopbackProxyUrl;
+    extraVars.AGENT_BROWSER_PROXY_BYPASS = options.loopbackProxyBypass ?? '<-loopback>';
+  }
   const sandboxEnv = buildSandboxEnvironment(options.env ?? process.env, session, extraVars);
 
   const batchCommands = commands.map(cmd => cmd.args);
@@ -543,6 +555,10 @@ export async function runScreenshot(
   const extraVars: Record<string, string> = {};
   if (options.allowedDomains && options.allowedDomains.length > 0) {
     extraVars.AGENT_BROWSER_ALLOWED_DOMAINS = options.allowedDomains.join(',');
+  }
+  if (options.loopbackProxyUrl) {
+    extraVars.AGENT_BROWSER_PROXY = options.loopbackProxyUrl;
+    extraVars.AGENT_BROWSER_PROXY_BYPASS = options.loopbackProxyBypass ?? '<-loopback>';
   }
   const sandboxEnv = buildSandboxEnvironment(options.env ?? process.env, session, extraVars);
 

@@ -16,3 +16,32 @@ test('output parser accepts JSON envelopes and ignores diagnostics', () => {
 });
 
 test('namespace is unique-shaped', () => assert.match(generateNamespace(), /^pi-/));
+
+test('sandbox environment includes proxy vars when loopback active', () => {
+  const env = buildSandboxEnvironment(
+    { PATH: '/bin' },
+    { runtimeRoot: '/tmp/pi', namespace: 'ns1' },
+    { AGENT_BROWSER_PROXY: 'http://127.0.0.1:9999', AGENT_BROWSER_PROXY_BYPASS: '<-loopback>' },
+  );
+  assert.equal(env.AGENT_BROWSER_PROXY, 'http://127.0.0.1:9999');
+  assert.equal(env.AGENT_BROWSER_PROXY_BYPASS, '<-loopback>');
+});
+
+test('sandbox environment does not include proxy vars in normal mode', () => {
+  const env = buildSandboxEnvironment(
+    { PATH: '/bin' },
+    { runtimeRoot: '/tmp/pi', namespace: 'ns1' },
+  );
+  assert.equal(env.AGENT_BROWSER_PROXY, undefined);
+  assert.equal(env.AGENT_BROWSER_PROXY_BYPASS, undefined);
+});
+
+test('hostile parent proxy vars are overridden by adapter-controlled values', () => {
+  const env = buildSandboxEnvironment(
+    { PATH: '/bin', AGENT_BROWSER_PROXY: 'http://evil.com:8080', HTTP_PROXY: 'http://evil.com:8080' },
+    { runtimeRoot: '/tmp/pi', namespace: 'ns1' },
+    { AGENT_BROWSER_PROXY: 'http://127.0.0.1:9999', AGENT_BROWSER_PROXY_BYPASS: '<-loopback>' },
+  );
+  assert.equal(env.AGENT_BROWSER_PROXY, 'http://127.0.0.1:9999');
+  assert.equal(env.AGENT_BROWSER_PROXY_BYPASS, '<-loopback>');
+});

@@ -20,6 +20,8 @@ import { textResult as guardedTextResult } from './tool-output.js'
 import { AgentBrowserAdapter } from './agent-browser.js'
 import { resolveAgentBrowserExecutable } from './agent-browser-process.js'
 import { extractCookieMetadata, isSensitiveAction, validateLegacyLoopbackEndpoint } from './browser-policy.js'
+import { parseLoopbackDebugTarget, type LoopbackDebugPolicy } from './loopback-debug-policy.js'
+import { LoopbackProxy } from './loopback-proxy.js'
 
 export type BrowserAction = 'status' | 'tabs' | 'navigate' | 'evaluate' | 'text' | 'html' | 'screenshot' | 'click' | 'type' | 'scroll' | 'close' | 'cookies' | 'set_cookies'
 
@@ -37,8 +39,18 @@ export function resolveBrowserBackend(env?: Record<string, string | undefined>):
 
 let _adapter: AgentBrowserAdapter | null = null
 let _adapterInit: Promise<AgentBrowserAdapter> | null = null
+let _loopbackPolicy: LoopbackDebugPolicy | null = null
+let _loopbackProxy: LoopbackProxy | null = null
+
+// Guards fresh loopback entry to prevent concurrent transitions
+let _transitionBusy = false
 
 async function getAdapter(env?: Record<string, string | undefined>): Promise<AgentBrowserAdapter> {
+  if (_loopbackPolicy) {
+    // Loopback mode active — never create a normal adapter that could overwrite the confined one
+    if (_adapter) return _adapter
+    throw new Error('Loopback mode active but no adapter available. Wait for loopback transition to complete.')
+  }
   if (_adapter) return _adapter
   if (_adapterInit) return _adapterInit
   _adapterInit = (async () => {
@@ -50,12 +62,23 @@ async function getAdapter(env?: Record<string, string | undefined>): Promise<Age
   return _adapterInit
 }
 
-export async function closeBrowserSession(): Promise<void> {
+async function disposeCurrentAdapter(): Promise<void> {
   if (_adapter) {
     const a = _adapter
     _adapter = null
+    _adapterInit = null
+    _loopbackPolicy = null
     await a.close()
   }
+  if (_loopbackProxy) {
+    const p = _loopbackProxy
+    _loopbackProxy = null
+    await p.close()
+  }
+}
+
+export async function closeBrowserSession(): Promise<void> {
+  await disposeCurrentAdapter()
 }
 
 // ── CDP endpoint ──
@@ -95,6 +118,91 @@ async function agentBrowserRoute(
   options: { signal?: AbortSignal; env?: Record<string, string | undefined> },
 ): Promise<BackendCallResult> {
   const env = options.env ?? process.env
+  const action = typeof args.action === 'string' ? args.action : ''
+  const url = typeof args.url === 'string' ? args.url.trim() : ''
+
+  // Reject credentialed URLs — prevents bypass of loopback detection
+  if (url.includes('@')) {
+    return textResult({
+      error: 'URLs with credentials (user:pass@host) are not allowed. Remove userinfo from the URL.',
+      failureCategory: 'domain-blocked',
+    })
+  }
+
+  // Detect loopback navigate: parse target, start proxy if needed
+  if (action === 'navigate' && url) {
+    const policy = parseLoopbackDebugTarget(url)
+    if (policy) {
+      // Loopback navigate requested
+      if (_loopbackPolicy && _adapter) {
+        // Already in loopback mode — check same origin
+        if (_loopbackPolicy.origin !== policy.origin) {
+          return textResult({
+            error: `Different loopback origin rejected. Close confined session before navigating elsewhere. Current: ${_loopbackPolicy.origin}, requested: ${policy.origin}`,
+            failureCategory: 'domain-blocked',
+          })
+        }
+        // Same origin — reuse adapter, navigate
+        return _adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+      }
+
+      // Fresh loopback entry: guarded via boolean flag to prevent concurrent transitions
+      if (_transitionBusy) {
+        return textResult({ error: 'Loopback transition already in progress', failureCategory: 'domain-blocked' })
+      }
+      _transitionBusy = true;
+      try {
+        await disposeCurrentAdapter()
+        const proxy = new LoopbackProxy(policy)
+        let proxyUrl: string;
+        try {
+          proxyUrl = await proxy.start()
+        } catch (err) {
+          await proxy.close();
+          return textResult({ ok: false, error: `Failed to start loopback proxy: ${err instanceof Error ? err.message : String(err)}`, failureCategory: 'domain-blocked' });
+        }
+        _loopbackProxy = proxy
+        _loopbackPolicy = policy
+
+        try {
+          const executablePath = await resolveAgentBrowserExecutable(env?.BROWSER_EXECUTABLE_PATH)
+          const freshAdapter = new AgentBrowserAdapter({
+            env,
+            executablePath,
+            loopbackMode: {
+              proxyUrl,
+              origin: policy.origin,
+            },
+          })
+          _adapter = freshAdapter
+
+          // Execute navigate (adapter will send open + navigate via confined process)
+          return freshAdapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+        } catch (err) {
+          // Cleanup: proxy started but adapter/execute failed
+          _loopbackProxy = null;
+          _loopbackPolicy = null;
+          await proxy.close();
+          return textResult({ ok: false, error: `Loopback adapter failed: ${err instanceof Error ? err.message : String(err)}`, failureCategory: 'domain-blocked' });
+        }
+      } finally {
+        _transitionBusy = false;
+      }
+    }
+  }
+
+  // Close action: clean up loopback state + adapter
+  if (action === 'close') {
+    await disposeCurrentAdapter()
+    return textResult('Browser session closed')
+  }
+
+  // Non-navigate action: if in loopback mode, validate the adapter is loopback
+  if (_loopbackPolicy && _adapter) {
+    // Loopback mode active — all actions go through the confined adapter
+    return _adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+  }
+
   const adapter = await getAdapter(env)
   return adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
 }
@@ -126,6 +234,18 @@ async function legacyCdpBrowser(
       backend: 'cdp',
       websocketAvailable: typeof globalThis.WebSocket === 'function',
     })
+  }
+
+  // CDP loopback fail-closed: loopback navigate under CDP backend is unsupported
+  const cdpUrl = typeof args.url === 'string' ? args.url.trim() : ''
+  if (action === 'navigate' && cdpUrl) {
+    const policy = parseLoopbackDebugTarget(cdpUrl)
+    if (policy) {
+      return textResult({
+        error: `Loopback navigate under CDP backend is unsupported. Use the default agent-browser backend for loopback confinement.`,
+        failureCategory: 'domain-blocked',
+      })
+    }
   }
 
 
@@ -200,5 +320,9 @@ function requireString(value: unknown, name: string): string {
 
 function textResult(data: unknown): BackendCallResult {
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2) ?? String(data)
-  return guardedTextResult(text, data)
+  const result = guardedTextResult(text, data)
+  if (typeof data === 'object' && data !== null && 'failureCategory' in data) {
+    return { ...result, failureCategory: (data as Record<string, unknown>).failureCategory }
+  }
+  return result
 }

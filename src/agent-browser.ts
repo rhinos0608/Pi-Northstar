@@ -1,6 +1,7 @@
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type { BackendCallResult } from './backend.js';
 import type { BrowserRequest } from './browser-policy.js';
+import { parseLoopbackDebugTarget } from './loopback-debug-policy.js';
 import { enrichResult } from './browser-result.js';
 import { type ViewportPosition, READ_VIEWPORT_EXPR, isScrollNoop } from './scroll-verification.js';
 import { type OverlaySignature, OVERLAY_SIGNATURE_EXPR, detectOverlayAppearance } from './overlay-detection.js';
@@ -60,6 +61,11 @@ export interface AgentBrowserAdapterOptions {
   runtimeRoot?: string;
   env?: Record<string, string | undefined> | undefined;
   signal?: AbortSignal;
+  loopbackMode?: {
+    proxyUrl: string;
+    proxyBypass?: string;
+    origin: string;
+  };
 }
 
 export interface AgentBrowserStatus {
@@ -83,9 +89,12 @@ export class AgentBrowserAdapter {
   private _closed = false;
   private _sessionStarted = false;
   private readonly pageState = new SessionPageStateStore();
+  /** Immutable loopback mode, if active. */
+  readonly loopbackMode?: AgentBrowserAdapterOptions['loopbackMode'];
 
   constructor(options: AgentBrowserAdapterOptions = {}) {
     this.executablePath = options.executablePath;
+    this.loopbackMode = options.loopbackMode;
     this.session = {
       runtimeRoot: options.runtimeRoot ?? '',
       namespace: '',
@@ -264,6 +273,13 @@ export class AgentBrowserAdapter {
     if (this.session.runtimeRoot) merged.runtimeRoot = this.session.runtimeRoot;
     if (this.session.namespace) merged.namespace = this.session.namespace;
     if (this.allowedDomains.length > 0) merged.allowedDomains = this.allowedDomains;
+    // Pass loopback confinement env to every command when active
+    if (this.loopbackMode) {
+      merged.loopbackProxyUrl = this.loopbackMode.proxyUrl;
+      if (this.loopbackMode.proxyBypass) {
+        merged.loopbackProxyBypass = this.loopbackMode.proxyBypass;
+      }
+    }
     return merged;
   }
 
@@ -278,6 +294,29 @@ export class AgentBrowserAdapter {
       return jsonTextResult(result.success ? { ok: true, message: 'Browser launched' } : { ok: false, error: result.error });
     }
 
+    // ── Loopback adapter: narrow exception path ──
+    if (this.loopbackMode) {
+      const loopbackPolicy = parseLoopbackDebugTarget(request.url);
+      if (!loopbackPolicy) {
+        return jsonTextResult({ ok: false, error: `Loopback adapter rejected non-loopback URL: ${request.url}` });
+      }
+      if (loopbackPolicy.origin !== this.loopbackMode.origin) {
+        return jsonTextResult({ ok: false, error: `Different loopback origin rejected. Expected: ${this.loopbackMode.origin}, got: ${loopbackPolicy.origin}` });
+      }
+      // Skip public hostname/DNS check — proxy enforces containment
+      // Keep exact hostname in allowedDomains so vendor containment remains active.
+      // This narrow loopback exception bypasses public domain validation only here.
+      if (!this.domainsFrozen) {
+        this.allowedDomains = [loopbackPolicy.hostname];
+        this.domainsFrozen = true;
+      }
+      await this.ensureSession(options);
+      const merged = this.mergeOptions(options);
+      const result = await runCommand(['open', loopbackPolicy.navigationUrl], merged);
+      return jsonTextResult(result.success ? { ok: true, url: loopbackPolicy.navigationUrl } : { ok: false, error: result.error });
+    }
+
+    // ── Public adapter: SSRF defense-in-depth ──
     const url = validateNavigationUrl(request.url);
     const hostname = new URL(url).hostname.toLowerCase();
 
