@@ -1,16 +1,20 @@
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 
+import { assertPublicHostname } from './network-policy.js';
+
 /**
- * Validate a URL is HTTP or HTTPS.
+ * Validate a URL is HTTP or HTTPS with a public hostname.
  *
- * Does NOT block private/reserved IP ranges. SSRF protection is provided by
- * external network containerization; do not rely on this function alone if
- * running outside a container.
+ * Rejects private/reserved IP ranges, localhost, metadata, and Docker hostnames.
+ * Defense-in-depth: does not cover DNS rebinding, redirects, or Chromium DNS TOCTOU.
+ * Container egress is the authoritative outer boundary.
  */
 export function validateHttpUrl(raw: string): string {
   const url = new URL(raw.trim());
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Disallowed URL scheme: ${url.protocol}`);
+  if (url.username || url.password) throw new Error(`URL credentials are not allowed: ${url.href}`);
+  assertPublicHostname(url.hostname);
   return url.href;
 }
 

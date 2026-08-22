@@ -3,6 +3,8 @@
 // ── Action union ──
 
 import { validateJobRequest } from './browser-job.js';
+import { parseLoopbackDebugTarget } from './loopback-debug-policy.js';
+import { assertPublicHostname, resolvePublicHostname, type DnsLookup } from './network-policy.js';
 
 export type BrowserAction =
   | 'status'
@@ -84,11 +86,6 @@ export function extractCookieMetadata(cookies: CookieLike[]): CookieMetadata[] {
 
 export interface NavigationPolicy {
   url: string;
-  /**
-   * NOTE: Currently non-functional. Domain allowlisting was intentionally
-   * removed in commits a0fad0e and 04f373d. SSRF containment is delegated
-   * to external containerization. Retained for future re-enablement.
-   */
   allowedDomains?: string[];
 }
 
@@ -96,8 +93,9 @@ export interface NavigationPolicy {
  * Validate a navigation URL for browser use.
  * Rejects file:, chrome:, about:, data:, blob:, javascript:, ws:, wss:.
  * Rejects credentials in URL.
- * Does NOT block private/reserved IP ranges. SSRF protection is provided by
- * external network containerization; do not rely on this alone outside a container.
+ * Rejects private/reserved IP ranges and known metadata/local hostnames.
+ * Defense-in-depth: does not cover DNS rebinding, redirects, or Chromium DNS TOCTOU.
+ * Container egress is the authoritative outer boundary.
  */
 export function validateNavigationUrl(raw: string): string {
   const url = new URL(raw.trim());
@@ -105,27 +103,39 @@ export function validateNavigationUrl(raw: string): string {
   if (protocol !== 'http:' && protocol !== 'https:') {
     throw new Error(`Disallowed URL scheme: ${url.protocol}`);
   }
+  if (url.username || url.password) {
+    throw new Error(`URL credentials are not allowed: ${url.href}`);
+  }
+  assertPublicHostname(url.hostname);
   return url.href;
 }
 
 /**
- * DNS preflight is a no-op — containerization handles network containment.
- *
- * Hostname / domain allowlisting was intentionally removed in commits a0fad0e and 04f373d.
- * This function is retained as a seam for future re-enablement but currently performs
- * no DNS or hostname validation.
+ * DNS preflight: resolve hostname via system DNS and reject if any address is private/reserved.
+ * Defense-in-depth — does not prevent DNS rebinding between check and connection.
  */
-export async function dnsPreflight(_hostname: string, _signal?: AbortSignal): Promise<void> {
-  // no-op
+export async function dnsPreflight(hostname: string, signal?: AbortSignal, lookup?: DnsLookup): Promise<void> {
+  await resolvePublicHostname(hostname, signal, lookup);
 }
 
-// ── Allowed domain validation — no-op: containerization handles containment ──
-// Domain allowlisting was intentionally removed in commits a0fad0e and 04f373d.
-// These functions are retained as API surfaces for future re-enablement but
-// currently perform no domain or hostname validation.
+// ── Allowed domain validation ──
 
 export function validateAllowedDomain(pattern: string): string {
-  return pattern.trim().toLowerCase();
+  const trimmed = pattern.trim().toLowerCase();
+  if (!trimmed) throw new Error('Domain pattern is required');
+  if (trimmed === '*') throw new Error('Wildcard-only domain pattern (*) is not allowed');
+  // Validate wildcard syntax: must be `*.` prefix or exact
+  if (trimmed.startsWith('*.')) {
+    const suffix = trimmed.slice(1); // .example.com
+    if (!suffix.includes('.')) throw new Error(`Invalid wildcard domain: ${pattern} — must be *.<domain>`);
+    // Reject private/reserved in the suffix
+    assertPublicHostname(suffix.slice(1)); // strip leading dot
+  } else if (!trimmed.includes('*')) {
+    assertPublicHostname(trimmed);
+  } else {
+    throw new Error(`Invalid domain pattern: ${pattern} — only exact or *.<suffix> allowed`);
+  }
+  return trimmed;
 }
 
 export function freezeAllowedDomains(domains: string[]): string[] {
@@ -135,24 +145,38 @@ export function freezeAllowedDomains(domains: string[]): string[] {
 }
 
 /**
- * DNS validation for allowed domains — currently a no-op.
- * Domain allowlisting was intentionally removed in commits a0fad0e and 04f373d.
- * Retained as API surface for future re-enablement.
+ * DNS validation for allowed domains: resolve each exact domain or wildcard suffix
+ * and reject if any resolution includes a private/reserved address.
  */
-export async function validateAllowedDomainsDns(_domains: string[], _signal?: AbortSignal): Promise<void> {
-  // no-op
+export async function validateAllowedDomainsDns(domains: string[], signal?: AbortSignal, lookup?: DnsLookup): Promise<void> {
+  for (const domain of domains) {
+    if (domain.startsWith('*.')) {
+      // Resolve the suffix (strip `*.` prefix)
+      const suffix = domain.slice(2);
+      await resolvePublicHostname(suffix, signal, lookup);
+    } else {
+      await resolvePublicHostname(domain, signal, lookup);
+    }
+  }
 }
 
 /**
  * Check if a hostname is in the allowed domains list.
- *
- * NOTE: Currently returns true unconditionally. Domain allowlisting was
- * intentionally removed in commits a0fad0e and 04f373d. SSRF/domain containment
- * is delegated to external containerization. Retained as API surface for
- * future re-enablement.
+ * Uses label-boundary matching for wildcards: *.example.com matches
+ * sub.example.com but NOT example.com or evilexample.com.
  */
-export function checkDomainAllowed(_hostname: string, _allowedDomains: string[]): boolean {
-  return true;
+export function checkDomainAllowed(hostname: string, allowedDomains: string[]): boolean {
+  const h = hostname.toLowerCase();
+  for (const pattern of allowedDomains) {
+    if (pattern.startsWith('*.')) {
+      const suffix = pattern.slice(1); // .example.com
+      // Wildcard requires at least one label before suffix; suffix starts with '.'.
+      if (h.length > suffix.length && h.endsWith(suffix)) return true;
+    } else {
+      if (h === pattern) return true;
+    }
+  }
+  return false;
 }
 
 // ── Input bounds ──
@@ -291,6 +315,7 @@ export function validateSemanticActionRequest(raw: Record<string, unknown>): Sem
   }
   const query = typeof raw.query === 'string' ? raw.query.trim() : '';
   if (!query) throw new Error('query is required');
+  if (query.length > MAX_TEXT_LENGTH) throw new Error(`query too long (max ${MAX_TEXT_LENGTH} chars)`);
   const verb = typeof raw.verb === 'string' ? raw.verb.trim() : '';
   if (!verb || !(VALID_VERBS as readonly string[]).includes(verb)) {
     throw new Error(`verb is required and must be one of: ${VALID_VERBS.join(', ')}`);
@@ -305,9 +330,15 @@ export function validateSemanticActionRequest(raw: Record<string, unknown>): Sem
   }
 
   const req: SemanticActionRequest = { locator: locator as SemanticLocator, query, verb: verb as SemanticVerb };
-  if (typeof raw.name === 'string' && raw.name) req.name = raw.name;
+  if (typeof raw.name === 'string' && raw.name) {
+    if (raw.name.length > MAX_TEXT_LENGTH) throw new Error(`name too long (max ${MAX_TEXT_LENGTH} chars)`);
+    req.name = raw.name;
+  }
   if (typeof raw.index === 'number') req.index = raw.index;
-  if (typeof raw.value === 'string') req.value = raw.value;
+  if (typeof raw.value === 'string') {
+    if (raw.value.length > MAX_TEXT_LENGTH) throw new Error(`value too long (max ${MAX_TEXT_LENGTH} chars)`);
+    req.value = raw.value;
+  }
   if (raw.exact === true) req.exact = true;
   return req;
 }
@@ -343,7 +374,31 @@ export function validateBatchRequest(raw: Record<string, unknown>): BatchRequest
     const args = c.args.filter((a): a is string => typeof a === 'string');
     commands.push({ args, sensitive: c.sensitive !== false });
   }
+  validateNoLoopbackInBatch(commands);
   return { commands, maxCommands };
+}
+
+/** Reject batch commands containing loopback URLs in open/navigate args. */
+export function validateNoLoopbackInBatch(commands: BatchCommand[]): void {
+  for (let i = 0; i < commands.length; i++) {
+    const cmd = commands[i]!;
+    const action = cmd.args[0]?.toLowerCase();
+    if (action === 'open' || action === 'navigate') {
+      const url = cmd.args[1];
+      if (typeof url === 'string') {
+        if (url.includes('@')) {
+          throw new Error(
+            `command ${i}: URL with credentials is not allowed in batch commands.`,
+          );
+        }
+        if (parseLoopbackDebugTarget(url)) {
+          throw new Error(
+            `command ${i}: loopback URL '${url}' is not allowed in batch commands. Use a single navigate action instead.`,
+          );
+        }
+      }
+    }
+  }
 }
 
 // ── Browser request envelope ──

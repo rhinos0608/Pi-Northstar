@@ -1,22 +1,55 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { validateNavigationUrl, validateAllowedDomain, freezeAllowedDomains, checkDomainAllowed, validateBrowserRequest, isSensitiveAction, validateSemanticActionRequest, validateBatchRequest } from '../src/browser-policy.js';
+import { validateNavigationUrl, validateAllowedDomain, freezeAllowedDomains, checkDomainAllowed, validateBrowserRequest, isSensitiveAction, validateSemanticActionRequest, validateBatchRequest, validateNoLoopbackInBatch, validateAllowedDomainsDns, dnsPreflight, MAX_TEXT_LENGTH } from '../src/browser-policy.js';
+import type { DnsLookup } from '../src/network-policy.js';
 
-test('browser policy accepts http/https URLs, rejects non-http schemes', () => {
+test('browser policy accepts http/https URLs, rejects private/reserved from public validator', () => {
+  // Public URLs accepted
   assert.equal(validateNavigationUrl('https://example.com/path'), 'https://example.com/path');
-  assert.equal(validateNavigationUrl('http://localhost:3000'), 'http://localhost:3000/');
-  assert.equal(validateNavigationUrl('http://[::1]:8080'), 'http://[::1]:8080/');
+
+  // Private/reserved hostnames rejected
+  assert.throws(() => validateNavigationUrl('http://localhost:3000'), /Blocked hostname/);
+  assert.throws(() => validateNavigationUrl('http://10.0.0.1/'), /Private\/reserved/);
+  assert.throws(() => validateNavigationUrl('http://192.168.1.1/'), /Private\/reserved/);
+  assert.throws(() => validateNavigationUrl('http://[::1]:8080'), /Private\/reserved/);
+  assert.throws(() => validateNavigationUrl('http://169.254.169.254/'), /Private\/reserved/);
+  assert.throws(() => validateNavigationUrl('http://metadata.google.internal/'), /Blocked hostname/);
+
+  // Non-HTTP schemes rejected
   assert.throws(() => validateNavigationUrl('ftp://example.com'), /scheme/);
   assert.throws(() => validateNavigationUrl('file:///etc/passwd'), /scheme/);
   assert.throws(() => validateNavigationUrl('data:text/html,hello'), /scheme/);
 });
 
-test('domain policy freeze normalizes to lowercase, check returns true always', () => {
+test('domain policy: checkDomainAllowed uses label-boundary matching', () => {
+  assert.equal(checkDomainAllowed('cdn.example.com', ['*.example.com']), true);
+  assert.equal(checkDomainAllowed('deep.sub.example.com', ['*.example.com']), true);
+  assert.equal(checkDomainAllowed('example.com', ['*.example.com']), false);
+  assert.equal(checkDomainAllowed('evil-example.com', ['*.example.com']), false);
+  assert.equal(checkDomainAllowed('example.com', ['example.com']), true);
+  assert.equal(checkDomainAllowed('other.com', ['example.com']), false);
+  assert.equal(checkDomainAllowed('anything.com', []), false);
+});
+
+test('domain policy: validateAllowedDomain rejects private and wildcard apex', () => {
+  assert.throws(() => validateAllowedDomain('localhost'), /Blocked hostname|Private\/reserved/);
+  assert.throws(() => validateAllowedDomain('10.0.0.1'), /Private\/reserved/);
+  assert.throws(() => validateAllowedDomain('metadata.google.internal'), /Blocked hostname/);
+  assert.throws(() => validateAllowedDomain('*'), /Wildcard-only/);
+});
+
+test('domain policy freezes normalized domains and validates DNS', async () => {
   assert.deepEqual(freezeAllowedDomains(['*.Example.com', 'cdn.example.net']), ['*.example.com', 'cdn.example.net']);
-  assert.equal(validateAllowedDomain('*.example.com'), '*.example.com');
-  // No-op allow: containerization handles containment
-  assert.equal(checkDomainAllowed('anything.example.com', ['*.example.com']), true);
-  assert.equal(checkDomainAllowed('unrelated.com', []), true);
+  const fakeLookup: DnsLookup = async () => [{ address: '8.8.8.8', family: 4 }];
+  await validateAllowedDomainsDns(['example.com', '*.example.net'], undefined, fakeLookup);
+});
+
+test('DNS: dnsPreflight rejects private address', async () => {
+  const fakeLookup: DnsLookup = async () => [{ address: '10.0.0.1', family: 4 }];
+  await assert.rejects(
+    () => dnsPreflight('internal.example.com', undefined, fakeLookup),
+    /private\/reserved address: 10.0.0.1/,
+  );
 });
 
 test('request action union and no-op sensitive classification', () => {
@@ -131,4 +164,72 @@ test('validateBatchRequest preserves sensitive flag', () => {
 
 test('batch is classified as sensitive action', () => {
   assert.equal(isSensitiveAction('batch'), true);
+});
+
+test('semantic query/name/value reject above MAX_TEXT_LENGTH', () => {
+  const tooLong = 'x'.repeat(MAX_TEXT_LENGTH + 1);
+  assert.throws(() => validateSemanticActionRequest({ locator: 'role', query: tooLong, verb: 'click' }), /query too long/);
+  assert.throws(() => validateSemanticActionRequest({ locator: 'role', query: 'button', verb: 'click', name: tooLong }), /name too long/);
+  assert.throws(() => validateSemanticActionRequest({ locator: 'role', query: 'textbox', verb: 'fill', value: tooLong }), /value too long/);
+});
+
+test('semantic query/name/value at MAX_TEXT_LENGTH boundary pass', () => {
+  const boundary = 'x'.repeat(MAX_TEXT_LENGTH);
+  const withQuery = validateSemanticActionRequest({ locator: 'role', query: boundary, verb: 'click' });
+  assert.equal(withQuery.query.length, MAX_TEXT_LENGTH);
+  const withName = validateSemanticActionRequest({ locator: 'role', query: 'button', verb: 'click', name: boundary });
+  assert.equal(withName.name!.length, MAX_TEXT_LENGTH);
+  const withValue = validateSemanticActionRequest({ locator: 'role', query: 'textbox', verb: 'fill', value: boundary });
+  assert.equal(withValue.value!.length, MAX_TEXT_LENGTH);
+});
+
+// ── Loopback batch bypass guard ──
+
+test('validateBatchRequest rejects loopback URL in open command', () => {
+  assert.throws(
+    () => validateBatchRequest({ commands: [{ args: ['open', 'http://127.0.0.1:3000'] }] }),
+    /loopback URL/,
+  );
+});
+
+test('validateBatchRequest rejects loopback URL in navigate command', () => {
+  assert.throws(
+    () => validateBatchRequest({ commands: [{ args: ['navigate', 'http://localhost:8080/'] }] }),
+    /loopback URL/,
+  );
+});
+
+test('validateBatchRequest rejects loopback URL with ::1', () => {
+  assert.throws(
+    () => validateBatchRequest({ commands: [{ args: ['open', 'http://[::1]:3000/'] }] }),
+    /loopback URL/,
+  );
+});
+
+test('validateBatchRequest passes non-loopback URL in open command', () => {
+  const r = validateBatchRequest({ commands: [{ args: ['open', 'https://example.com'] }] });
+  assert.equal(r.commands.length, 1);
+});
+
+test('validateBatchRequest passes non-navigate action with loopback-like URL', () => {
+  const r = validateBatchRequest({ commands: [{ args: ['click', 'http://127.0.0.1:3000/btn'] }] });
+  assert.equal(r.commands.length, 1);
+});
+
+test('validateNoLoopbackInBatch passes empty list', () => {
+  validateNoLoopbackInBatch([]);
+});
+
+test('validateBatchRequest rejects credentialed loopback URL in open command', () => {
+  assert.throws(
+    () => validateBatchRequest({ commands: [{ args: ['open', 'http://user:pass@localhost:3000/'] }] }),
+    /credentials/,
+  );
+});
+
+test('validateBatchRequest rejects credentialed IPv6 loopback URL in navigate command', () => {
+  assert.throws(
+    () => validateBatchRequest({ commands: [{ args: ['navigate', 'https://user:pass@[::1]:3000/'] }] }),
+    /credentials/,
+  );
 });

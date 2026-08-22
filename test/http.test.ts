@@ -2,14 +2,24 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { safeResponseText, validatePublicHttpUrl } from '../src/http.js';
 
-test('validatePublicHttpUrl accepts http/https and rejects non-http schemes only', () => {
-  assert.equal(validatePublicHttpUrl('https://fdns.google/path'), 'https://fdns.google/path');
-  assert.equal(validatePublicHttpUrl('https://fccdn.example/path'), 'https://fccdn.example/path');
-  // Private/local hosts now pass — containerization handles network containment
-  assert.equal(validatePublicHttpUrl('http://[fd00::1]/'), 'http://[fd00::1]/');
-  assert.equal(validatePublicHttpUrl('http://[fc00::1]/'), 'http://[fc00::1]/');
-  assert.equal(validatePublicHttpUrl('http://metadata.google.internal/'), 'http://metadata.google.internal/');
-  assert.equal(validatePublicHttpUrl('http://localhost:3000/'), 'http://localhost:3000/');
+test('validatePublicHttpUrl accepts public http/https and rejects private/reserved', () => {
+  // Public URLs accepted
+  assert.equal(validatePublicHttpUrl('https://example.com/path'), 'https://example.com/path');
+  assert.equal(validatePublicHttpUrl('https://api.github.com/repos'), 'https://api.github.com/repos');
+  assert.equal(validatePublicHttpUrl('http://8.8.8.8/'), 'http://8.8.8.8/');
+
+  // Private/reserved hostnames rejected
+  assert.throws(() => validatePublicHttpUrl('http://localhost:3000/'), /Blocked hostname/);
+  assert.throws(() => validatePublicHttpUrl('http://10.0.0.1/'), /Private\/reserved/);
+  assert.throws(() => validatePublicHttpUrl('http://192.168.1.1/'), /Private\/reserved/);
+  assert.throws(() => validatePublicHttpUrl('http://127.0.0.1/'), /Private\/reserved/);
+  assert.throws(() => validatePublicHttpUrl('http://169.254.169.254/'), /Private\/reserved/);
+  assert.throws(() => validatePublicHttpUrl('http://metadata.google.internal/'), /Blocked hostname/);
+  assert.throws(() => validatePublicHttpUrl('http://[fd00::1]/'), /Private\/reserved/);
+  assert.throws(() => validatePublicHttpUrl('http://[fc00::1]/'), /Private\/reserved/);
+  assert.throws(() => validatePublicHttpUrl('http://100.64.0.1/'), /Private\/reserved/);
+
+  // Non-HTTP schemes rejected
   assert.throws(() => validatePublicHttpUrl('ftp://example.com'), /scheme/);
   assert.throws(() => validatePublicHttpUrl('file:///etc/passwd'), /scheme/);
 });

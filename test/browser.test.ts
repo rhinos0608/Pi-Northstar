@@ -139,32 +139,24 @@ test('CdpSession.addEventListener captures events (messages without id)', async 
 
 // ── High-level CDP primitive tests ──
 
-test('cdpNavigate validates URL accepts http/https (containerization handles containment)', async () => {
-  const saved = globalThis.WebSocket;
-
-  class NoopWs {
-    onopen: (() => void) | null = null;
-    onmessage: ((event: MessageEvent) => void) | null = null;
-    constructor(readonly url: string) { setTimeout(() => this.onopen?.(), 0); }
-    send(raw: string): void {
-      const msg = JSON.parse(raw) as { id: number };
-      setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: msg.id, result: {} }) } as MessageEvent), 0);
-    }
-    close(): void {}
-  }
-
-  try {
-    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = NoopWs as unknown as typeof WebSocket;
-
-    const session = new CdpSession('ws://127.0.0.1:9222/devtools/page/test');
-    await session.ready();
-
-    // localhost now passes — containerization handles containment
-    await assert.doesNotReject(() => cdpNavigate(session, 'http://localhost:3000'));
-    await assert.rejects(() => cdpNavigate(session, 'ftp://example.com'), /Disallowed URL scheme/);
-  } finally {
-    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = saved;
-  }
+test('cdpNavigate rejects localhost/private/hostnames and non-http schemes', async () => {
+  // localhost rejected by public URL validator
+  await assert.rejects(
+    () => cdpNavigate({ send: async () => ({}) } as never, 'http://localhost:3000'),
+    /Blocked hostname/,
+  );
+  await assert.rejects(
+    () => cdpNavigate({ send: async () => ({}) } as never, 'http://10.0.0.1/'),
+    /Private\/reserved/,
+  );
+  await assert.rejects(
+    () => cdpNavigate({ send: async () => ({}) } as never, 'http://169.254.169.254/'),
+    /Private\/reserved/,
+  );
+  await assert.rejects(
+    () => cdpNavigate({ send: async () => ({}) } as never, 'ftp://example.com'),
+    /Disallowed URL scheme/,
+  );
 });
 
 test('cdpEvaluate returns value and handles exceptionDetails', async () => {
@@ -361,6 +353,15 @@ test('browser unknown action throws', async () => {
 test('browser respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out', async () => {
   const result = await browser({ endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_AUTOMATION: '0' } });
   assert.match(JSON.stringify(result.details), /disabled/);
+});
+
+test('browser navigate rejects credentialed URL (user:pass@host)', async () => {
+  const result = await browser(
+    { action: 'navigate', url: 'http://user:pass@localhost:3000/' },
+    { env: {} },
+  );
+  const text = JSON.stringify(result.content);
+  assert.match(text, /credentials/);
 });
 
 test('browser requires endpoint (CDP backend)', async () => {
