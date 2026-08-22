@@ -1,28 +1,20 @@
-# Agent Reference: Pi-Atlas
+# Agent Reference: Pi-Northstar
 
-Pi-Atlas is the Pi coding agent's browser/desktop automation and web search extension. It provides CDP-based browser control, agent-browser integration, desktop automation (via Cua Driver MCP), hybrid search (BM25 + vector embedding + RRF fusion), social/reach tools, and cookie/auth management.
+Pi-Northstar is the Pi coding agent's browser/desktop automation and web search extension. It provides CDP-based browser control, agent-browser integration, desktop automation (via Cua Driver MCP), hybrid search (BM25 + vector embedding + RRF fusion), social/reach tools, and cookie/auth management.
 
 ## Sister Repos
 
 ### No protocol-level dependencies on the other Pi repos.
-Pi-Atlas is self-contained. It does not consume `@rhinos0608/pi-workspace-protocol`, Pi-SmartRead, or Pi-SmartEdit directly.
+Pi-Northstar is self-contained. It does not consume `@rhinos0608/pi-workspace-protocol`, Pi-SmartRead, or Pi-SmartEdit directly.
 
 ## Operational Contracts and Invariants
 
-### ❌ OPEN: Containerization verification for network containment
-**This is an unresolved item — do NOT resolve it silently.**
+### Application SSRF guards (Scope A)
+Public user-controlled fetch/browser URLs use `src/network-policy.ts` and reject private/reserved literals, metadata/local hostnames, credentials, and private DNS answers. Browser navigation also freezes allowed domains and performs system-DNS preflight. This is defense-in-depth, not complete SSRF containment; container egress remains authoritative.
 
-- `src/http.ts:validatePublicHttpUrl` (now aliased as `validateHttpUrl`) performs **no** private/reserved-IP blocking. SSRF protection was *deliberately removed* (commits `a0fad0e`, `04f373d`) with the intent that network containment is handled by external containerization.
-- `src/browser-policy.ts:checkDomainAllowed`, `validateAllowedDomainsDns`, and `dnsPreflight` are all **intentional no-ops** with JSDoc stating "containerization handles containment."
-- `docs/adr/0001-use-agent-browser-for-web-automation.md` documents the domain/SSRF removal as SUPERSEDED.
+Configured local SearXNG, Ollama, embedding, sidecar, CDP/setup paths remain operator-owned and bypass public validation (`unsafeFetchJson` is intentional). Loopback browser access is only through `browser-tools` → `LoopbackProxy`.
 
-**What this means:** If Pi-Atlas is ever run *outside* a container with egress restrictions, there is zero protection against SSRF (metadata endpoints, localhost, RFC1918, link-local). If Pi-Atlas is running inside a properly configured container, this is fine.
-
-**Action required:** Explicit confirmation from the repo owner on whether:
-1. Pi-Atlas is **always** deployed in a container with egress restrictions, OR
-2. A follow-up network-policy project is needed to restore defense-in-depth IP/domain blocking.
-
-**Until confirmed, do NOT restore SSRF/domain blocking as a 'fix'** — the existing posture is deliberate, not an oversight. If you believe blocking should be restored, escalate as a product-scope decision, not a routine code change.
+Residual risks: DNS rebinding, Chromium DNS TOCTOU, redirects, and debug-server outbound proxying. See ADR 0003.
 
 ### Python child processes MUST use the shared env allowlist
 `src/python-child-env.ts` exports `buildPythonChildEnvironment()` — a sanitized environment with an allowlist of benign system/PI vars and a `BLOCKED_PATTERN` excluding TOKEN/KEY/SECRET/COOKIE/PASSWORD/API_KEY/API_SECRET/AUTH/BEARER and NODE_OPTIONS, NODE_PATH, PYTHONPATH, GIT_CONFIG_, SSL_CERT_, LD_PRELOAD, DYLD_ patterns.
@@ -57,6 +49,11 @@ The registered `browser` tool in `src/index.ts` does not expose `compact`, `sema
 - The desktop control stack (`desktop-tools.ts` → `cua-client.ts`) is cleanly separated from search and browser modules with no cross-imports.
 
 ## Residual Risks
-- **Unconfirmed containerization posture** (see above — OPEN).
-- **No integration test verifies container network isolation.** The SSRF posture relies on external infrastructure that is untested in this codebase.
+- **No integration test verifies container network isolation.** Application guards are defense-in-depth; container egress remains outer boundary.
+- **DNS rebinding / Chromium DNS TOCTOU** can occur after preflight.
+- **Redirects** may reach targets not covered by initial validation in unrestricted fetch paths.
+- **Debug-server outbound proxying** can make loopback server an egress relay.
 - **CLI subprocess overhead:** Every `web_search`/`fetch` call spawns a child process via `CliSearchBackend`. For high-frequency use, this is a performance concern, not a correctness one.
+- **Untrusted-content framing is advisory, not enforcement.** `src/untrusted-content.ts` fences external tool text (`web_search`, `fetch`, `github`, `social`, `media`, `browser`) with per-result tokens and heuristic flags; it never redacts visible text and cannot guarantee prompt-injection prevention — a model may still follow malicious page text. `tool_result` and `before_agent_start` hooks apply the framing.
+- **Loopback-only debug mode confines browser network to exact origin.** When navigating to a loopback address, a local enforcing proxy pins DNS at startup and blocks HTTP/WebSocket/CONNECT to non-matching origins. `AGENT_BROWSER_ALLOWED_DOMAINS` blocks cross-domain sub-resources. CDP backend fails closed on loopback. Batch/job commands cannot target loopback URLs. Container egress remains the outer defense. Integration test with real agent-browser deferred.
+- **WSS (WebSocket Secure) not wrapped in TLS.** The loopback proxy uses plaintext `net.connect` for WebSocket upgrades. `wss:` targets on non-443 ports will fail. This is acceptable for local debug servers which typically use plain `ws:`.

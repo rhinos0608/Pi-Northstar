@@ -1,4 +1,4 @@
-# Pi-Atlas
+# Pi-Northstar
 
 Pi extension that gives your agent real-world reach — web search, page reading, GitHub, social media, video, browser automation, and desktop control. Zero-config works out of the box; API keys unlock more power.
 
@@ -45,12 +45,12 @@ fallbacks. Please read this before enabling fallbacks:
   bypasses official APIs, or replaying session cookies, may violate those
   terms and can lead to account locks, IP blocks, or other enforcement.
 - **Session cookies are bearer credentials.** A stored or exported Reddit
-  cookie can fully impersonate the logged-in account. Pi-Atlas only sends
+  cookie can fully impersonate the logged-in account. Pi-Northstar only sends
   cookies to fixed canonical Reddit hosts, rejects redirects, filters stored
   cookies by host/path/expiry/secure, and never forwards cookies to external
   CLIs, archives, search children, or scrapers — but **you** are responsible
   for what you paste into `REDDIT_COOKIE` and for protecting cookie state
-  (`~/.pi-atlas/cookies/`, stored plaintext with `0600` perms).
+  (`~/.pi-northstar/cookies/`, stored plaintext with `0600` perms).
   Use throwaway/dedicated accounts for any cookie-based fallback.
 - **Opt-in web fallback is off by default.** Set
   `PI_SEARCH_PLATFORM_WEB_FALLBACK=1` to enable the last-resort
@@ -90,7 +90,7 @@ Source ordering, YouTube (`media`):
    fails.
 
 Transcripts/subtitles for YouTube are **not supported** (a clear error is
-returned); Pi-Atlas does not scrape transcripts or use transcript services,
+returned); Pi-Northstar does not scrape transcripts or use transcript services,
 and automatic calls never route to `yt-dlp`. An **OAuth management dashboard**
 for these services is future, deferred work — this release adds no dashboard,
 redirect endpoint, token storage, schema field, or tool.
@@ -113,21 +113,21 @@ with `search-results` and `page-text` models respectively.
 
 ## Quick start
 
-Two ways to bring Pi-Atlas into `pi`:
+Two ways to bring Pi-Northstar into `pi`:
 
 ### Install as a Pi package (recommended)
 
 ```bash
-pi install git:github.com/rhinos0608/Pi-Atlas
+pi install git:github.com/rhinos0608/Pi-Northstar
 ```
 
-This clones the repo into `~/.pi/agent/git/` (or `.pi/git/` with `-l` for a project-local install), runs `npm install`, and registers the extension in settings for you. To try it for one session without installing anything: `pi -e git:github.com/rhinos0608/Pi-Atlas`. See `pi`'s [package docs](https://github.com/earendil-works/pi) for update/remove commands.
+This clones the repo into `~/.pi/agent/git/` (or `.pi/git/` with `-l` for a project-local install), runs `npm install`, and registers the extension in settings for you. To try it for one session without installing anything: `pi -e git:github.com/rhinos0608/Pi-Northstar`. See `pi`'s [package docs](https://github.com/earendil-works/pi) for update/remove commands.
 
 ### Clone and wire up manually
 
 ```bash
-git clone https://github.com/rhinos0608/Pi-Atlas.git Pi-Atlas
-cd Pi-Atlas
+git clone https://github.com/rhinos0608/Pi-Northstar.git Pi-Northstar
+cd Pi-Northstar
 npm install
 ```
 
@@ -136,7 +136,7 @@ Add it to `~/.pi/agent/settings.json` (or `.pi/settings.json` for a project-loca
 ```json
 {
   "extensions": {
-    "pi-atlas": "./src/index.ts"
+    "pi-northstar": "./src/index.ts"
   }
 }
 ```
@@ -157,7 +157,7 @@ npm install --omit=optional
 
 Skipping it leaves the other six tools unaffected; `browser` calls fail with a clear `agent-browser executable not found` error until a binary is available — see [Browser automation](#browser-automation) to install it separately or point at an existing one.
 
-`desktop` is separate again: it drives a native Cua Driver binary that was never an npm dependency at all, downloaded and put on `$PATH` by hand. It stays disabled (`PI_SEARCH_DESKTOP_AUTOMATION` unset) no matter how you installed Pi-Atlas — see [Desktop automation](#desktop-automation).
+`desktop` is separate again: it drives a native Cua Driver binary that was never an npm dependency at all, downloaded and put on `$PATH` by hand. It stays disabled (`PI_SEARCH_DESKTOP_AUTOMATION` unset) no matter how you installed Pi-Northstar — see [Desktop automation](#desktop-automation).
 
 If the agent-browser download is slow or fails:
 - Check network/proxy settings: `npm config get proxy`, `npm config get https-proxy`
@@ -165,7 +165,7 @@ If the agent-browser download is slow or fails:
 - Use `npm install --verbose` to see download progress
 - If stuck, try clearing npm cache: `npm cache clean --force && npm install`
 
-That's it — web search works immediately via DuckDuckGo with zero configuration. If a file-backed `codex login` session is available, Pi-Atlas also detects it automatically and uses Codex results first.
+That's it — web search works immediately via DuckDuckGo with zero configuration. If a file-backed `codex login` session is available, Pi-Northstar also detects it automatically and uses Codex results first.
 
 ## Configuration
 
@@ -183,13 +183,13 @@ export TAVILY_API_KEY="..."             # Tavily AI-native search
 export YOUTUBE_API_KEY="..."            # YouTube Data API
 export REDDIT_CLIENT_ID="..."           # Reddit API
 export REDDIT_CLIENT_SECRET="..."       # Reddit API
-export REDDIT_USER_AGENT="pi-atlas/0.1"
+export REDDIT_USER_AGENT="pi-northstar/0.1"
 export SEARXNG_BASE_URL="https://..."   # Self-hosted SearXNG
 ```
 
 ### Codex/ChatGPT search
 
-Pi-Atlas automatically checks `CODEX_ACCESS_TOKEN`, then `${CODEX_HOME:-~/.codex}/auth.json` created by `codex login`. When credentials exist and no explicit backend override is set, Codex web search is primary: its ordered results appear first, then results from other configured providers are URL-normalized and deduplicated before filling remaining slots. Only search query is sent; conversation history and project files are not included.
+Pi-Northstar automatically checks `CODEX_ACCESS_TOKEN`, then `${CODEX_HOME:-~/.codex}/auth.json` created by `codex login`. When credentials exist and no explicit backend override is set, Codex web search is primary: its ordered results appear first, then results from other configured providers are URL-normalized and deduplicated before filling remaining slots. Only search query is sent; conversation history and project files are not included.
 
 ```bash
 export CODEX_ACCESS_TOKEN="..."       # Optional override
@@ -224,7 +224,7 @@ export PI_SEARCH_BROWSER_AUTOMATION="0"  # Disable all browser features
 
 ```bash
 export PI_SEARCH_MAX_TOOL_OUTPUT_CHARS="60000"   # Truncation limit
-export PI_SEARCH_STATE_DIR="$HOME/.pi-atlas"     # State directory
+export PI_SEARCH_STATE_DIR="$HOME/.pi-northstar"     # State directory
 export PI_SEARCH_COOKIE_BROWSER="chrome"         # chrome, brave, or edge
 export PI_SEARCH_COOKIE_STALE_MS="43200000"      # Cookie re-import window (12h)
 export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"  # CDP fallback endpoint
@@ -232,11 +232,11 @@ export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"  # CDP fallback endpoint
 
 ## Embedding & semantic search
 
-Pi-Atlas has two layers of semantic capability:
+Pi-Northstar has two layers of semantic capability:
 
 ### 1. Built-in semantic retrieval (`fetch` with query)
 
-When you call `fetch` with a `query` parameter, Pi-Atlas performs **hybrid search**:
+When you call `fetch` with a `query` parameter, Pi-Northstar performs **hybrid search**:
 
 1. **URL discovery** — queries configured search backends (Codex when detected, DuckDuckGo, Brave, Exa, Tavily, SearXNG, Ollama); Codex results lead, then remaining rankings are RRF-fused and URL-deduplicated
 2. **Page fetching** — optionally uses Scrapling (Python stealth browser) for JS-rendered pages and anti-bot bypass, falls back to plain HTTP
@@ -277,7 +277,7 @@ Without a `query`, `fetch` returns the full readable text of a URL (plain extrac
 
 ### 2. Embedding sidecar (semantic search + GitHub `code_search`)
 
-Pi-Atlas can connect to an embedding service for **vector-based semantic search** in `fetch` and **AST-aware semantic code search** in GitHub `code_search`.
+Pi-Northstar can connect to an embedding service for **vector-based semantic search** in `fetch` and **AST-aware semantic code search** in GitHub `code_search`.
 
 Configure the sidecar (works with any OpenAI-compatible embedding API — LM Studio, Ollama, OpenAI, etc.):
 
@@ -292,7 +292,7 @@ When `EMBEDDING_SIDECAR_BASE_URL` is set, `fetch` with query automatically uses 
 
 #### Local Python sidecar (alternative)
 
-If you don't have an external embedding service, Pi-Atlas can spawn a local Python sidecar:
+If you don't have an external embedding service, Pi-Northstar can spawn a local Python sidecar:
 
 ```bash
 pip install fastapi uvicorn sentence-transformers
@@ -300,11 +300,11 @@ export PI_SEARCH_EMBEDDING_ENABLED=1
 export PI_SEARCH_EMBEDDING_MODEL=all-MiniLM-L6-v2  # 384 dims, 22MB
 ```
 
-Pi-Atlas auto-spawns the sidecar on first use and manages its lifecycle.
+Pi-Northstar auto-spawns the sidecar on first use and manages its lifecycle.
 
 #### Stealth browser mode (Scrapling)
 
-If the Scrapling Python package is installed, Pi-Atlas uses it **automatically** for `fetch` — no configuration needed. It provides:
+If the Scrapling Python package is installed, Pi-Northstar uses it **automatically** for `fetch` — no configuration needed. It provides:
 
 - JS-rendered page content (SPA, React, Angular sites)
 - Cloudflare Turnstile/Interstitial auto-solve
@@ -316,7 +316,7 @@ pip install "scrapling[fetchers]"
 scrapling install  # download browsers + system deps
 ```
 
-Pi-Atlas auto-detects Scrapling on startup. If installed, `fetch` and `agentic_browse` use it automatically. If not installed, falls back to plain HTTP.
+Pi-Northstar auto-detects Scrapling on startup. If installed, `fetch` and `agentic_browse` use it automatically. If not installed, falls back to plain HTTP.
 
 Optional proxy:
 ```bash
@@ -468,11 +468,46 @@ export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"
 
 ### Security
 
-- Agent-browser uses owned isolated sessions with strict public-domain navigation
+- Public user-controlled fetch/browser URLs accept only HTTP(S), reject credentials, private/reserved literals, localhost, metadata, and Docker hostnames; browser sessions also run system-DNS preflight and frozen domain allowlisting (defense-in-depth, not complete SSRF containment)
+- Configured local SearXNG/Ollama/embedding/sidecar/CDP/setup endpoints remain operator-owned paths and are not routed through public URL validation
+- Residual risks: DNS rebinding and Chromium DNS TOCTOU after preflight, unrestricted redirects in some fetch paths, and debug-server outbound proxying; container egress remains authoritative outer boundary. See ADR 0003.
 - `evaluate`, `set_cookies`, and `batch` are disabled by default; enable with `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`
 - Cookies return metadata only (name, domain, path, expiry, flags) — values are never exposed
 - Error messages sanitized: token/password/secret/authorization patterns stripped (≤2000 chars)
+- External tool text (`web_search`, `fetch`, `github`, `social`, `media`, `browser`) is framed as untrusted evidence with a per-result fence token and heuristic injection flags; visible content is never redacted, and framing does not authorize actions or secret access
 - Security enforcement is external through containerization and other extensions
+
+### Loopback-only debug mode
+
+When navigating to a loopback address (`localhost`, `127.x.x.x`, `[::1]`), the browser session enters **loopback-only mode**: network is confined to that exact origin (scheme + host + port). All other traffic is blocked — public internet, RFC1918, metadata endpoints, different loopback ports.
+
+```bash
+# Navigate to a local dev server — enters loopback-only mode automatically
+browser({ action: "navigate", url: "http://localhost:3000" })
+
+# All browser actions work normally within the confined session
+browser({ action: "snapshot" })
+browser({ action: "click", selector: "@e1" })
+
+# Close to exit loopback mode
+browser({ action: "close" })
+```
+
+How it works:
+- A local enforcing proxy starts on an ephemeral port before the browser launches
+- The proxy resolves DNS once at startup and pins the result (prevents DNS rebinding)
+- HTTP, WebSocket, and HTTPS CONNECT requests are checked against the pinned origin
+- `AGENT_BROWSER_ALLOWED_DOMAINS` blocks cross-domain navigation and sub-resources
+- CDP backend fails closed on loopback targets (clear error message)
+- Same loopback origin reuses the adapter; different origins are rejected
+- Browser capabilities (click, type, fill, evaluate, etc.) remain unchanged
+
+Limitations:
+- Cross-port HMR is blocked by design (only same-port HMR allowed)
+- Container egress remains the outer defense boundary
+- The debug server itself can still proxy outbound traffic (outside browser boundary)
+
+Batch and job commands cannot target loopback URLs — use top-level `navigate` to enter loopback mode.
 
 ## Desktop automation
 
