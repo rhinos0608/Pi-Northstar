@@ -46,13 +46,13 @@ const KNOWN_CHANNELS = ['web', 'github', 'rss', 'v2ex', 'twitter', 'reddit', 'xi
 
 const platformPlan = [
   { platform: 'web', ready: 'Read any webpage', unlock: '—', setup: 'No configuration required' },
-  { platform: 'youtube', ready: 'Subtitle extraction + video search', unlock: '—', setup: 'Install yt-dlp; Node/Deno JS runtime recommended' },
+  { platform: 'youtube', ready: 'Video search, details, and hot via the Data API', unlock: '—', setup: 'Set YOUTUBE_API_KEY for the official Data API' },
   { platform: 'rss', ready: 'Read RSS/Atom', unlock: '—', setup: 'No configuration required' },
   { platform: 'search', ready: 'Basic native search', unlock: 'Full semantic search', setup: 'Optional Exa API key' },
   { platform: 'github', ready: 'Public repos + search', unlock: 'Private repos, Issues/PRs, forks', setup: 'Set GITHUB_TOKEN' },
   { platform: 'twitter', ready: 'Read single tweet where backend supports it', unlock: 'Search, timelines, articles', setup: 'Set TWITTER_AUTH_TOKEN/TWITTER_CT0 or install twitter-cli' },
   { platform: 'bilibili', ready: 'Search + video details via bili-cli', unlock: 'Subtitles via OpenCLI', setup: 'Install bili-cli' },
-  { platform: 'reddit', ready: '—', unlock: 'Search + posts/comments', setup: 'Install OpenCLI and login, or rdt-cli + cookie' },
+  { platform: 'reddit', ready: '—', unlock: 'Search, posts, subreddits, feeds, and hot via the Reddit Data API (comments are not supported)', setup: 'Set REDDIT_CLIENT_ID + SECRET + USER_AGENT, or import a Reddit cookie (OpenCLI/rdt-cli fallback)' },
   { platform: 'facebook', ready: '—', unlock: 'Search, profiles, feed, groups', setup: 'Install OpenCLI and login in Chrome' },
   { platform: 'instagram', ready: '—', unlock: 'User search, profiles, posts, explore', setup: 'Install OpenCLI and login in Chrome' },
   { platform: 'xiaohongshu', ready: '—', unlock: 'Search, notes, comments', setup: 'Install OpenCLI and login in Chrome' },

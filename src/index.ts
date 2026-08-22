@@ -233,9 +233,9 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'media',
     label: 'Media',
-    description: 'Video platforms (YouTube/Bilibili) metadata, search, subtitles + RSS/Atom feed reading.',
+    description: 'YouTube (official Data API) and Bilibili metadata, search, and details + RSS/Atom feed reading.',
     promptGuidelines: [
-      'Use media to search YouTube or Bilibili, get video details, or fetch subtitles.',
+      'Use media to search YouTube (set YOUTUBE_API_KEY) or Bilibili, get video details, or read feeds.',
       'For Bilibili, do not use yt-dlp; it uses bili-cli or OpenCLI backends.',
       'Use media with feed action or rss platform to read an RSS/Atom URL instead of fetch, which parses structured entries.',
     ],
@@ -245,7 +245,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       query: Type.Optional(Type.String()),
       url: Type.Optional(Type.String({ description: 'Video URL, or the RSS/Atom feed URL for the feed action (required for feed).' })),
       id: Type.Optional(Type.String()),
-      language: Type.Optional(Type.String({ description: 'Subtitle language pattern for YouTube transcript, default en.*.' })),
+      language: Type.Optional(Type.String({ description: 'Subtitle language pattern (retained for schema compatibility; YouTube transcripts are currently unavailable).' })),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Max results/entries. Feed default 20; video search default 10.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {

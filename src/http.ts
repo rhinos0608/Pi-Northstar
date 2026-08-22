@@ -33,6 +33,21 @@ export async function fetchText(url: string, headersOrSignal: Record<string, str
   return safeResponseText(response, url);
 }
 
+/**
+ * JSON fetch that rejects redirects instead of following them. Cookie-bearing
+ * requests must use this so credentials are never forwarded off the initial
+ * host (credential-routing control, not SSRF-policy restoration).
+ */
+export async function fetchJsonNoRedirect(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<unknown> {
+  const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
+  const response = await fetch(validatePublicHttpUrl(url), fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error(`Redirect rejected for ${url}: credentials are never forwarded off the fixed host`);
+  }
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  return safeResponseJson(response, url);
+}
+
 export async function unsafeFetchJson(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<unknown> {
   const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
   const response = await fetch(url, fetchInit(headers, effectiveSignal, timeoutMs));
@@ -40,10 +55,11 @@ export async function unsafeFetchJson(url: string, headersOrSignal: Record<strin
   return safeResponseJson(response, url);
 }
 
-export function fetchInit(headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): RequestInit {
+export function fetchInit(headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, redirect?: RequestRedirect): RequestInit {
   return {
     headers,
     signal: composeSignal(signal, timeoutMs),
+    ...(redirect ? { redirect } : {}),
   };
 }
 

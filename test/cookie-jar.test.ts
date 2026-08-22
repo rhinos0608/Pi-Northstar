@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { cookieAuthEnvironment, filterCookiesForDomains, importCookiesFromDefaultBrowser, writeCookieState, type BrowserCookie } from '../src/cookie-jar.js';
+import { cookieAuthEnvironment, cookieHeaderForUrl, filterCookiesForDomains, importCookiesFromDefaultBrowser, writeCookieState, type BrowserCookie } from '../src/cookie-jar.js';
 
 const cookies: BrowserCookie[] = [
   { name: 'auth', value: 'secret-facebook', domain: '.facebook.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
@@ -34,6 +34,38 @@ test('writeCookieState writes private storageState and omits values from summary
       assert.equal((await stat(join(dir, 'cookies'))).mode & 0o777, 0o700);
       assert.equal((await stat(summary.storagePath)).mode & 0o777, 0o600);
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('cookieHeaderForUrl matches only the exact scoped host, path, and secure/expiry state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-routing-'));
+  try {
+    const env = { PI_SEARCH_STATE_DIR: dir } as Record<string, string | undefined>;
+    await writeCookieState('reddit', [
+      { name: 'session', value: 'domain-cookie', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'hostonly', value: 'host-only-cookie', domain: 'www.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'scoped', value: 'path-scoped', domain: '.reddit.com', path: '/r/x', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'expired', value: 'expired-cookie', domain: '.reddit.com', path: '/', expires: 1, httpOnly: true, secure: true, sameSite: 'Lax' },
+    ], env, 'fixture');
+
+    // Domain-attribute cookie matches the domain and subdomains.
+    assert.match(cookieHeaderForUrl('reddit', 'https://www.reddit.com/search.json', env) ?? '', /domain-cookie/);
+    assert.match(cookieHeaderForUrl('reddit', 'https://old.reddit.com/path', env) ?? '', /domain-cookie/);
+    // Host-only cookie matches exactly its host.
+    assert.match(cookieHeaderForUrl('reddit', 'https://www.reddit.com/search.json', env) ?? '', /host-only-cookie/);
+    assert.doesNotMatch(cookieHeaderForUrl('reddit', 'https://old.reddit.com/path', env) ?? '', /host-only-cookie/);
+    // Path scoping.
+    assert.match(cookieHeaderForUrl('reddit', 'https://www.reddit.com/r/x/comments/1', env) ?? '', /path-scoped/);
+    assert.doesNotMatch(cookieHeaderForUrl('reddit', 'https://www.reddit.com/other', env) ?? '', /path-scoped/);
+    // Expired cookies are never included.
+    assert.doesNotMatch(cookieHeaderForUrl('reddit', 'https://www.reddit.com/search.json', env) ?? '', /expired-cookie/);
+    // Non-Reddit / other-provider hosts get nothing.
+    assert.equal(cookieHeaderForUrl('reddit', 'https://example.com/', env), undefined);
+    assert.equal(cookieHeaderForUrl('twitter', 'https://www.reddit.com/', env), undefined);
+    // http scheme is refused outright.
+    assert.equal(cookieHeaderForUrl('reddit', 'http://www.reddit.com/', env), undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

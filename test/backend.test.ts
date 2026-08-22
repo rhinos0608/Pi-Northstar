@@ -60,6 +60,7 @@ test('buildCliEnvironment forwards reach backend auth and override allowlist', (
     PATH: '/usr/bin',
     TWITTER_AUTH_TOKEN: 'token',
     TWITTER_CT0: 'ct0',
+    REDDIT_COOKIE: 'session=secret',
     TWITTER_BACKEND: 'OpenCLI',
     PI_SEARCH_REDDIT_BACKEND: 'rdt',
     HTTPS_PROXY: 'http://proxy.example',
@@ -74,6 +75,7 @@ test('buildCliEnvironment forwards reach backend auth and override allowlist', (
     HTTPS_PROXY: 'http://proxy.example',
     TWITTER_AUTH_TOKEN: 'token',
     TWITTER_CT0: 'ct0',
+    REDDIT_COOKIE: 'session=secret',
     EXA_API_KEY: 'exa',
     SEARCH_MCP_CONFIG_PATH: '/tmp/config.json',
     PI_SEARCH_BROWSER_AUTOMATION: '0',
@@ -82,4 +84,48 @@ test('buildCliEnvironment forwards reach backend auth and override allowlist', (
     TWITTER_BACKEND: 'OpenCLI',
     PI_SEARCH_REDDIT_BACKEND: 'rdt',
   });
+});
+
+test('buildCliEnvironment forwards REDDIT_COOKIE into the Pi-owned CLI but blocks unrelated secrets', () => {
+  const env = buildCliEnvironment({
+    PATH: '/usr/bin',
+    REDDIT_COOKIE: 'session=reddit-cookie-secret',
+    STRIPE_API_KEY: 'stripe-secret',
+    AWS_SECRET_ACCESS_KEY: 'aws-secret',
+    DATABASE_URL: 'postgres://u:p@db',
+  });
+  // REDDIT_COOKIE is allowed: it is the only path by which a logged-in Reddit
+  // session reaches the Pi-owned CLI process for the native cookie fallback.
+  assert.equal(env.REDDIT_COOKIE, 'session=reddit-cookie-secret');
+  assert.equal(env.STRIPE_API_KEY, undefined);
+  assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(env.DATABASE_URL, undefined);
+});
+
+test('buildCliEnvironment forwards PI_SEARCH_PLATFORM_WEB_FALLBACK opt-in flag', () => {
+  const env = buildCliEnvironment({
+    PATH: '/usr/bin',
+    PI_SEARCH_PLATFORM_WEB_FALLBACK: '1',
+    SEARCH_WEB_BACKENDS: 'duckduckgo',
+    OTHER_SECRET_TOKEN: 'should-not-pass',
+  });
+  assert.equal(env.PI_SEARCH_PLATFORM_WEB_FALLBACK, '1');
+  assert.equal(env.SEARCH_WEB_BACKENDS, 'duckduckgo');
+  assert.equal(env.OTHER_SECRET_TOKEN, undefined);
+});
+
+test('CliSearchBackend: wall-clock timeout is a timeout failure, not AbortError', async () => {
+  // A backend timeout must stay retry/fallback-eligible: it is not caller
+  // cancellation, so it must reject with a timeout error, never AbortError.
+  const backend = createSearchBackend({});
+  try {
+    await assert.rejects(
+      backend.callTool('reach_status', { family: 'media' }, { timeout: 100 }),
+      (err: unknown) => err instanceof Error
+        && /timed out after 100ms/i.test(err.message)
+        && err.name !== 'AbortError',
+    );
+  } finally {
+    await backend.close();
+  }
 });

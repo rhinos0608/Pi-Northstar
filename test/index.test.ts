@@ -283,3 +283,40 @@ test('browser tool registration: no maxChars param, browse action rejected', asy
   assert.ok(!resultText.includes('read'), 'browse action error should not mention read');
   assert.ok(resultText.includes('Unsupported') || resultText.includes('error'), 'browse action should be rejected');
 });
+
+test('social and media tool schemas remain unchanged', async () => {
+  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  process.env.PI_SEARCH_BOOTSTRAP = 'off';
+
+  const defs: Record<string, { parameters: Record<string, unknown> }> = {};
+  const pi = {
+    on: () => {},
+    registerTool: (def: { name: string; parameters: unknown }) => {
+      defs[def.name as string] = { parameters: def.parameters as Record<string, unknown> };
+    },
+    registerCommand: () => {},
+  };
+  try {
+    const mod = await import('../src/index.js');
+    const extFn = mod.default as (pi: unknown) => void;
+    extFn(pi);
+  } finally {
+    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+  }
+
+  assert.ok(defs.social, 'social tool must be registered');
+  assert.ok(defs.media, 'media tool must be registered');
+
+  const socialProps = Object.keys((defs.social.parameters.properties ?? {})).sort();
+  assert.deepEqual(socialProps, ['action', 'filter', 'id', 'limit', 'node', 'platform', 'query', 'subreddit', 'url', 'user', 'username']);
+  const socialPlatform = (defs.social.parameters.properties as Record<string, { enum?: string[] }>).platform;
+  assert.deepEqual(socialPlatform?.enum, ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook', 'instagram']);
+
+  const mediaProps = Object.keys((defs.media.parameters.properties ?? {})).sort();
+  assert.deepEqual(mediaProps, ['action', 'id', 'language', 'limit', 'platform', 'query', 'url']);
+  const mediaPlatform = (defs.media.parameters.properties as Record<string, { enum?: string[] }>).platform;
+  assert.deepEqual(mediaPlatform?.enum, ['youtube', 'bilibili', 'rss']);
+  const mediaAction = (defs.media.parameters.properties as Record<string, { enum?: string[] }>).action;
+  assert.deepEqual(mediaAction?.enum, ['search', 'details', 'transcript', 'hot', 'video', 'subtitle', 'feed']);
+});

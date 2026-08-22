@@ -16,6 +16,12 @@ const TSX_LOADER_URL = import.meta.resolve('tsx');
 const MAX_OUTPUT_CHARS = 1_000_000;
 const SIGKILL_AFTER_MS = 5_000;
 
+function cliAbortError(): Error {
+  const error = new Error('CLI backend aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 export class CliSearchBackend implements SearchBackend {
   constructor(
     private readonly env: Record<string, string | undefined>,
@@ -33,6 +39,10 @@ export class CliSearchBackend implements SearchBackend {
 
   private run(args: string[], signal?: AbortSignal, timeout?: number): Promise<CliEnvelope> {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(cliAbortError());
+        return;
+      }
       const child = spawn(process.execPath, ['--import', TSX_LOADER_URL, this.cliPath, ...args], {
         env: buildCliEnvironment(this.env),
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -40,14 +50,22 @@ export class CliSearchBackend implements SearchBackend {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let aborted = false;
       let killTimer: NodeJS.Timeout | undefined;
 
+      // Termination is shared, but the reason is tracked separately: only a
+      // caller AbortSignal produces AbortError; a wall-clock timeout is a
+      // backend failure (timeout error) so callers can retry or fall back.
       const terminate = () => {
         child.kill('SIGTERM');
         killTimer ??= setTimeout(() => child.kill('SIGKILL'), SIGKILL_AFTER_MS);
       };
+      const onAbort = () => {
+        aborted = true;
+        terminate();
+      };
       const cleanup = () => {
-        signal?.removeEventListener('abort', terminate);
+        signal?.removeEventListener('abort', onAbort);
         if (timer) clearTimeout(timer);
         if (killTimer) clearTimeout(killTimer);
       };
@@ -58,7 +76,7 @@ export class CliSearchBackend implements SearchBackend {
         }, timeout)
         : undefined;
 
-      signal?.addEventListener('abort', terminate, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
       child.stdout.on('data', (chunk: Buffer) => {
         stdout = (stdout + chunk.toString('utf8')).slice(-MAX_OUTPUT_CHARS);
       });
@@ -67,12 +85,20 @@ export class CliSearchBackend implements SearchBackend {
       });
       child.on('error', (error) => {
         cleanup();
+        if (aborted || signal?.aborted) {
+          reject(cliAbortError());
+          return;
+        }
         reject(error);
       });
       child.on('close', (code) => {
         cleanup();
         const output = stdout;
         const diagnostics = stderr.trim();
+        if (aborted || signal?.aborted) {
+          reject(cliAbortError());
+          return;
+        }
         if (timedOut) {
           reject(new Error(`CLI backend timed out after ${timeout}ms${diagnostics ? `\n${diagnostics}` : ''}`));
           return;
@@ -116,6 +142,7 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'NO_PROXY',
     'TWITTER_AUTH_TOKEN',
     'TWITTER_CT0',
+    'REDDIT_COOKIE',
     'OPENCLI_HOST',
     'OPENCLI_PORT',
     'OPENCLI_TOKEN',
@@ -188,6 +215,7 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'PI_SEARCH_WEB_BACKENDS',
     'SEARCH_WEB_BACKENDS',
     'PI_SEARCH_EMBEDDING_PORT',
+    'PI_SEARCH_PLATFORM_WEB_FALLBACK',
     'SIDER_DEVICE',
   ];
   return Object.fromEntries(

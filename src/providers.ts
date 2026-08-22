@@ -27,7 +27,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
   { provider: 'v2ex', channel: 'v2ex', family: 'social', envKeys: [], cookieDomains: [], loginFlow: 'none', risk: 'none', setup: 'No configuration required', description: 'V2EX topics, nodes, replies, and users' },
 
   // ── API key only ──────────────────────────────────────────
-  { provider: 'youtube', channel: 'youtube', family: 'media', envKeys: ['YOUTUBE_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set YOUTUBE_API_KEY env var or install yt-dlp', description: 'YouTube search, metadata, and subtitles' },
+  { provider: 'youtube', channel: 'youtube', family: 'media', envKeys: ['YOUTUBE_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set YOUTUBE_API_KEY for the official YouTube Data API', description: 'YouTube search, details, and hot via the official Data API' },
   { provider: 'brave', channel: 'search', family: 'research', envKeys: ['BRAVE_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Optional: set BRAVE_API_KEY for enhanced search', description: 'Brave Search API' },
   { provider: 'exa', channel: 'search', family: 'research', envKeys: ['EXA_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Optional: set EXA_API_KEY for semantic search', description: 'Exa (formerly Metaphor) semantic search API' },
   { provider: 'tavily', channel: 'search', family: 'research', envKeys: ['TAVILY_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Optional: set TAVILY_API_KEY for AI-native search', description: 'Tavily AI search API' },
@@ -56,11 +56,16 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
   { provider: 'groq', channel: '', family: '', envKeys: ['GROQ_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set GROQ_API_KEY for fast LLM inference', description: 'Groq API key for LLM inference' },
 ];
 
+function redditOAuthConfigured(env: Record<string, string | undefined>): boolean {
+  return Boolean(env.REDDIT_CLIENT_ID?.trim() && env.REDDIT_CLIENT_SECRET?.trim() && env.REDDIT_USER_AGENT?.trim());
+}
+
 export function liveAuthSnapshot(env: Record<string, string | undefined>): Record<string, { configured: boolean; keyNames: string[] }> {
   const result: Record<string, { configured: boolean; keyNames: string[] }> = {};
   for (const desc of PROVIDER_DESCRIPTORS) {
     const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.length > 0);
     let configured = present.length > 0 || desc.loginFlow === 'none';
+    if (desc.provider === 'reddit') configured = redditOAuthConfigured(env);
     if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
     result[desc.provider] = { configured, keyNames: present };
   }
@@ -76,6 +81,7 @@ export function authForChannel(channelName: string, env: Record<string, string |
   if (!desc) return undefined;
   const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.length > 0);
   let configured = present.length > 0 || desc.loginFlow === 'none';
+  if (desc.provider === 'reddit') configured = redditOAuthConfigured(env);
   if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
   return {
     configured,

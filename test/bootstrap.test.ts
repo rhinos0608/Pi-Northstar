@@ -387,3 +387,18 @@ test('callSetupTool login provider honors browser automation opt-out', async () 
   assert.equal(data.ok, false);
   assert.match(data.message as string, /Browser automation disabled/);
 });
+
+test('callSetupTool plan: reddit not configured for incomplete OAuth triple', async () => {
+  const partial = await callSetupTool({ action: 'plan' }, { env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec' } });
+  const partialText = (partial.content as Array<{ text?: string }>)[0]?.text ?? '';
+  const partialData = JSON.parse(partialText) as { providers: Array<Record<string, unknown>> };
+  const partialReddit = partialData.providers.find((p) => p.provider === 'reddit');
+  assert.equal(partialReddit?.configured, false, 'incomplete OAuth triple must not claim configured');
+
+  const full = await callSetupTool({ action: 'plan' }, { env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'ua/1' } });
+  const fullText = (full.content as Array<{ text?: string }>)[0]?.text ?? '';
+  const fullData = JSON.parse(fullText) as { providers: Array<Record<string, unknown>> };
+  const fullReddit = fullData.providers.find((p) => p.provider === 'reddit');
+  assert.equal(fullReddit?.configured, true, 'complete OAuth triple must claim configured');
+  assert.doesNotMatch(partialText, /sec/);
+});

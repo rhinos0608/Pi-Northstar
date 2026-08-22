@@ -224,6 +224,45 @@ export function cookieAuthEnvironment(provider: string, env: Record<string, stri
   }
 }
 
+/**
+ * Build a `Cookie` header from stored state scoped to an exact HTTPS
+ * target host and path. Honors each cookie's expiry, secure flag, domain
+ * (host-only vs Domain attribute), and path. Returns undefined when no
+ * stored cookie matches. Server-side replay is host/path-based per RFC 6265;
+ * SameSite is browser-only and not enforced here.
+ */
+export function cookieHeaderForUrl(provider: string, urlValue: string, env: Record<string, string | undefined>): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(urlValue);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:') return undefined;
+  const storage = readCookieState(provider, env);
+  if (!storage) return undefined;
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname || '/';
+  const now = Date.now();
+  const parts: string[] = [];
+  for (const cookie of storage.cookies) {
+    if (cookie.expires > 0 && cookie.expires * 1000 < now) continue;
+    if (cookie.secure && url.protocol !== 'https:') continue;
+    const domain = cookie.domain.toLowerCase();
+    if (domain.startsWith('.')) {
+      const base = domain.slice(1);
+      if (host !== base && !host.endsWith(domain)) continue;
+    } else if (host !== domain) {
+      continue;
+    }
+    const cookiePath = cookie.path || '/';
+    const prefix = cookiePath.endsWith('/') ? cookiePath : `${cookiePath}/`;
+    if (path !== cookiePath && !path.startsWith(prefix)) continue;
+    parts.push(`${cookie.name}=${cookie.value}`);
+  }
+  return parts.length ? parts.join('; ') : undefined;
+}
+
 export function filterCookiesForDomains(cookies: BrowserCookie[], domains: string[]): BrowserCookie[] {
   const suffixes = domains.map((domain) => domain.toLowerCase());
   return cookies.filter((cookie) => {
