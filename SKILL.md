@@ -14,7 +14,7 @@ Use this extension when current external evidence or repository context would im
 - `browser`: closed agent-browser automation (navigate, snapshot, fill, wait, get URL/title, screenshot, click, type, scroll, tabs, metadata-only cookies); explicit loopback CDP rollback via `PI_SEARCH_BROWSER_BACKEND=cdp`.
 - `github`: inspect repositories, files, trees, code search, trending repos, and semantic code search.
 - `social`: search/read Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram.
-- `media`: video platforms (YouTube/Bilibili) metadata, search, subtitles + RSS/Atom feed reading.
+- `media`: YouTube (official Data API, set `YOUTUBE_API_KEY`) and Bilibili metadata, search, and details + RSS/Atom feed reading.
 
 ## Preferred workflow
 

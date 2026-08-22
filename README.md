@@ -29,9 +29,87 @@ Each public tool validates input, calls into the shared services above, and shap
 | `fetch` | Read any webpage as clean text, or do semantic retrieval — give it a query and it crawls pages, finds the most relevant passages, and returns ranked chunks. |
 | `github` | Browse repos, read files, search code, discover trending projects. With an embedding sidecar, unlock `code_search` for AST-aware semantic code retrieval. |
 | `social` | Read and search Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram. |
-| `media` | YouTube and Bilibili search, metadata, subtitles. RSS/Atom feed reading. |
+| `media` | YouTube (official Data API) and Bilibili search, metadata, and details. RSS/Atom feed reading. |
 | `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. |
 | `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
+
+### Platform terms, authorization, and opt-in fallbacks
+
+Reddit and YouTube tool paths first use official, sanctioned sources, then safe
+keyless endpoints, and only then — **when you opt in** — last-resort web
+fallbacks. Please read this before enabling fallbacks:
+
+- **Terms of service.** Reddit and YouTube prohibit unauthorized automated
+  access/scraping; neither platform's terms permit scraping merely because a
+  logged-in session or cookie is used. Using `social`/`media` in a way that
+  bypasses official APIs, or replaying session cookies, may violate those
+  terms and can lead to account locks, IP blocks, or other enforcement.
+- **Session cookies are bearer credentials.** A stored or exported Reddit
+  cookie can fully impersonate the logged-in account. Pi-Atlas only sends
+  cookies to fixed canonical Reddit hosts, rejects redirects, filters stored
+  cookies by host/path/expiry/secure, and never forwards cookies to external
+  CLIs, archives, search children, or scrapers — but **you** are responsible
+  for what you paste into `REDDIT_COOKIE` and for protecting cookie state
+  (`~/.pi-extension-search/cookies/`, stored plaintext with `0600` perms).
+  Use throwaway/dedicated accounts for any cookie-based fallback.
+- **Opt-in web fallback is off by default.** Set
+  `PI_SEARCH_PLATFORM_WEB_FALLBACK=1` to enable the last-resort
+  web-search/web-fetch fallbacks (steps 5/3 below). The rest of the source
+  ordering — official APIs, saved-session-cookie path, legacy CLIs, Arctic
+  Shift archive, oEmbed — is **not** gated by this flag, and automatic
+  browser-cookie import remains governed by its own `PI_SEARCH_AUTO_COOKIES`
+  setting.
+
+Source ordering, Reddit (`social`):
+
+1. Official Reddit Data API (OAuth `REDDIT_CLIENT_ID`/`SECRET`/`USER_AGENT`) —
+   `backend: "reddit-api"`.
+2. Saved Reddit session cookie, direct to `www.reddit.com` only (fixed host,
+   no redirects) — `backend: "reddit-cookie"`.
+3. Legacy CLI compatibility fallback (`opencli`, `rdt-cli`) when no live
+   credentials/session exist.
+4. Arctic Shift archive (`arctic-shift.photon-reddit.com`, fixed host, one
+   attempt, clearly labeled `[ARCHIVE]`, deleted/removed items filtered).
+5. **Opt-in only** (`PI_SEARCH_PLATFORM_WEB_FALLBACK=1`, last resort):
+   Pi-owned `web_search`/`agentic_browse` through a sanitized child process
+   (no cookies, no proxy vars, no platform/API credentials, one-shot fetch,
+   and the child never re-reads the repo `.env`/JSON config).
+   Output uses a **separate data model** — `backend: "web-search-fallback"`
+   with `dataModel: "search-results"`, or `backend: "web-fetch-fallback"`
+   with `dataModel: "page-text"`, both `degraded: true` — and is never
+   merged into the official API result models.
+
+Source ordering, YouTube (`media`):
+
+1. Official YouTube Data API v3 when `YOUTUBE_API_KEY` is set (`search`,
+   `details`, `hot`).
+2. Keyless `www.youtube.com/oembed` for `details` only (limited fields).
+3. **Opt-in only** last resort (`PI_SEARCH_PLATFORM_WEB_FALLBACK=1`): the same
+   sanitized web-search/web-fetch fallbacks with the same separate data model
+   for `search`/`hot` (no key or API failure) and for `details` once oEmbed
+   fails.
+
+Transcripts/subtitles for YouTube are **not supported** (a clear error is
+returned); Pi-Atlas does not scrape transcripts or use transcript services,
+and automatic calls never route to `yt-dlp`. An **OAuth management dashboard**
+for these services is future, deferred work — this release adds no dashboard,
+redirect endpoint, token storage, schema field, or tool.
+
+### Reddit and YouTube examples
+
+```ts
+social({ platform: 'reddit', action: 'search', query: 'self-hosting', limit: 10 })
+social({ platform: 'reddit', action: 'read', url: 'https://www.reddit.com/r/example/comments/POST_ID/' })
+
+media({ platform: 'youtube', action: 'search', query: 'WebAssembly GC' }) // requires YOUTUBE_API_KEY, or opt-in web fallback
+media({ platform: 'youtube', action: 'details', url: 'https://youtu.be/VIDEO_ID' }) // Data API, then keyless oEmbed
+media({ platform: 'youtube', action: 'hot' }) // requires YOUTUBE_API_KEY, or opt-in web fallback
+```
+
+Inspect `details.backend` and `details.degraded`: `reddit-api`,
+`reddit-cookie`, `arctic-shift`, and `youtube-data-api` retain their native
+result models. `web-search-fallback` and `web-fetch-fallback` are degraded,
+with `search-results` and `page-text` models respectively.
 
 ## Quick start
 
