@@ -34,7 +34,7 @@ const DISALLOWED_TOOL_NAMES = [
 test('import.meta.resolve("tsx") is used by CliSearchBackend subprocess', () => {
   const resolved = import.meta.resolve('tsx');
   assert.ok(typeof resolved === 'string');
-  assert.ok(resolved.startsWith('file://'), 'cli-backend.ts and bin/pi-extension-search.mjs use this path in --import');
+  assert.ok(resolved.startsWith('file://'), 'cli-backend.ts and bin/pi-atlas.mjs use this path in --import');
 });
 
 test('extension registers exactly expected tool and command names', async () => {

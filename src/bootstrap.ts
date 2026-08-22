@@ -36,7 +36,7 @@ interface CookieStatus {
 }
 
 const BOOTSTRAP_STATE_VERSION = 3;
-const DEFAULT_STATE_DIR = join(homedir(), '.pi-extension-search');
+const DEFAULT_STATE_DIR = join(homedir(), '.pi-atlas');
 const DEFAULT_BOOTSTRAP_MESSAGE = 'First-start automation complete. Use /reach-setup status to view backend, auth, and cookie state.';
 
 const STATE_PATH = join(DEFAULT_STATE_DIR, 'bootstrap.json');

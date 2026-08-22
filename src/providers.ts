@@ -14,7 +14,7 @@ export interface ProviderDescriptor {
   loginUrl?: string;
 }
 
-export const AUTH_DIR = '~/.pi-extension-search';
+export const AUTH_DIR = '~/.pi-atlas';
 
 /**
  * Provider descriptors: what env keys each provider needs, cookie domains,

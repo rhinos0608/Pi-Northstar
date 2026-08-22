@@ -33,7 +33,7 @@ export async function runCommand(args: string[] | string | undefined, env: Recor
   if (commandName === 'config') return configResult(env);
   if (commandName === 'call') return callResult(argv[1], argv[2], env);
 
-  return errorResult('unknown_command', 'Usage: pi-extension-search <status|config|call TOOL JSON_ARGS>');
+  return errorResult('unknown_command', 'Usage: pi-atlas <status|config|call TOOL JSON_ARGS>');
 }
 
 async function callResult(toolName: string | undefined, rawArgs: string | undefined, env: Record<string, string | undefined>): Promise<CliResult> {

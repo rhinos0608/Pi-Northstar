@@ -812,7 +812,7 @@ async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: 
 async function githubJson(url: string, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<unknown> {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
-    'User-Agent': 'pi-extension-search',
+    'User-Agent': 'pi-atlas',
   };
   if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const response = await fetch(url, fetchInit(headers, signal));

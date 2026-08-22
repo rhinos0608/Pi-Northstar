@@ -41,7 +41,7 @@ interface ChannelDefinition {
 const COMMAND_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_CHARS = 1_000_000;
 const SIGKILL_AFTER_MS = 5_000;
-const USER_AGENT = 'pi-extension-search/0.1';
+const USER_AGENT = 'pi-atlas/0.1';
 
 // Fixed first-party hosts only. No user-configurable fallback hosts.
 const REDDIT_OAUTH_BASE = 'https://oauth.reddit.com';

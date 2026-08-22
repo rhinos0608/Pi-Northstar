@@ -55,7 +55,7 @@ interface CookieImportSummary {
 
 // ── Constants ──
 
-const DEFAULT_STATE_DIR = join(homedir(), '.pi-extension-search');
+const DEFAULT_STATE_DIR = join(homedir(), '.pi-atlas');
 const CDP_TIMEOUT_MS = 30_000;
 const LOGIN_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_CDP_PORT = 9222;

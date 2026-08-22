@@ -50,7 +50,7 @@ fallbacks. Please read this before enabling fallbacks:
   cookies by host/path/expiry/secure, and never forwards cookies to external
   CLIs, archives, search children, or scrapers — but **you** are responsible
   for what you paste into `REDDIT_COOKIE` and for protecting cookie state
-  (`~/.pi-extension-search/cookies/`, stored plaintext with `0600` perms).
+  (`~/.pi-atlas/cookies/`, stored plaintext with `0600` perms).
   Use throwaway/dedicated accounts for any cookie-based fallback.
 - **Opt-in web fallback is off by default.** Set
   `PI_SEARCH_PLATFORM_WEB_FALLBACK=1` to enable the last-resort
@@ -118,15 +118,15 @@ Two ways to bring Pi-Atlas into `pi`:
 ### Install as a Pi package (recommended)
 
 ```bash
-pi install git:github.com/rhinos0608/pi-extension-search-mcp
+pi install git:github.com/rhinos0608/Pi-Atlas
 ```
 
-This clones the repo into `~/.pi/agent/git/` (or `.pi/git/` with `-l` for a project-local install), runs `npm install`, and registers the extension in settings for you. To try it for one session without installing anything: `pi -e git:github.com/rhinos0608/pi-extension-search-mcp`. See `pi`'s [package docs](https://github.com/earendil-works/pi) for update/remove commands.
+This clones the repo into `~/.pi/agent/git/` (or `.pi/git/` with `-l` for a project-local install), runs `npm install`, and registers the extension in settings for you. To try it for one session without installing anything: `pi -e git:github.com/rhinos0608/Pi-Atlas`. See `pi`'s [package docs](https://github.com/earendil-works/pi) for update/remove commands.
 
 ### Clone and wire up manually
 
 ```bash
-git clone https://github.com/rhinos0608/pi-extension-search-mcp.git Pi-Atlas
+git clone https://github.com/rhinos0608/Pi-Atlas.git Pi-Atlas
 cd Pi-Atlas
 npm install
 ```

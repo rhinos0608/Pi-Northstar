@@ -47,7 +47,7 @@ interface StorageState {
   origins: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
 }
 
-const DEFAULT_STATE_DIR = join(homedir(), '.pi-extension-search');
+const DEFAULT_STATE_DIR = join(homedir(), '.pi-atlas');
 const CHROME_EPOCH_OFFSET_SECONDS = 11_644_473_600;
 const DEFAULT_STALE_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_COOKIE_IMPORT_PROVIDERS = new Set(['twitter', 'reddit', 'xiaohongshu', 'bilibili']);
