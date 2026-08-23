@@ -274,7 +274,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     name: 'browser',
     label: 'Browser',
     description: 'Closed browser automation via agent-browser. Supports public browsing and loopback-only debug mode for local dev servers.',
-    promptSnippet: 'Control a browser via CDP for live page interaction, screenshots, and cookie extraction.',
+    promptSnippet: 'Control a browser via agent-browser for live page interaction, screenshots, and cookie metadata inspection; values are never exposed. Set PI_SEARCH_BROWSER_BACKEND=cdp for explicit deprecated CDP rollback.',
     promptGuidelines: [
       'Uses agent-browser backend by default; set PI_SEARCH_BROWSER_BACKEND=cdp for explicit loopback CDP rollback.',
       'Respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out.',
@@ -296,6 +296,36 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       urls: Type.Optional(Type.Array(Type.String(), { description: 'URLs for cookies action.' })),
       cookies: Type.Optional(Type.Array(Type.Any(), { description: 'Cookie metadata/payload for set_cookies; values never returned.' })),
       waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 120000, description: 'Wait duration in milliseconds.' })),
+      compact: Type.Optional(Type.Boolean({ description: 'Request compact/truncated output from snapshot actions.' })),
+      semanticAction: Type.Optional(Type.Object({
+        locator: Type.String({ description: 'Locator strategy: role, text, label, placeholder, alt, title, testid, first, last, nth.' }),
+        query: Type.String({ description: 'Locator query value.' }),
+        verb: Type.String({ description: 'Action verb: click, fill, check, uncheck, select, type, hover.' }),
+        name: Type.Optional(Type.String({ description: 'Optional name hint for role locators.' })),
+        index: Type.Optional(Type.Number({ description: 'Zero-based index for nth locator.' })),
+        value: Type.Optional(Type.String({ description: 'Value for fill/type/select verbs.' })),
+        exact: Type.Optional(Type.Boolean({ description: 'Exact match flag.' })),
+      }, { description: 'Semantic element interaction by role/text/label instead of CSS selector.' })),
+      job: Type.Optional(Type.Object({
+        steps: Type.Array(Type.Object({
+          kind: Type.String({ description: 'Step kind: open, click, fill, type, select, wait, assert, snapshot, screenshot.' }),
+          url: Type.Optional(Type.String({ description: 'URL for open steps.' })),
+          selector: Type.Optional(Type.String({ description: 'CSS selector for click/fill/type/select/assert.' })),
+          text: Type.Optional(Type.String({ description: 'Text for fill/type steps.' })),
+          values: Type.Optional(Type.Array(Type.String(), { description: 'Values for select steps.' })),
+          waitMs: Type.Optional(Type.Number({ description: 'Wait duration for wait steps.' })),
+          assertText: Type.Optional(Type.String({ description: 'Expected text for assert steps.' })),
+          continueOnFailure: Type.Optional(Type.Boolean({ description: 'Continue job on step failure.' })),
+        })),
+        maxSteps: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Max steps; default 20. Cannot target loopback URLs.' })),
+      }, { description: 'Multi-step browser job. Steps execute sequentially. Cannot target loopback URLs.' })),
+      batch: Type.Optional(Type.Object({
+        commands: Type.Array(Type.Object({
+          args: Type.Array(Type.String(), { description: 'Command args: [action, ...values].' }),
+          sensitive: Type.Optional(Type.Boolean({ description: 'Whether command touches sensitive state.' })),
+        })),
+        maxCommands: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Max commands; default 20. Cannot target loopback URLs. Requires PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1.' })),
+      }, { description: 'Batch multiple browser commands. Sensitive-gated; requires PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1. Cannot target loopback URLs.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const { browser } = await import('./browser-tools.js');

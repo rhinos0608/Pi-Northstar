@@ -32,7 +32,9 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
     throw new Error('steps is required and must be a non-empty array');
   }
 
-  const maxSteps = typeof raw.maxSteps === 'number' ? raw.maxSteps : MAX_STEPS_DEFAULT;
+  const callerMax = typeof raw.maxSteps === 'number' ? raw.maxSteps : MAX_STEPS_DEFAULT;
+  // Hard cap: caller may not exceed the built-in constant
+  const maxSteps = Math.min(callerMax, MAX_STEPS_DEFAULT);
   if (raw.steps.length > maxSteps) {
     throw new Error(`too many steps (max ${maxSteps})`);
   }

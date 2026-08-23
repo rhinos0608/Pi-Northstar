@@ -233,3 +233,14 @@ test('validateBatchRequest rejects credentialed IPv6 loopback URL in navigate co
     /credentials/,
   );
 });
+
+test('validateBatchRequest caps effective max at 20 even when caller supplies higher maxCommands', () => {
+  // maxCommands: 21 should NOT allow 21 commands; effective cap is 20
+  const commands21 = Array.from({ length: 21 }, () => ({ args: ['click', '#btn'] }));
+  assert.throws(() => validateBatchRequest({ commands: commands21, maxCommands: 21 }), /too many commands/);
+  // 21 commands with maxCommands:21 must not pass — the hard cap is 20
+  // Verify exactly 20 still passes
+  const commands20 = Array.from({ length: 20 }, () => ({ args: ['click', '#btn'] }));
+  const r = validateBatchRequest({ commands: commands20, maxCommands: 21 });
+  assert.equal(r.commands.length, 20);
+});

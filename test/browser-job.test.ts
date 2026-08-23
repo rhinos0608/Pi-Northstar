@@ -164,3 +164,13 @@ test('jobStepToBrowserRequest maps assert to wait', () => {
   assert.equal(req.action, 'wait');
   assert.equal(req.selector, 'body');
 });
+
+test('validateJobRequest caps effective max at 20 even when caller supplies higher maxSteps', () => {
+  // maxSteps: 21 should NOT allow 21 steps; effective cap is 20
+  const steps21 = Array.from({ length: 21 }, () => ({ kind: 'snapshot' as const }));
+  assert.throws(() => validateJobRequest({ steps: steps21, maxSteps: 21 }), /too many steps/);
+  // Exactly 20 should still pass
+  const steps20 = Array.from({ length: 20 }, () => ({ kind: 'snapshot' as const }));
+  const res = validateJobRequest({ steps: steps20, maxSteps: 21 });
+  assert.equal(res.steps.length, 20);
+});

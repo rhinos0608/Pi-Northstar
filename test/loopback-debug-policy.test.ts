@@ -24,6 +24,18 @@ test('accepts localhost with explicit port', () => {
   assert.equal(p.origin, 'http://localhost:3000');
 });
 
+test('navigation URL preserves pathname', () => {
+  const p = parseLoopbackDebugTarget('http://localhost:3000/debug/start');
+  assert.ok(p);
+  assert.equal(p.navigationUrl, 'http://localhost:3000/debug/start');
+});
+
+test('navigation URL preserves query', () => {
+  const p = parseLoopbackDebugTarget('http://localhost:3000/debug?mode=loopback');
+  assert.ok(p);
+  assert.equal(p.navigationUrl, 'http://localhost:3000/debug?mode=loopback');
+});
+
 test('accepts 127.0.0.1', () => {
   const p = parseLoopbackDebugTarget('http://127.0.0.1:8080');
   assert.ok(p);

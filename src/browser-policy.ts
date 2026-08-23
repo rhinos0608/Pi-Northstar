@@ -365,7 +365,9 @@ export function validateBatchRequest(raw: Record<string, unknown>): BatchRequest
   if (!Array.isArray(raw.commands) || raw.commands.length === 0) {
     throw new Error('commands is required and must be a non-empty array');
   }
-  const maxCommands = typeof raw.maxCommands === 'number' ? raw.maxCommands : MAX_BATCH_COMMANDS;
+  const callerMax = typeof raw.maxCommands === 'number' ? raw.maxCommands : MAX_BATCH_COMMANDS;
+  // Hard cap: caller may not exceed the built-in constant
+  const maxCommands = Math.min(callerMax, MAX_BATCH_COMMANDS);
   if (raw.commands.length > maxCommands) {
     throw new Error(`too many commands (max ${maxCommands})`);
   }

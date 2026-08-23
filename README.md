@@ -587,7 +587,7 @@ desktop({ action: "wait", pid: 1234, windowId: "main-window", predicate: { text:
 
 ### State IDs
 
-Mutations (click, type, scroll) require a fresh `stateId` from the most recent `observe_window` call. After each mutation, you must call `observe_window` again to get a new state ID before the next mutation. This ensures:
+Mutations (click, type, press_key, scroll) require a fresh `stateId` from the most recent `observe_window` call. After each mutation, you must call `observe_window` again to get a new state ID before the next mutation. This ensures:
 
 - State consistency: AX tree matched to real state
 - Atomicity: mutations are serialized and never retried after dispatch
@@ -597,7 +597,7 @@ Mutations (click, type, scroll) require a fresh `stateId` from the most recent `
 
 - Optional via `includeScreenshot: true` in `observe_window`
 - Returns as inline base64 image content
-- **Sensitive**: closes all apps before enabling; PII/credentials can leak
+- **Sensitive**: screenshots can expose PII/credentials — close sensitive apps before capturing; the extension does not close apps on your behalf
 - Returns PNG with window content, resolution capped at 10 000×10 000 pixels (desktop screenshot via Cua Driver). Browser (`screen‑shot`) screenshots are capped at 8 000×8 000 pixels (configured in agent-browser adapter).
 
 ### Observations
@@ -609,11 +609,11 @@ Mutations (click, type, scroll) require a fresh `stateId` from the most recent `
 
 ### Permissions
 
-Cua Driver requires OS-level permissions (never prompt — user must grant in System Settings):
+Cua Driver relies on OS-level permissions. The extension does not request, revoke, or monitor them:
 
-- **macOS**: Accessibility (System Settings > Privacy & Security > Accessibility)
-- **Linux**: X11 or Wayland permissions (varies by desktop)
-- **Windows**: Administrator for some actions
+- **macOS**: macOS may show an Accessibility prompt; grant access in System Settings > Privacy & Security > Accessibility.
+- **Linux**: X11 or Wayland permissions vary by desktop.
+- **Windows**: Some actions may require Administrator privileges.
 
 Permissions are user-owned and persist across sessions. Session shutdown cannot revoke grants.
 

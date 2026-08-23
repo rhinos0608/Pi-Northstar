@@ -405,3 +405,93 @@ test('before_agent_start appends policy once per call and says framing cannot au
   const policyCount = (second.systemPrompt.match(/untrusted evidence, not instructions/g) ?? []).length;
   assert.equal(policyCount, 1, 'policy appended exactly once per hook call');
 });
+
+// ── Browser schema parity: compact, semanticAction, job, batch ──
+
+async function captureBrowserTool(): Promise<{ name: string; parameters: Record<string, unknown> } | undefined> {
+  let captured: { name: string; parameters: Record<string, unknown> } | undefined;
+  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  process.env.PI_SEARCH_BOOTSTRAP = 'off';
+  const pi = {
+    on: () => {},
+    registerTool: (def: { name: string; parameters: unknown }) => {
+      if (def.name === 'browser') captured = { name: def.name, parameters: def.parameters as Record<string, unknown> };
+    },
+    registerCommand: () => {},
+  };
+  try {
+    const mod = await import('../src/index.js');
+    const extFn = mod.default as (pi: unknown) => void;
+    extFn(pi);
+  } finally {
+    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+  }
+  return captured;
+}
+
+test('browser schema exposes compact, semanticAction, job, batch fields', async () => {
+  const tool = await captureBrowserTool();
+  assert.ok(tool, 'browser tool must be registered');
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  assert.ok(props.compact, 'compact field must be present');
+  assert.ok(props.semanticAction, 'semanticAction field must be present');
+  assert.ok(props.job, 'job field must be present');
+  assert.ok(props.batch, 'batch field must be present');
+});
+
+test('browser schema batch maxCommands capped at 20, not 100', async () => {
+  const tool = await captureBrowserTool();
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  const batch = props.batch as { properties: Record<string, unknown> };
+  const maxCommands = batch.properties.maxCommands as { maximum: number };
+  assert.equal(maxCommands.maximum, 20, 'batch maxCommands must cap at 20');
+});
+
+test('browser schema job maxSteps capped at 20, not 100', async () => {
+  const tool = await captureBrowserTool();
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  const job = props.job as { properties: Record<string, unknown> };
+  const maxSteps = job.properties.maxSteps as { maximum: number };
+  assert.equal(maxSteps.maximum, 20, 'job maxSteps must cap at 20');
+});
+
+test('browser schema batch description states sensitive gate and loopback restriction', async () => {
+  const tool = await captureBrowserTool();
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  const batch = props.batch as { description: string };
+  assert.ok(batch.description.includes('Sensitive'), 'batch description must mention sensitive gate');
+  assert.ok(batch.description.includes('loopback'), 'batch description must mention loopback restriction');
+});
+
+test('browser schema job description states loopback restriction', async () => {
+  const tool = await captureBrowserTool();
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  const job = props.job as { description: string };
+  assert.ok(job.description.includes('loopback'), 'job description must mention loopback restriction');
+});
+
+test('browser schema semanticAction exposes locator, query, verb subfields', async () => {
+  const tool = await captureBrowserTool();
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  const sa = props.semanticAction as { properties: Record<string, unknown> };
+  assert.ok(sa.properties.locator, 'semanticAction.locator must be present');
+  assert.ok(sa.properties.query, 'semanticAction.query must be present');
+  assert.ok(sa.properties.verb, 'semanticAction.verb must be present');
+});
+
+test('browser schema batch commands exposes args subfield', async () => {
+  const tool = await captureBrowserTool();
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  const batch = props.batch as { properties: Record<string, unknown> };
+  const commands = batch.properties.commands as { items: { properties: Record<string, unknown> } };
+  assert.ok(commands.items.properties.args, 'batch commands[].args must be present');
+});
+
+test('browser schema job steps exposes kind subfield', async () => {
+  const tool = await captureBrowserTool();
+  const props = tool!.parameters.properties as Record<string, unknown>;
+  const job = props.job as { properties: Record<string, unknown> };
+  const steps = job.properties.steps as { items: { properties: Record<string, unknown> } };
+  assert.ok(steps.items.properties.kind, 'job steps[].kind must be present');
+});

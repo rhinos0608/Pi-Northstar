@@ -63,8 +63,8 @@ export function parseLoopbackDebugTarget(raw: string): LoopbackDebugPolicy | und
   const origin = url.origin;
   const port = url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80);
 
-  // Rebuild a clean navigation URL with trailing slash for consistency
-  const navigationUrl = origin + '/';
+  // Preserve target path and query while keeping origin separately for containment checks.
+  const navigationUrl = origin + url.pathname + url.search;
 
   return {
     navigationUrl,

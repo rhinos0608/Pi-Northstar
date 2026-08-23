@@ -338,7 +338,7 @@ export class AgentBrowserAdapter {
       if (!checkDomainAllowed(hostname, this.allowedDomains)) {
         return jsonTextResult({
           ok: false,
-          error: `Navigation to ${hostname} blocked by domain policy. Allowed domains: ${this.allowedDomains.join(', ')}. Add ${hostname} to allowedDomains to permit.`,
+          error: `Navigation to ${hostname} blocked by domain policy. Allowed domains: ${this.allowedDomains.join(', ')}. Close the session and navigate fresh to a different hostname to continue.`,
         });
       }
     }
