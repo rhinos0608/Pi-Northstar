@@ -126,10 +126,13 @@ export function validateAllowedDomain(pattern: string): string {
   if (trimmed === '*') throw new Error('Wildcard-only domain pattern (*) is not allowed');
   // Validate wildcard syntax: must be `*.` prefix or exact
   if (trimmed.startsWith('*.')) {
-    const suffix = trimmed.slice(1); // .example.com
-    if (!suffix.includes('.')) throw new Error(`Invalid wildcard domain: ${pattern} — must be *.<domain>`);
-    // Reject private/reserved in the suffix
-    assertPublicHostname(suffix.slice(1)); // strip leading dot
+    const domain = trimmed.slice(2); // e.g. "example.com" from "*.example.com"
+    // Require at least two labels after the `*.` prefix (e.g. "*.example.com",
+    // reject "*." and "*.com") before parsing as a hostname.
+    if (!domain || !domain.includes('.')) {
+      throw new Error(`Invalid wildcard domain: ${pattern} — must be *.<domain.tld> (at least two labels)`);
+    }
+    assertPublicHostname(domain);
   } else if (!trimmed.includes('*')) {
     assertPublicHostname(trimmed);
   } else {

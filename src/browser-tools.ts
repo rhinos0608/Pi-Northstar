@@ -45,11 +45,11 @@ let _loopbackProxy: LoopbackProxy | null = null
 // Guards fresh loopback entry to prevent concurrent transitions
 let _transitionBusy = false
 
-async function getAdapter(env?: Record<string, string | undefined>): Promise<AgentBrowserAdapter> {
+async function getAdapter(env?: Record<string, string | undefined>): Promise<AgentBrowserAdapter | BackendCallResult> {
   if (_loopbackPolicy) {
     // Loopback mode active — never create a normal adapter that could overwrite the confined one
     if (_adapter) return _adapter
-    throw new Error('Loopback mode active but no adapter available. Wait for loopback transition to complete.')
+    return textResult({ error: 'Loopback mode active but no adapter available. Wait for loopback transition to complete.', failureCategory: 'domain-blocked' })
   }
   if (_adapter) return _adapter
   if (_adapterInit) return _adapterInit
@@ -63,11 +63,11 @@ async function getAdapter(env?: Record<string, string | undefined>): Promise<Age
 }
 
 async function disposeCurrentAdapter(): Promise<void> {
+  _loopbackPolicy = null
   if (_adapter) {
     const a = _adapter
     _adapter = null
     _adapterInit = null
-    _loopbackPolicy = null
     await a.close()
   }
   if (_loopbackProxy) {
@@ -121,12 +121,20 @@ async function agentBrowserRoute(
   const action = typeof args.action === 'string' ? args.action : ''
   const url = typeof args.url === 'string' ? args.url.trim() : ''
 
-  // Reject credentialed URLs — prevents bypass of loopback detection
-  if (url.includes('@')) {
-    return textResult({
-      error: 'URLs with credentials (user:pass@host) are not allowed. Remove userinfo from the URL.',
-      failureCategory: 'domain-blocked',
-    })
+  // Reject credentialed URLs — prevents bypass of loopback detection.
+  // Parse the URL so '@' in the path/query does not false-positive.
+  if (url) {
+    let hasCredentials = false
+    try {
+      const parsedUrl = new URL(url)
+      hasCredentials = parsedUrl.username !== '' || parsedUrl.password !== ''
+    } catch { /* invalid URL handled downstream */ }
+    if (hasCredentials) {
+      return textResult({
+        error: 'URLs with credentials (user:pass@host) are not allowed. Remove userinfo from the URL.',
+        failureCategory: 'domain-blocked',
+      })
+    }
   }
 
   // Detect loopback navigate: parse target, start proxy if needed
@@ -203,8 +211,16 @@ async function agentBrowserRoute(
     return _adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
   }
 
-  const adapter = await getAdapter(env)
-  return adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+  const adapterOrResult = await getAdapter(env)
+  if (isAgentBrowserAdapter(adapterOrResult)) {
+    return adapterOrResult.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+  }
+  return adapterOrResult
+}
+
+/** Narrowing guard for the adapter/result union returned by getAdapter. */
+function isAgentBrowserAdapter(value: AgentBrowserAdapter | BackendCallResult): value is AgentBrowserAdapter {
+  return typeof (value as AgentBrowserAdapter).execute === 'function'
 }
 
 // ── Legacy CDP route (rollback path) ──

@@ -44,4 +44,7 @@ test('hostile parent proxy vars are overridden by adapter-controlled values', ()
   );
   assert.equal(env.AGENT_BROWSER_PROXY, 'http://127.0.0.1:9999');
   assert.equal(env.AGENT_BROWSER_PROXY_BYPASS, '<-loopback>');
+  assert.equal(env.HTTP_PROXY, undefined);
+  assert.equal(env.HTTPS_PROXY, undefined);
+  assert.equal(env.NO_PROXY, undefined);
 });

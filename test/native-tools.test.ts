@@ -18,7 +18,7 @@ test('callNativeTool fetch alias routes to semanticCrawl', async () => {
   );
 });
 
-test('callNativeTool fetch returns same result as semantic_crawl for public URL', async () => {
+test('callNativeTool fetch and semantic_crawl reject loopback URLs before connecting', async () => {
   // Both fetch and semantic_crawl should reject private/loopback URLs before connecting
   await assert.rejects(
     () => callNativeTool('fetch', { source: { type: 'url', url: 'http://127.0.0.1:3000/' }, query: 'hello' }),
@@ -340,7 +340,7 @@ test('reddit feed filter maps to hot and popular feeds with limits', async () =>
 
 // ── followLinks BFS crawl tests ──
 
-test('followLinks crawl visits same-domain pages and skips external', { skip: 'Scope A blocks private loopback targets' }, async () => {
+test('followLinks crawl visits same-domain pages and skips external', { skip: 'Scope A blocks private loopback targets — restore via injectable validator, see #followlinks-scope-a' }, async () => {
   let externalRequestCount = 0;
   const externalServer: Server = createServer((_req, res) => {
     externalRequestCount++;
@@ -398,7 +398,7 @@ test('followLinks crawl visits same-domain pages and skips external', { skip: 'S
   }
 });
 
-test('followLinks crawl deduplicates normalized URLs', { skip: 'Scope A blocks private loopback targets' }, async () => {
+test('followLinks crawl deduplicates normalized URLs', { skip: 'Scope A blocks private loopback targets — restore via injectable validator, see #followlinks-scope-a' }, async () => {
   let pageCount = 0;
   const server: Server = createServer((_req, res) => {
     pageCount++;
@@ -424,7 +424,7 @@ test('followLinks crawl deduplicates normalized URLs', { skip: 'Scope A blocks p
   }
 });
 
-test('followLinks crawl respects maxPages limit', { skip: 'Scope A blocks private loopback targets' }, async () => {
+test('followLinks crawl respects maxPages limit', { skip: 'Scope A blocks private loopback targets — restore via injectable validator, see #followlinks-scope-a' }, async () => {
   const pages: Record<string, string> = {};
   for (let i = 0; i < 5; i++) {
     pages[`/p${i}`] = `<html><body><h1>Page ${i}</h1><p>This is page number ${i} with enough content to exceed the minimum chunk size requirement for proper testing of the crawl pipeline and page limits.</p><a href="/p${(i + 1) % 5}">Next</a></body></html>`;
@@ -459,7 +459,7 @@ test('followLinks crawl respects maxPages limit', { skip: 'Scope A blocks privat
   }
 });
 
-test('followLinks crawl respects maxDepth via custom maxDepth', { skip: 'Scope A blocks private loopback targets' }, async () => {
+test('followLinks crawl respects maxDepth via custom maxDepth', { skip: 'Scope A blocks private loopback targets — restore via injectable validator, see #followlinks-scope-a' }, async () => {
   // Pages: /d0 -> /d1 -> /d2 -> /d3
   const pages: Record<string, string> = {
     '/d0': '<html><body><h1>Depth 0</h1><p>This is the first page in our depth chain. It contains links that go deeper into the site structure for testing purposes.</p><a href="/d1">Next</a></body></html>',

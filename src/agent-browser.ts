@@ -307,7 +307,11 @@ export class AgentBrowserAdapter {
       // Keep exact hostname in allowedDomains so vendor containment remains active.
       // This narrow loopback exception bypasses public domain validation only here.
       if (!this.domainsFrozen) {
-        this.allowedDomains = [loopbackPolicy.hostname];
+        // Strip IPv6 brackets ([::1] → ::1) so mergeOptions forwards canonical value
+        const hostname = loopbackPolicy.hostname.startsWith('[') && loopbackPolicy.hostname.endsWith(']')
+          ? loopbackPolicy.hostname.slice(1, -1)
+          : loopbackPolicy.hostname;
+        this.allowedDomains = [hostname];
         this.domainsFrozen = true;
       }
       await this.ensureSession(options);
