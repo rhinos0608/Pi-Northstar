@@ -1,8 +1,8 @@
 // ── Zero-dependency local enforcing HTTP/HTTPS/WebSocket proxy ──
 
 import * as http from 'node:http';
-import * as https from 'node:https';
 import * as net from 'node:net';
+import * as tls from 'node:tls';
 import { promises as dnsPromises } from 'node:dns';
 
 function isLoopbackAddress(addr: string): boolean {
@@ -102,14 +102,14 @@ export class LoopbackProxy {
     return isAllowedLoopbackRequest(this.policy, targetUrl);
   }
 
-  /** Verify hostname resolves to pinned addresses. Returns first pinned IP or null. */
-  private async verifyAgainstPin(hostname: string): Promise<string | null> {
+  /** Verify hostname resolves only to pinned addresses. Returns all pinned IPs, or null. */
+  private async verifyAgainstPin(hostname: string): Promise<string[] | null> {
     try {
       const stripped = this.stripBrackets(hostname);
       const addrs = await dnsPromises.lookup(stripped, { all: true, family: 0 });
       if (addrs.length === 0) return null;
       if (!addrs.every(a => this._pinnedAddresses.has(a.address))) return null;
-      return addrs[0]!.address;
+      return addrs.map(a => a.address);
     } catch {
       return null;
     }
@@ -128,6 +128,45 @@ export class LoopbackProxy {
   }
 
   /**
+   * Establish an (optionally TLS) socket to the first reachable pinned IP.
+   * Falls through to the next candidate on connection failure; resolves null
+   * only after every candidate is exhausted. Arms `CONNECT_TIMEOUT_MS` on the
+   * socket so idle upstream connections are destroyed.
+   */
+  private connectUpstream(
+    ips: readonly string[],
+    port: number,
+    tlsOpts: { tls: true; servername?: string } | { tls: false },
+  ): Promise<net.Socket | null> {
+    return new Promise((resolve) => {
+      let idx = 0;
+      let settled = false;
+      const tryNext = (): void => {
+        if (settled) return;
+        if (idx >= ips.length) {
+          settled = true;
+          resolve(null);
+          return;
+        }
+        const ip = ips[idx++]!;
+        const sock = tlsOpts.tls
+          ? tls.connect({ host: ip, port, servername: tlsOpts.servername })
+          : net.connect({ host: ip, port });
+        sock.setTimeout(CONNECT_TIMEOUT_MS);
+        sock.once('connect', () => {
+          settled = true;
+          resolve(sock);
+        });
+        sock.once('error', () => {
+          sock.destroy();
+          if (!settled) tryNext();
+        });
+      };
+      tryNext();
+    });
+  }
+
+  /**
    * Handle plain HTTP proxy requests.
    * The browser sends: GET http://target:port/path HTTP/1.1
    */
@@ -135,7 +174,7 @@ export class LoopbackProxy {
     const targetUrl = req.url;
     if (!targetUrl || !this.isAllowedTarget(targetUrl)) {
       this.deny(res, 403, 'Blocked by loopback debug policy');
-      req.destroy();
+      req.resume();
       return;
     }
 
@@ -148,27 +187,45 @@ export class LoopbackProxy {
     }
 
     // DNS pinning: verify target resolves to pinned addresses (prevents rebinding)
-    const pinnedIp = await this.verifyAgainstPin(parsed.hostname);
-    if (!pinnedIp) {
+    const pinnedIps = await this.verifyAgainstPin(parsed.hostname);
+    if (!pinnedIps) {
       this.deny(res, 403, 'Target does not resolve to allowed origin');
-      req.destroy();
+      req.resume();
       return;
     }
 
     const isHttps = parsed.protocol === 'https:';
     const port = parsed.port ? Number(parsed.port) : (isHttps ? 443 : 80);
 
-    const requestModule = isHttps ? https : http;
-    const proxyReq = requestModule.request({
-      hostname: pinnedIp,
+    const upstream = await (isHttps
+      ? this.connectUpstream(pinnedIps, port, { tls: true, servername: this.stripBrackets(parsed.hostname) })
+      : this.connectUpstream(pinnedIps, port, { tls: false }));
+    if (!upstream) {
+      this.deny(res, 502, 'Upstream connection failed');
+      req.resume();
+      return;
+    }
+
+    // Connect over the pre-established (pinned, TLS-ready) socket. The policy
+    // hostname is preserved in the Host header after stripProxyHeaders removes
+    // it, and drives TLS servername inside connectUpstream. We speak plain HTTP
+    // over the existing socket — any TLS wrapping already happened for https:.
+    const proxyReq = http.request({
+      createConnection: () => upstream,
+      hostname: parsed.hostname,
       port,
       path: parsed.pathname + parsed.search,
       method: req.method,
-      headers: this.stripProxyHeaders(req.headers),
-      timeout: CONNECT_TIMEOUT_MS,
+      headers: { ...this.stripProxyHeaders(req.headers), host: parsed.hostname },
     }, (proxyRes) => {
       res.writeHead(proxyRes.statusCode ?? 502, this.stripHopByHopHeaders(proxyRes.headers));
       proxyRes.pipe(res);
+    });
+
+    // Track upstream socket so close() can destroy in-flight connections
+    proxyReq.on('socket', (sock: net.Socket) => {
+      this.sockets.add(sock);
+      sock.on('close', () => this.sockets.delete(sock));
     });
 
     proxyReq.on('error', () => {
@@ -180,13 +237,8 @@ export class LoopbackProxy {
       if (!res.headersSent) this.deny(res, 504, 'Upstream timeout');
     });
 
-    // Track upstream socket so close() can destroy in-flight connections
-    const upstreamSocket = (proxyReq as unknown as { connection?: net.Socket }).connection;
-    if (upstreamSocket) {
-      this.sockets.add(upstreamSocket);
-      upstreamSocket.on('close', () => this.sockets.delete(upstreamSocket));
-    }
-
+    // createConnection gives us a socket already connecting; writing starts it.
+    proxyReq.flushHeaders();
     req.pipe(proxyReq);
   }
 
@@ -194,7 +246,7 @@ export class LoopbackProxy {
    * Handle WebSocket upgrade requests.
    * Allow only same-origin ws:// or wss:// upgrades.
    */
-  private async handleUpgrade(req: http.IncomingMessage, rawSocket: net.Socket | Duplex, _head: Buffer): Promise<void> {
+  private async handleUpgrade(req: http.IncomingMessage, rawSocket: net.Socket | Duplex, head: Buffer): Promise<void> {
     const socket = rawSocket as net.Socket;
     const targetUrl = req.url;
     if (!targetUrl || !this.isAllowedTarget(targetUrl)) {
@@ -211,8 +263,8 @@ export class LoopbackProxy {
     }
 
     // DNS pinning: verify target resolves to pinned addresses
-    const pinnedIp = await this.verifyAgainstPin(parsed.hostname);
-    if (!pinnedIp) {
+    const pinnedIps = await this.verifyAgainstPin(parsed.hostname);
+    if (!pinnedIps) {
       socket.destroy();
       return;
     }
@@ -220,15 +272,29 @@ export class LoopbackProxy {
     const isWss = parsed.protocol === 'wss:';
     const port = parsed.port ? Number(parsed.port) : (isWss ? 443 : 80);
 
-    const upstream = net.connect({ host: pinnedIp, port }, () => {
-      // Send upgrade request to upstream
-      const reqLine = `GET ${parsed.pathname}${parsed.search} HTTP/1.1\r\n`;
-      const headers = `Host: ${parsed.hostname}:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`;
-      const key = req.headers['sec-websocket-key'] ?? '';
-      const keyHeader = key ? `Sec-WebSocket-Key: ${key}\r\n` : '';
-      const versionHeader = req.headers['sec-websocket-version'] ? `Sec-WebSocket-Version: ${req.headers['sec-websocket-version']}\r\n` : '';
-      upstream.write(reqLine + headers + keyHeader + versionHeader + '\r\n');
-    });
+    const upstream = await (isWss
+      ? this.connectUpstream(pinnedIps, port, { tls: true, servername: this.stripBrackets(parsed.hostname) })
+      : this.connectUpstream(pinnedIps, port, { tls: false }));
+    if (!upstream) {
+      socket.destroy();
+      return;
+    }
+
+    // Forward every client upgrade header verbatim so Cookie / Origin /
+    // Sec-WebSocket-Protocol / Sec-WebSocket-Extensions survive the hop.
+    const lines = [`GET ${parsed.pathname}${parsed.search} HTTP/1.1`];
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (value === undefined) continue;
+      if (name === 'host') {
+        lines.push(`Host: ${parsed.hostname}:${port}`);
+        continue;
+      }
+      lines.push(`${name}: ${Array.isArray(value) ? value.join(', ') : value}`);
+    }
+    if (!lines.some(l => l.startsWith('Host:'))) lines.push(`Host: ${parsed.hostname}:${port}`);
+    upstream.write(lines.join('\r\n') + '\r\n\r\n');
+    // Preserve and write the client's head bytes after the upgrade request
+    if (head && head.length > 0) upstream.write(head);
 
     upstream.on('error', () => { socket.destroy(); });
     upstream.on('timeout', () => { upstream.destroy(); socket.destroy(); });
@@ -240,13 +306,20 @@ export class LoopbackProxy {
       socket.destroy();
     });
 
-    upstream.once('data', (data: Buffer) => {
-      // Check for 101 Switching Protocols
-      const statusLine = data.toString('latin1').split('\r\n')[0] ?? '';
-      if (statusLine.includes('101')) {
-        // Forward the 101 response to client
-        socket.write(data);
-        // Bidirectional pipe
+    // Buffer chunks until the complete HTTP status line is available.
+    let received = '';
+    let settled = false;
+    const onData = (chunk: Buffer): void => {
+      if (settled) return;
+      received += chunk.toString('latin1');
+      const terminator = received.indexOf('\r\n');
+      if (terminator === -1) return; // wait for the full status line
+      const statusLine = received.slice(0, terminator);
+      settled = true;
+      if (/^HTTP\/\d(?:\.\d+)? 101(?:\s|$)/i.test(statusLine)) {
+        // Forward the 101 response and any bytes already buffered, then pipe.
+        socket.write(received);
+        upstream.removeAllListeners('data');
         upstream.pipe(socket);
         socket.pipe(upstream);
       } else {
@@ -254,7 +327,8 @@ export class LoopbackProxy {
         socket.destroy();
         upstream.destroy();
       }
-    });
+    };
+    upstream.on('data', onData);
 
     this.sockets.add(socket);
     socket.on('close', () => this.sockets.delete(socket));
@@ -299,18 +373,23 @@ export class LoopbackProxy {
     }
 
     // DNS pinning: verify target resolves to pinned addresses (prevents rebinding)
-    const pinnedIp = await this.verifyAgainstPin(host!);
-    if (!pinnedIp) {
+    const pinnedIps = await this.verifyAgainstPin(host!);
+    if (!pinnedIps) {
       clientSocket.write('HTTP/1.1 403 Blocked\r\n\r\n');
       clientSocket.destroy();
       return;
     }
 
-    const upstream = net.connect({ host: pinnedIp, port }, () => {
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      clientSocket.pipe(upstream);
-      upstream.pipe(clientSocket);
-    });
+    const upstream = await this.connectUpstream(pinnedIps, port, { tls: false });
+    if (!upstream) {
+      clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+      clientSocket.destroy();
+      return;
+    }
+
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    clientSocket.pipe(upstream);
+    upstream.pipe(clientSocket);
 
     upstream.on('error', () => { clientSocket.destroy(); });
     upstream.on('timeout', () => { upstream.destroy(); clientSocket.destroy(); });

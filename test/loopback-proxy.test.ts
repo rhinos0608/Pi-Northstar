@@ -277,14 +277,18 @@ test('proxy close destroys active sockets', async () => {
   const proxyPort = new URL(proxyUrl).port;
 
   // Create a connection but don't finish it — close() should destroy it
-  net.connect({ host: '127.0.0.1', port: Number(proxyPort) });
+  const client = net.connect({ host: '127.0.0.1', port: Number(proxyPort) });
+  const clientClosed = new Promise((resolve) => client.once('close', resolve));
 
   await new Promise((r) => setTimeout(r, 50));
 
   await proxy.close();
   assert.equal(proxy.closed, true);
 
-  local.server.close();
+  await clientClosed;
+  assert.equal(client.destroyed, true, 'client socket must be destroyed by close()');
+
+  await closeServer(local.server);
 });
 
 test('foreign redirect followed by denied response', async () => {

@@ -45,6 +45,30 @@ test('accepts IPv6 ::1', () => {
   assert.equal(p.port, 5173);
 });
 
+test('accepts decimal IPv4 host normalization', () => {
+  // WHATWG URL maps 2130706433 → 127.0.0.1
+  const p = parseLoopbackDebugTarget('http://2130706433:3000/');
+  assert.ok(p);
+  assert.equal(p.hostname, '127.0.0.1');
+});
+
+test('accepts octal IPv4 host normalization', () => {
+  // WHATWG URL maps 0177.0.0.1 → 127.0.0.1
+  const p = parseLoopbackDebugTarget('http://0177.0.0.1:3000/');
+  assert.ok(p);
+  assert.equal(p.hostname, '127.0.0.1');
+});
+
+test('rejects IPv4-mapped IPv6 form', () => {
+  assert.equal(parseLoopbackDebugTarget('http://[::ffff:7f00:1]:3000'), undefined);
+});
+
+test('accepts expanded IPv6 loopback form', () => {
+  const p = parseLoopbackDebugTarget('http://[0:0:0:0:0:0:0:1]:3000');
+  assert.ok(p);
+  assert.equal(p.hostname, '[::1]');
+});
+
 test('accepts https', () => {
   const p = parseLoopbackDebugTarget('https://localhost:443');
   assert.ok(p);
