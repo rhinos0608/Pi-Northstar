@@ -49,9 +49,12 @@ Do not expose raw agent-browser CLI arguments, MCP tools, plugins, providers, da
 
 ### Navigation and sessions
 
-`navigate` continues accepting public HTTP(S) URLs only. Does not reject
+~~`navigate` continues accepting public HTTP(S) URLs only. Does not reject
 localhost, private/reserved IP ranges, or metadata endpoints — those checks
-were intentionally removed (commits a0fad0e, 04f373d).
+were intentionally removed (commits a0fad0e, 04f373d).~~
+
+**SUPERSEDED by ADR 0003:** `navigate` rejects localhost, private/reserved IP
+ranges, and metadata endpoints through restored application SSRF guards.
 
 ~~Add optional `allowedDomains: string[]`. Default is exact navigation
 hostname. Each entry must be a normalized public hostname or `*.` subdomain

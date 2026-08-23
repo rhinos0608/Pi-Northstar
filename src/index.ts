@@ -69,7 +69,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on('tool_result', (event) => {
     if (!isExternalToolName(event.toolName) || !Array.isArray(event.content)) return undefined;
     const content = event.content.map((item) =>
-      item.type === 'text'
+      item.type === 'text' && typeof item.text === 'string'
         ? { ...item, text: wrapUntrustedText(item.text, { source: event.toolName }) }
         : item,
     );

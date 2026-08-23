@@ -93,7 +93,9 @@ function decodeHtmlEntities(text: string): string {
     /&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g,
     (match, body: string) => {
       if (body.startsWith('#x') || body.startsWith('#')) {
-        const code = Number.parseInt(body.slice(1), body.startsWith('#x') ? 16 : 10);
+        const isHex = body.startsWith('#x');
+        // Strip both the '#' and 'x' prefix for hex bodies (e.g. "#x69" → "69")
+        const code = Number.parseInt(isHex ? body.slice(2) : body.slice(1), isHex ? 16 : 10);
         if (Number.isFinite(code) && code > 0 && code <= 0x10ffff) {
           return String.fromCodePoint(code);
         }
