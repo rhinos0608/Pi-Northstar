@@ -106,11 +106,19 @@ export function isPrivateOrReservedAddress(address: string): boolean {
   // Direct loopback / wildcard checks (BlockList.check handles these too but be explicit)
   if (normalized === '0.0.0.0' || normalized === '::' || normalized === '::0') return true;
   if (isIP(normalized) === 6) {
-    const mapped = /^::ffff:(?:([0-9a-f]{1,4}):([0-9a-f]{1,4})|([0-9.]+))$/i.exec(normalized);
-    if (mapped) {
-      const ipv4 = mapped[3] ?? [mapped[1]!, mapped[2]!].flatMap((part) => [Number.parseInt(part.slice(0, 2), 16), Number.parseInt(part.slice(2), 16)]).join('.');
+    // IPv4-mapped IPv6, compressed hex form: ::ffff:XXXX:XXXX
+    const hexMatch = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(normalized);
+    if (hexMatch) {
+      // Pad each 16-bit group to four hex digits before splitting into octets
+      const hex = hexMatch[1]!.padStart(4, '0') + hexMatch[2]!.padStart(4, '0');
+      const ipv4 = [0, 1, 2, 3]
+        .map((i) => Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16))
+        .join('.');
       if (isPrivateOrReservedAddress(ipv4)) return true;
     }
+    // IPv4-mapped dotted form: ::ffff:127.0.0.1
+    const dottedMatch = /^::ffff:([0-9.]+)$/i.exec(normalized);
+    if (dottedMatch && isPrivateOrReservedAddress(dottedMatch[1]!)) return true;
   }
   return ipBlocklist.check(normalized, 'ipv4') || ipBlocklist.check(normalized, 'ipv6');
 }
@@ -152,7 +160,7 @@ export async function resolvePublicHostname(
   _signal?: AbortSignal,
   lookup?: DnsLookup,
 ): Promise<string[]> {
-  const lookupFn = lookup ?? ((h: string, _opts?: { all?: boolean }) => dnsPromises.lookup(h, { all: true }));
+  const lookupFn: DnsLookup = lookup ?? ((h: string) => dnsPromises.lookup(h, { all: true }));
   const h = normalizeHostname(hostname);
 
   // Check hostname literal first
@@ -160,12 +168,19 @@ export async function resolvePublicHostname(
 
   if (_signal?.aborted) throw new Error(`DNS lookup aborted for ${hostname}`);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let rejectAbort: (() => void) | undefined;
+  const onAbort = () => rejectAbort?.();
+  const aborted = _signal
+    ? new Promise<never>((_, reject) => {
+        rejectAbort = () => reject(new Error(`DNS lookup aborted for ${hostname}`));
+      })
+    : undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`DNS lookup timed out for ${hostname}`)), 5_000);
   });
-  const aborted = _signal ? new Promise<never>((_, reject) => _signal.addEventListener('abort', () => reject(new Error(`DNS lookup aborted for ${hostname}`)), { once: true })) : undefined;
+  if (_signal) _signal.addEventListener('abort', onAbort, { once: true });
   try {
-    const result = await Promise.race([lookupFn(h, { all: true }), timeout, ...(aborted ? [aborted] : [])]);
+    const result = await Promise.race<LookupAddress[]>([lookupFn(h, { all: true }), timeout, ...(aborted ? [aborted] : [])]);
     const addresses = result.map((entry: LookupAddress) => entry.address);
     if (addresses.length === 0) throw new Error(`DNS lookup returned no addresses for ${hostname}`);
     for (const addr of addresses) {
@@ -174,5 +189,6 @@ export async function resolvePublicHostname(
     return addresses;
   } finally {
     if (timer) clearTimeout(timer);
+    if (_signal) _signal.removeEventListener('abort', onAbort);
   }
 }

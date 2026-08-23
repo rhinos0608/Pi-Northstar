@@ -74,6 +74,10 @@ test('blocks IPv6 loopback and IPv4-mapped private addresses', () => {
   assert.equal(isPrivateOrReservedAddress('::1'), true);
   assert.equal(isPrivateOrReservedAddress('::ffff:7f00:1'), true);
   assert.equal(isPrivateOrReservedAddress('::ffff:10.0.0.1'), true);
+  assert.equal(isPrivateOrReservedAddress('::ffff:127.0.0.1'), true);
+  assert.equal(isPrivateOrReservedAddress('::ffff:a00:1'), true);
+  assert.equal(isPrivateOrReservedAddress('::ffff:808:808'), false);
+  assert.equal(isPrivateOrReservedAddress('::ffff:0a00:0001'), true);
 });
 
 test('blocks IPv6 ULA', () => {
@@ -258,4 +262,12 @@ test('DNS: rejects IPv6 ULA in answer', async () => {
     () => resolvePublicHostname('ula.example.com', undefined, fakeLookup),
     /private\/reserved address: fd00::1/,
   );
+});
+
+test('DNS: rejects on abort signal', async () => {
+  const ac = new AbortController();
+  const fakeLookup: DnsLookup = () => new Promise(() => { /* never settles */ });
+  const pending = resolvePublicHostname('slow.example.com', ac.signal, fakeLookup);
+  ac.abort();
+  await assert.rejects(() => pending, /aborted/);
 });

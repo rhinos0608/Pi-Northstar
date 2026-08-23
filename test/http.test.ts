@@ -8,6 +8,9 @@ test('validatePublicHttpUrl accepts public http/https and rejects private/reserv
   assert.equal(validatePublicHttpUrl('https://api.github.com/repos'), 'https://api.github.com/repos');
   assert.equal(validatePublicHttpUrl('http://8.8.8.8/'), 'http://8.8.8.8/');
 
+  // Credentials rejected
+  assert.throws(() => validatePublicHttpUrl('http://user:password@example.com/'), /credentials/);
+  assert.throws(() => validatePublicHttpUrl('http://user@example.com/'), /credentials/);
   // Private/reserved hostnames rejected
   assert.throws(() => validatePublicHttpUrl('http://localhost:3000/'), /Blocked hostname/);
   assert.throws(() => validatePublicHttpUrl('http://10.0.0.1/'), /Private\/reserved/);

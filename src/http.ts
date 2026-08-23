@@ -24,17 +24,31 @@ export function validateHttpUrl(raw: string): string {
 export const validatePublicHttpUrl = validateHttpUrl;
 
 export async function fetchJson(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<unknown> {
-  const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
-  const response = await fetch(validatePublicHttpUrl(url), fetchInit(headers, effectiveSignal, timeoutMs));
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs);
   return safeResponseJson(response, url);
 }
 
 export async function fetchText(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<string> {
-  const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
-  const response = await fetch(validatePublicHttpUrl(url), fetchInit(headers, effectiveSignal, timeoutMs));
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs);
   return safeResponseText(response, url);
+}
+
+/**
+ * Fetch without automatically following redirects so each hop's target can be
+ * validated as a public HTTP(S) URL (prevents SSRF via redirect chains to
+ * private/internal addresses). Max 10 hops; a missing/invalid Location rejects.
+ */
+async function fetchFollowingRedirects(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, maxRedirects = 10): Promise<Response> {
+  let currentUrl = validatePublicHttpUrl(url);
+  const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
+  for (let hop = 0; ; hop++) {
+    const response = await fetch(currentUrl, fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
+    if (response.status < 300 || response.status >= 400) return response;
+    if (hop >= maxRedirects) throw new Error(`Too many redirects for ${url}`);
+    const location = response.headers.get('location');
+    if (!location) throw new Error(`Redirect without Location header for ${currentUrl}`);
+    currentUrl = validatePublicHttpUrl(new URL(location, currentUrl).href);
+  }
 }
 
 /**
