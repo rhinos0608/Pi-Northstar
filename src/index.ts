@@ -11,8 +11,9 @@ import { guardText } from './tool-output.js';
 import { isExternalToolName, wrapUntrustedText } from './untrusted-content.js';
 import { DesktopService } from './desktop-tools.js';
 import { DESKTOP_ACTIONS } from './desktop-contract.js';
+import { desktopEnabled } from './desktop-policy.js';
 import { BROWSER_ACTIONS } from './browser-policy.js';
-import { closeBrowserSession } from './browser-tools.js';
+import { browserToolConfigured, closeBrowserSession } from './browser-tools.js';
 
 const searchCategoryNames = [
   'company',
@@ -50,12 +51,12 @@ const socialPlatforms = ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook',
 export default function (pi: ExtensionAPI): void {
   const env = loadSearchMcpEnvironment(process.env);
   const client = createSearchBackend(env);
-  const desktop = new DesktopService();
+  const desktop = desktopEnabled(env) ? new DesktopService(undefined, env) : undefined;
   void ensureFirstStartBootstrap(env);
 
   pi.on('session_shutdown', () => {
     void client.close();
-    void desktop.close();
+    if (desktop) void desktop.close();
     void closeBrowserSession();
   });
 
@@ -121,27 +122,29 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
-    name: 'desktop', label: 'Desktop',
-    description: 'Bounded native desktop observation and interaction through manually installed Cua Driver. Disabled by default; security is external.',
-    promptGuidelines: ['Desktop disabled unless PI_SEARCH_DESKTOP_AUTOMATION=1.', 'AX trees and screenshots may expose PII or credentials.', 'Mutations require fresh stateId and are never retried after dispatch.'],
-    parameters: Type.Object({
-      action: Type.Optional(StringEnum(DESKTOP_ACTIONS, { description: 'Desktop action to perform.' })),
-      pid: Type.Optional(Type.Number({ description: 'Target process ID.' })),
-      windowId: Type.Optional(Type.String({ description: 'Target window identifier.' })),
-      stateId: Type.Optional(Type.String()),
-      includeScreenshot: Type.Optional(Type.Boolean()),
-      predicate: Type.Optional(Type.Object({ text: Type.Optional(Type.String()), role: Type.Optional(Type.String()) })),
-      text: Type.Optional(Type.String({ description: 'Text to type or match.' })),
-      key: Type.Optional(Type.String({ description: 'Key to press.' })),
-      x: Type.Optional(Type.Number({ description: 'X coordinate.' })),
-      y: Type.Optional(Type.Number({ description: 'Y coordinate.' })),
-      deltaX: Type.Optional(Type.Number()),
-      deltaY: Type.Optional(Type.Number()),
-      timeoutMs: Type.Optional(Type.Number()),
-    }),
-    async execute(_toolCallId, params, signal) { return await desktop.execute(params as Record<string, unknown>, signal) as never; },
-  });
+  if (desktop) {
+    pi.registerTool({
+      name: 'desktop', label: 'Desktop',
+      description: 'Bounded native desktop observation and interaction through manually installed Cua Driver.',
+      promptGuidelines: ['AX trees and screenshots may expose PII or credentials.', 'Mutations require fresh stateId and are never retried after dispatch.'],
+      parameters: Type.Object({
+        action: Type.Optional(StringEnum(DESKTOP_ACTIONS, { description: 'Desktop action to perform.' })),
+        pid: Type.Optional(Type.Number({ description: 'Target process ID.' })),
+        windowId: Type.Optional(Type.String({ description: 'Target window identifier.' })),
+        stateId: Type.Optional(Type.String()),
+        includeScreenshot: Type.Optional(Type.Boolean()),
+        predicate: Type.Optional(Type.Object({ text: Type.Optional(Type.String()), role: Type.Optional(Type.String()) })),
+        text: Type.Optional(Type.String({ description: 'Text to type or match.' })),
+        key: Type.Optional(Type.String({ description: 'Key to press.' })),
+        x: Type.Optional(Type.Number({ description: 'X coordinate.' })),
+        y: Type.Optional(Type.Number({ description: 'Y coordinate.' })),
+        deltaX: Type.Optional(Type.Number()),
+        deltaY: Type.Optional(Type.Number()),
+        timeoutMs: Type.Optional(Type.Number()),
+      }),
+      async execute(_toolCallId, params, signal) { return await desktop.execute(params as Record<string, unknown>, signal) as never; },
+    });
+  }
 }
 
 async function callSearchMcpTool(
@@ -269,6 +272,8 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
   });
+
+  if (!browserToolConfigured(env)) return;
 
   pi.registerTool({
     name: 'browser',

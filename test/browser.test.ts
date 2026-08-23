@@ -6,7 +6,13 @@ import {
   cdpEvaluate,
   cdpScreenshot,
 } from '../src/cdp.js';
-import { browser } from '../src/browser-tools.js';
+import { browser, browserToolConfigured } from '../src/browser-tools.js';
+
+test('browser registration config requires a CDP endpoint and respects opt-out', () => {
+  assert.equal(browserToolConfigured({ PI_SEARCH_BROWSER_BACKEND: 'cdp' }), false);
+  assert.equal(browserToolConfigured({ PI_SEARCH_BROWSER_BACKEND: 'cdp', BROWSER_CDP_ENDPOINT: 'http://127.0.0.1:9222' }), true);
+  assert.equal(browserToolConfigured({ PI_SEARCH_BROWSER_AUTOMATION: '0', PI_SEARCH_BROWSER_BACKEND: 'cdp', BROWSER_CDP_ENDPOINT: 'http://127.0.0.1:9222' }), false);
+});
 
 // ── helpers ──
 

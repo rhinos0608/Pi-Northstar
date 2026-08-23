@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir, rm, readFile, unlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { platform } from 'node:os';
 
@@ -122,14 +122,24 @@ export function buildSandboxEnvironment(
 /**
  * Resolve the path to the agent-browser executable.
  */
-function findOnPath(executable: string): string | undefined {
-  const pathEnv = (process.env.PATH ?? '');
-  const paths = pathEnv.split(':');
+function findOnPath(executable: string, pathEnv = process.env.PATH ?? ''): string | undefined {
+  const paths = pathEnv.split(delimiter);
   for (const dir of paths) {
     const candidate = join(dir, executable);
     if (existsSync(candidate)) return candidate;
   }
   return undefined;
+}
+
+export function agentBrowserExecutableConfigured(
+  explicitPath?: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (explicitPath) return existsSync(explicitPath);
+
+  return existsSync(join(process.cwd(), 'node_modules', '.bin', 'agent-browser'))
+    || existsSync(join(process.cwd(), 'node_modules', 'agent-browser', 'bin', 'agent-browser.js'))
+    || findOnPath('agent-browser', env.PATH) !== undefined;
 }
 
 export async function resolveAgentBrowserExecutable(explicitPath?: string): Promise<string> {

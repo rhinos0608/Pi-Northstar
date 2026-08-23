@@ -18,7 +18,7 @@ import {
 
 import { textResult as guardedTextResult } from './tool-output.js'
 import { AgentBrowserAdapter } from './agent-browser.js'
-import { resolveAgentBrowserExecutable } from './agent-browser-process.js'
+import { agentBrowserExecutableConfigured, resolveAgentBrowserExecutable } from './agent-browser-process.js'
 import { extractCookieMetadata, isSensitiveAction, validateLegacyLoopbackEndpoint } from './browser-policy.js'
 import { parseLoopbackDebugTarget, type LoopbackDebugPolicy } from './loopback-debug-policy.js'
 import { LoopbackProxy } from './loopback-proxy.js'
@@ -33,6 +33,12 @@ export function resolveBrowserBackend(env?: Record<string, string | undefined>):
   const raw = env?.PI_SEARCH_BROWSER_BACKEND?.trim().toLowerCase()
   if (raw === 'cdp') return 'cdp'
   return 'agent-browser'
+}
+
+export function browserToolConfigured(env: Record<string, string | undefined> = process.env): boolean {
+  if (isBrowserAutomationDisabled(env)) return false
+  if (resolveBrowserBackend(env) === 'cdp') return Boolean(env.BROWSER_CDP_ENDPOINT?.trim())
+  return agentBrowserExecutableConfigured(env.BROWSER_EXECUTABLE_PATH, env)
 }
 
 // ── Persistent adapter ──

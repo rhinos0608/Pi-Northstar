@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -240,53 +239,35 @@ test('explicit override excludes codex unless listed; listed-but-unconfigured co
 
 test('semantic source URL discovery uses codex-first ordering', async () => {
   const requestedPaths: string[] = [];
-  const server: Server = createServer((req, res) => {
-    const path = req.url ?? '/';
-    requestedPaths.push(path);
-    if (path === '/a') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end('<html><body><h1>Page A</h1><p>This page contains unique alpha material about ranking order.</p></body></html>');
-      return;
-    }
-    if (path === '/b') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end('<html><body><h1>Page B</h1><p>This page contains unique beta material about ranking order.</p></body></html>');
-      return;
-    }
-    res.writeHead(404);
-    res.end('nope');
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  const addr = server.address();
-  if (!addr || typeof addr === 'string') throw new Error('no server address');
-  const base = `http://127.0.0.1:${addr.port}`;
-
   const savedFetch = globalThis.fetch;
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input);
-    if (url.startsWith(CHATGPT_URL)) {
-      return new Response(JSON.stringify({ results: [{ url: `${base}/a`, title: 'A', snippet: 'a' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.href.startsWith(CHATGPT_URL)) {
+      return new Response(JSON.stringify({ results: [
+        { url: 'http://127.0.0.1:1/private', title: 'Private', snippet: 'skip' },
+        { url: 'https://example.com/a', title: 'A', snippet: 'a' },
+      ] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({ Heading: 'B', AbstractURL: `${base}/b`, AbstractText: 'b', RelatedTopics: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.href.startsWith('https://api.duckduckgo.com/')) {
+      return new Response(JSON.stringify({ Heading: 'B', AbstractURL: 'https://example.com/b', AbstractText: 'b', RelatedTopics: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.startsWith(base)) return realFetch(input, init);
-    throw new Error(`unexpected backend fetch ${url}`);
+    requestedPaths.push(url.pathname);
+    return new Response(`<html><body><h1>Page ${url.pathname.slice(1).toUpperCase()}</h1><p>This page contains unique ${url.pathname === '/a' ? 'alpha' : 'beta'} material about ranking order.</p></body></html>`, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
   };
 
   try {
     await callNativeTool('fetch', {
       query: 'alpha beta',
       source: { type: 'search', query: 'x' },
-      maxPages: 2,
+      maxPages: 3,
       topK: 4,
-    }, { env: { CODEX_ACCESS_TOKEN: 'tk', PI_SEARCH_EMBEDDING_ENABLED: '0' } });
-    assert.equal(requestedPaths[0], '/a', 'codex-discovered URL must be fetched first');
-    assert.equal(requestedPaths.length, 2);
+    }, {
+      env: { CODEX_ACCESS_TOKEN: 'tk', PI_SEARCH_EMBEDDING_ENABLED: '0' },
+      lookup: async () => [{ address: '93.184.216.34', family: 4 }],
+    });
+    assert.deepEqual(requestedPaths, ['/a', '/b'], 'private discovered URL skipped; codex public URL stays ahead of DDG');
   } finally {
     globalThis.fetch = savedFetch;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

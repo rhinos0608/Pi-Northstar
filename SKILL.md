@@ -11,7 +11,7 @@ Use this extension when current external evidence or repository context would im
 
 - `web_search`: broad web discovery, including academic/public-data/community sources via `category: "research"`. Use first when you need current sources or candidate URLs.
 - `fetch`: accepts either a `url` or `searchQuery` to discover content; `query` selects relevant passages from the result. Compose with `web_search` first to discover candidate URLs, then call `fetch` with a `url` (or `searchQuery`) and `query` for semantically packed results. Prefer `query` over fetching full pages: `query` returns only the relevant passages, full-page fetches overload context. Omit `query` only when you need the complete readable text of a single URL. Use `followLinks` with a `url` and `query` to crawl relevant same-domain pages within the configured `maxPages` bound (requires both `url` and `query`).
-- `browser`: closed agent-browser automation. **Public mode**: navigate any http/https URL; private/reserved IPs, localhost, metadata rejected; domain allowlist freezes first hostname (close to switch). **Loopback debug mode**: `navigate` to localhost/127.x.x.x/[::1] enters confined session — network locked to exact origin, proxy-enforced, all browser actions work normally. `close` exits loopback mode. Batch/job cannot target loopback. Explicit CDP rollback via `PI_SEARCH_BROWSER_BACKEND=cdp`.
+- `browser`: registered when agent-browser binary is available, or legacy CDP has `BROWSER_CDP_ENDPOINT`. **Public mode**: navigate any http/https URL; private/reserved IPs, localhost, metadata rejected; domain allowlist freezes first hostname (close to switch). **Loopback debug mode**: `navigate` to localhost/127.x.x.x/[::1] enters confined session — network locked to exact origin, proxy-enforced, all browser actions work normally. `close` exits loopback mode. Batch/job cannot target loopback. Explicit CDP rollback via `PI_SEARCH_BROWSER_BACKEND=cdp`.
 - `github`: inspect repositories, files, trees, code search, trending repos, and semantic code search.
 - `social`: search/read Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram.
 - `media`: YouTube (official Data API, set `YOUTUBE_API_KEY`) and Bilibili metadata, search, and details + RSS/Atom feed reading.
@@ -41,7 +41,7 @@ SEARCH_BACKEND=mcp npm run cli -- status
 
 ## Desktop automation
 
-`desktop` is disabled unless `PI_SEARCH_DESKTOP_AUTOMATION=1`; use only with manually installed signed Cua Driver `0.7.1`. Observe AX-only target windows first. Explicit screenshots are target-window inline images and may expose PII/credentials; extension persists no files. Mutations require fresh `stateId`, never retry after dispatch, and `OUTCOME_UNKNOWN` requires fresh observation. Allowed actions are closed; shell, launch/kill, global capture, page/config, recording, and dynamic upstream aliases denied. Security is external through containerization/other extensions.
+`desktop` is not registered unless `PI_SEARCH_DESKTOP_AUTOMATION=1`; use only with manually installed signed Cua Driver `0.7.1`. Observe AX-only target windows first. Explicit screenshots are target-window inline images and may expose PII/credentials; extension persists no files. Mutations require fresh `stateId`, never retry after dispatch, and `OUTCOME_UNKNOWN` requires fresh observation. Allowed actions are closed; shell, launch/kill, global capture, page/config, recording, and dynamic upstream aliases denied. Security is external through containerization/other extensions.
 
 ## Safety
 

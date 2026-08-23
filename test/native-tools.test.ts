@@ -328,8 +328,8 @@ test('reddit feed filter maps to hot and popular feeds with limits', async () =>
     await writeFile(opencliPath, '#!/bin/sh\necho "$@"\n');
     await chmod(opencliPath, 0o700);
 
-    const hot = await callNativeTool('social', { platform: 'reddit', action: 'feed', filter: 'hot', limit: 6 }, { env: { PATH: dir } });
-    const popular = await callNativeTool('social', { platform: 'reddit', action: 'feed', filter: 'popular', limit: 8 }, { env: { PATH: dir } });
+    const hot = await callNativeTool('social', { platform: 'reddit', action: 'feed', filter: 'hot', limit: 6 }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
+    const popular = await callNativeTool('social', { platform: 'reddit', action: 'feed', filter: 'popular', limit: 8 }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
 
     assert.match(JSON.stringify(hot.details), /reddit hot --limit 6 -f yaml/);
     assert.match(JSON.stringify(popular.details), /reddit popular --limit 8 -f yaml/);
@@ -654,7 +654,7 @@ test('reddit native API: content_absent falls to Arctic Shift archive with prove
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
     const result = await callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     });
     const text = JSON.stringify(result.details);
     assert.match(text, /arctic-shift/);
@@ -687,7 +687,7 @@ test('reddit archive: deleted and removed items are filtered from output', async
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
     const result = await callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     });
     const text = JSON.stringify(result.details);
     assert.match(text, /Kept post/);
@@ -711,7 +711,7 @@ test('reddit archive: 429 is not retried and propagates', async () => {
       }
       throw new Error(`unexpected fetch ${url}`);
     }, () => callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     })),
     /Reddit archive: HTTP 429/,
   );
@@ -780,7 +780,7 @@ test('reddit: no live credentials and CLI unavailable falls to archive (cli_unav
       }
       throw new Error(`unexpected fetch ${input}`);
     }, async () => {
-      const result = await callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, { env: { PATH: dir } });
+      const result = await callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
       const text = JSON.stringify(result.details);
       assert.match(text, /arctic-shift/);
       assert.match(text, /reason.*cli_unavailable/);
@@ -829,8 +829,8 @@ test('rdt read: accepts exact reddit.com subdomain and redd.it host URLs', async
     const rdtPath = join(dir, 'rdt');
     await writeFile(rdtPath, '#!/bin/sh\necho "$@"\n');
     await chmod(rdtPath, 0o700);
-    const viaSub = await callNativeTool('social', { platform: 'reddit', action: 'read', url: 'https://www.reddit.com/r/x/comments/abc123' }, { env: { PATH: dir } });
-    const viaShort = await callNativeTool('social', { platform: 'reddit', action: 'read', url: 'https://redd.it/abc123' }, { env: { PATH: dir } });
+    const viaSub = await callNativeTool('social', { platform: 'reddit', action: 'read', url: 'https://www.reddit.com/r/x/comments/abc123' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
+    const viaShort = await callNativeTool('social', { platform: 'reddit', action: 'read', url: 'https://redd.it/abc123' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
     const text = JSON.stringify(viaSub.details) + JSON.stringify(viaShort.details);
     assert.match(text, /rdt-cli/);
     assert.match(text, /read https:\/\/www\.reddit\.com\/r\/x\/comments\/abc123/);
@@ -851,6 +851,7 @@ test('external subprocess env: Reddit API credentials and YouTube key never forw
         PATH: dir,
         REDDIT_CLIENT_ID: 'client-id-value', REDDIT_CLIENT_SECRET: 'client-secret-value',
         YOUTUBE_API_KEY: 'youtube-key-value',
+        PI_SEARCH_STATE_DIR: dir,
       },
     });
     const text = JSON.stringify(result.details);
@@ -896,7 +897,7 @@ test('reddit: no live auth and no CLI archive falls back for hot (backend capabi
       }
       throw new Error(`unexpected fetch ${input}`);
     }, async () => {
-      const result = await callNativeTool('social', { platform: 'reddit', action: 'hot' }, { env: { PATH: dir } });
+      const result = await callNativeTool('social', { platform: 'reddit', action: 'hot' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
       const text = JSON.stringify(result.details);
       assert.match(text, /arctic-shift/);
       assert.match(text, /reason.*cli_unavailable/);
@@ -916,7 +917,7 @@ test('reddit: no live auth and no CLI archive falls back for subreddit_info', as
       }
       throw new Error(`unexpected fetch ${input}`);
     }, async () => {
-      const result = await callNativeTool('social', { platform: 'reddit', action: 'subreddit_info', subreddit: 'askreddit' }, { env: { PATH: dir } });
+      const result = await callNativeTool('social', { platform: 'reddit', action: 'subreddit_info', subreddit: 'askreddit' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
       const text = JSON.stringify(result.details);
       assert.match(text, /arctic-shift/);
       assert.match(text, /reason.*cli_unavailable/);
@@ -954,7 +955,7 @@ test('reddit: AbortError during archive propagates instead of primary error', as
       if (url.startsWith(ARCTIC_SHIFT)) throw abortError;
       throw new Error(`unexpected fetch ${url}`);
     }, () => callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     })),
     (err: unknown) => err instanceof Error && err.name === 'AbortError',
   );
@@ -971,7 +972,7 @@ test('reddit archive: oversized response body is rejected by the bounded reader'
       }
       throw new Error(`unexpected fetch ${url}`);
     }, () => callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     })),
     /too large/,
   );
@@ -1301,7 +1302,7 @@ test('reddit: web fallback is disabled by default and never invoked', async () =
       if (url.startsWith(ARCTIC_SHIFT)) return new Response('unavailable', { status: 500 });
       throw new Error(`unexpected fetch ${url}`);
     }, () => callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
       ...fallbackInjected(injected),
     } as unknown as Parameters<typeof callNativeTool>[2])),
     /Reddit archive: HTTP 500/,
@@ -1320,7 +1321,7 @@ test('reddit search: opt-in web-search fallback uses a separate data model', asy
     if (url.startsWith(ARCTIC_SHIFT)) return new Response('boom', { status: 500 });
     throw new Error(`unexpected fetch ${url}`);
   }, () => callNativeTool('social', { platform: 'reddit', action: 'search', query: 'llm' }, {
-    env: { PATH: '/nonexistent', PI_SEARCH_PLATFORM_WEB_FALLBACK: '1' },
+    env: { PATH: '/nonexistent', PI_SEARCH_PLATFORM_WEB_FALLBACK: '1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     ...fallbackInjected(injected),
   } as unknown as Parameters<typeof callNativeTool>[2]));
   const details = result.details as Record<string, unknown>;
@@ -1345,7 +1346,7 @@ test('reddit read: opt-in page fallback performs one agentic_browse fetch with p
     if (url.startsWith(ARCTIC_SHIFT)) return new Response('boom', { status: 500 });
     throw new Error(`unexpected fetch ${url}`);
   }, () => callNativeTool('social', { platform: 'reddit', action: 'read', url: 'https://www.reddit.com/comments/xyz123' }, {
-    env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_PLATFORM_WEB_FALLBACK: '1' },
+    env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean', PI_SEARCH_PLATFORM_WEB_FALLBACK: '1' },
     ...fallbackInjected(injected),
   } as unknown as Parameters<typeof callNativeTool>[2]));
   const details = result.details as Record<string, unknown>;
@@ -1697,7 +1698,7 @@ test('reddit Data API: bearer redirect is rejected, never followed cross-host', 
       if (url.startsWith(REDDIT_OAUTH)) return new Response('', { status: 302, headers: { location: 'https://evil.example/search' } });
       throw new Error(`unexpected fetch ${url}`);
     }, () => callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     })),
     /Redirect rejected/,
   );
@@ -1712,7 +1713,7 @@ test('reddit archive: redirect is rejected, never followed cross-host', async ()
       if (url.startsWith(ARCTIC_SHIFT)) return new Response('', { status: 302, headers: { location: 'https://evil.example/archive' } });
       throw new Error(`unexpected fetch ${url}`);
     }, () => callNativeTool('social', { platform: 'reddit', action: 'search', query: 'test' }, {
-      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1' },
+      env: { REDDIT_CLIENT_ID: 'id', REDDIT_CLIENT_SECRET: 'sec', REDDIT_USER_AGENT: 'pi-atlas/1', PI_SEARCH_STATE_DIR: '/tmp/pi-test-clean' },
     })),
     /Reddit archive: redirect rejected/,
   );
@@ -1889,7 +1890,7 @@ test('reddit read: opt-in page fallback constructs canonical URL from id, never 
       if (url.startsWith(ARCTIC_SHIFT)) return new Response('boom', { status: 500 });
       throw new Error(`unexpected fetch ${url}`);
     }, () => callNativeTool('social', { platform: 'reddit', action: 'read', id: 'abc123', url: 'http://localhost:7777/private' }, {
-      env: { PATH: dir, PI_SEARCH_PLATFORM_WEB_FALLBACK: '1' },
+      env: { PATH: dir, PI_SEARCH_STATE_DIR: dir, PI_SEARCH_PLATFORM_WEB_FALLBACK: '1' },
       ...fallbackInjected(injected),
     } as unknown as Parameters<typeof callNativeTool>[2]));
     const details = result.details as Record<string, unknown>;

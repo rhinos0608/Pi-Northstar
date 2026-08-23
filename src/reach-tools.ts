@@ -882,12 +882,23 @@ function canonicalYoutubeWatchUrl(args: Record<string, unknown>): string {
   if (rawId) return `https://www.youtube.com/watch?v=${encodeURIComponent(rawId)}`;
   const rawUrl = typeof args.url === 'string' && args.url.trim() ? args.url.trim() : undefined;
   if (!rawUrl) throw new Error('id or url is required');
-  // Reject non-http(s) schemes (file:, ftp:, etc.) before any host/ID
-  // extraction so wrapper validation errors match the shared contract.
-  const validated = validatePublicHttpUrl(rawUrl);
-  const videoId = videoIdFromUrl(validated);
+  // Reject non-http(s) schemes before any host/ID extraction so wrapper
+  // validation errors ("Disallowed URL scheme") match the shared contract.
+  const isHttpUrl = (() => {
+    try {
+      const u = new URL(rawUrl);
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  })();
+  if (!isHttpUrl) validatePublicHttpUrl(rawUrl); // throws "Disallowed URL scheme"
+  const videoId = videoIdFromUrl(rawUrl);
   if (!videoId) throw new Error('id or url is required');
-  return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+  // Only validate SSRF on the canonical youtube.com URL we will actually use
+  const canonical = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+  validatePublicHttpUrl(canonical);
+  return canonical;
 }
 
 function socialCandidates(platform: string): ExternalCandidate[] {

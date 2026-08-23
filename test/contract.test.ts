@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const EXPECTED_TOOL_NAMES = [
+const ALWAYS_AVAILABLE_TOOL_NAMES = [
   'web_search',
   'fetch',
   'github',
   'social',
   'media',
+] as const;
+
+const CONFIGURED_TOOL_NAMES = [
+  ...ALWAYS_AVAILABLE_TOOL_NAMES,
   'browser',
   'desktop',
 ] as const;
@@ -37,51 +41,56 @@ test('import.meta.resolve("tsx") is used by CliSearchBackend subprocess', () => 
   assert.ok(resolved.startsWith('file://'), 'cli-backend.ts and bin/pi-northstar.mjs use this path in --import');
 });
 
-test('extension registers exactly expected tool and command names', async () => {
+async function captureRegistration(overrides: Record<string, string> = {}): Promise<{ tools: string[]; commands: string[] }> {
   const tools: string[] = [];
   const commands: string[] = [];
-  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
-  process.env.PI_SEARCH_BOOTSTRAP = 'off';
-
-  // Build a fake ExtensionAPI that records names only
-  const pi = {
-    on: () => {},
-    registerTool: (def: { name: string }) => {
-      tools.push(def.name);
-    },
-    registerCommand: (name: string) => {
-      commands.push(name);
-    },
+  const values = {
+    PI_SEARCH_BOOTSTRAP: 'off',
+    PI_SEARCH_DESKTOP_AUTOMATION: '',
+    PI_SEARCH_BROWSER_AUTOMATION: '',
+    PI_SEARCH_BROWSER_BACKEND: 'cdp',
+    BROWSER_CDP_ENDPOINT: '',
+    BROWSER_EXECUTABLE_PATH: '',
+    ...overrides,
   };
+  const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
 
+  Object.assign(process.env, values);
   try {
-    // Dynamic import to avoid circular issues
+    const pi = {
+      on: () => {},
+      registerTool: (def: { name: string }) => tools.push(def.name),
+      registerCommand: (name: string) => commands.push(name),
+    };
     const mod = await import('../src/index.js');
     const extFn = mod.default as (pi: unknown) => void;
     extFn(pi);
   } finally {
-    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
-    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 
-  // Assert tool names match expected set
-  for (const name of EXPECTED_TOOL_NAMES) {
-    assert.ok(tools.includes(name), `Missing required tool: ${name}`);
-  }
+  return { tools, commands };
+}
 
-  // Assert no disallowed tool names
-  for (const name of DISALLOWED_TOOL_NAMES) {
-    assert.ok(!tools.includes(name), `Disallowed tool present: ${name}`);
-  }
+function assertToolContract(tools: string[], expected: readonly string[]): void {
+  assert.deepEqual([...tools].sort(), [...expected].sort());
+  for (const name of DISALLOWED_TOOL_NAMES) assert.ok(!tools.includes(name), `Disallowed tool present: ${name}`);
+}
 
-  // Assert command names match expected set
-  for (const name of EXPECTED_COMMAND_NAMES) {
-    assert.ok(commands.includes(name), `Missing required command: ${name}`);
-  }
+test('extension hides browser and desktop without configuration', async () => {
+  const { tools, commands } = await captureRegistration();
+  assertToolContract(tools, ALWAYS_AVAILABLE_TOOL_NAMES);
+  assert.deepEqual([...commands].sort(), [...EXPECTED_COMMAND_NAMES].sort());
+});
 
-  // No unexpected tools or commands
-  assert.equal(tools.length, EXPECTED_TOOL_NAMES.length,
-    `Expected ${EXPECTED_TOOL_NAMES.length} tools, got ${tools.length}: ${tools.join(', ')}`);
-  assert.equal(commands.length, EXPECTED_COMMAND_NAMES.length,
-    `Expected ${EXPECTED_COMMAND_NAMES.length} commands, got ${commands.length}: ${commands.join(', ')}`);
+test('extension registers browser and desktop when configured', async () => {
+  const { tools, commands } = await captureRegistration({
+    PI_SEARCH_DESKTOP_AUTOMATION: '1',
+    BROWSER_CDP_ENDPOINT: 'http://127.0.0.1:9222',
+  });
+  assertToolContract(tools, CONFIGURED_TOOL_NAMES);
+  assert.deepEqual([...commands].sort(), [...EXPECTED_COMMAND_NAMES].sort());
 });

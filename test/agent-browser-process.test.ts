@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildSandboxEnvironment, generateNamespace, parseAgentBrowserOutput } from '../src/agent-browser-process.js';
+import { agentBrowserExecutableConfigured, buildSandboxEnvironment, generateNamespace, parseAgentBrowserOutput } from '../src/agent-browser-process.js';
 
 test('sandbox environment strips hostile inherited variables', () => {
   const env = buildSandboxEnvironment({ PATH: '/bin', HOME: '/tmp', AGENT_BROWSER_SESSION: 'evil', NODE_OPTIONS: '--import evil', GITHUB_TOKEN: 'secret' }, { runtimeRoot: '/tmp/pi', namespace: 'owned' });
@@ -16,6 +16,11 @@ test('output parser accepts JSON envelopes and ignores diagnostics', () => {
 });
 
 test('namespace is unique-shaped', () => assert.match(generateNamespace(), /^pi-/));
+
+test('explicit browser executable configuration requires an existing file', () => {
+  assert.equal(agentBrowserExecutableConfigured('/definitely/missing/agent-browser'), false);
+  assert.equal(agentBrowserExecutableConfigured(process.execPath), true);
+});
 
 test('sandbox environment includes proxy vars when loopback active', () => {
   const env = buildSandboxEnvironment(

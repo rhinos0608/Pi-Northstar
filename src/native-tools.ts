@@ -11,7 +11,7 @@ import { EmbeddingClient } from './embedding-client.js';
 import { SidecarManager } from './sidecar-manager.js';
 import { ScraplingBridge } from './scrapling-bridge.js';
 import { extractLinksFromHtml } from './link-extraction.js';
-import { resolvePublicHostname } from './network-policy.js';
+import { type DnsLookup, resolvePublicHostname } from './network-policy.js';
 import { codexConfigured, searchCodex } from './codex-search.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
@@ -19,6 +19,7 @@ type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_brows
 interface NativeToolOptions {
   signal?: AbortSignal;
   env?: Record<string, string | undefined>;
+  lookup?: DnsLookup;
 }
 
 interface WebResult {
@@ -155,6 +156,7 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
   const topK = clampedNumber(args.topK, 8, 1, SEMANTIC_TOP_K_MAX);
   const maxPages = clampedNumber(args.maxPages, 10, 1, SEMANTIC_MAX_PAGES_MAX);
   const source = asRecord(args.source);
+  const explicitUrlSource = source.type === 'url';
   const followLinks = Boolean(args.followLinks);
   const maxDepth = followLinks ? 3 : (args.maxDepth != null ? Number(args.maxDepth) : (source.type === 'url' ? 1 : 0));
 
@@ -222,7 +224,7 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
 
         pagesAttempted++;
         try {
-          const page = await fetchReadablePage(entry.url, options.signal, bridge);
+          const page = await fetchReadablePage(entry.url, options.signal, bridge, options.lookup);
 
           // Index page content
           for (const chunk of chunkTextSmart(page.content)) {
@@ -262,15 +264,16 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
       // Original flat fetch loop (unchanged)
       for (const url of seedUrls.slice(0, maxPages)) {
         try {
-          const page = await fetchReadablePage(url, options.signal, bridge);
+          const page = await fetchReadablePage(url, options.signal, bridge, options.lookup);
           for (const chunk of chunkTextSmart(page.content)) {
             const id = String(chunkCounter++);
             bm25Index.add(id, chunk.text);
             indexedChunks.push({ id, url: page.url, title: page.title, content: chunk.text });
           }
         } catch (err) {
-          // Rethrow on cancellation; ignore other individual page failures for partial evidence.
+          // Rethrow on cancellation and SSRF/validation errors; ignore transient page failures.
           if (options.signal?.aborted) throw err;
+          if (explicitUrlSource && err instanceof Error && /Private\/reserved|Blocked hostname|Disallowed URL scheme|URL credentials/.test(err.message)) throw err;
         }
       }
     }
@@ -391,7 +394,7 @@ async function agenticBrowse(args: Record<string, unknown>, options: NativeToolO
   } catch { /* use fallback */ }
 
   try {
-    const page = await fetchReadablePage(url, options.signal, bridge);
+    const page = await fetchReadablePage(url, options.signal, bridge, options.lookup);
     const content = page.content.slice(0, maxChars);
     return textResult(content, {
       url: page.url,
@@ -790,10 +793,10 @@ async function searchHackerNews(query: string, limit: number, signal?: AbortSign
 
 
 
-async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: ScraplingBridge): Promise<{ url: string; title: string; content: string; rawHtml?: string; links?: string[] }> {
+async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: ScraplingBridge, lookup?: DnsLookup): Promise<{ url: string; title: string; content: string; rawHtml?: string; links?: string[] }> {
   const url = validatePublicHttpUrl(rawUrl);
   // DNS preflight: reject hostnames resolving to private/reserved IPs (matches browser path)
-  await resolvePublicHostname(new URL(url).hostname, signal);
+  await resolvePublicHostname(new URL(url).hostname, signal, lookup);
 
   // Try Scrapling bridge first (if provided and enabled)
   if (bridge) {

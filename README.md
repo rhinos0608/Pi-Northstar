@@ -155,9 +155,9 @@ Requires Node.js ≥ 24. `web_search`, `fetch`, `github`, `social`, and `media` 
 npm install --omit=optional
 ```
 
-Skipping it leaves the other six tools unaffected; `browser` calls fail with a clear `agent-browser executable not found` error until a binary is available — see [Browser automation](#browser-automation) to install it separately or point at an existing one.
+Skipping it leaves the other five tools unaffected; `browser` is not registered until an agent-browser binary is available — see [Browser automation](#browser-automation) to install it separately or point at an existing one.
 
-`desktop` is separate again: it drives a native Cua Driver binary that was never an npm dependency at all, downloaded and put on `$PATH` by hand. It stays disabled (`PI_SEARCH_DESKTOP_AUTOMATION` unset) no matter how you installed Pi-Northstar — see [Desktop automation](#desktop-automation).
+`desktop` is separate again: it drives a native Cua Driver binary that was never an npm dependency at all, downloaded and put on `$PATH` by hand. It is not registered until `PI_SEARCH_DESKTOP_AUTOMATION=1` — see [Desktop automation](#desktop-automation).
 
 If the agent-browser download is slow or fails:
 - Check network/proxy settings: `npm config get proxy`, `npm config get https-proxy`
@@ -370,7 +370,7 @@ npm install
 # agent-browser binary downloads automatically
 ```
 
-If you installed with `npm install --omit=optional`, or the optional install failed for your platform, `browser` still registers as a tool but every call returns a clear `agent-browser executable not found` error. Fix it with any of:
+If you installed with `npm install --omit=optional`, or the optional install failed for your platform, `browser` is not registered. Fix it with any of:
 
 ```bash
 npm install agent-browser         # install just the optional dependency
@@ -619,7 +619,7 @@ Permissions are user-owned and persist across sessions. Session shutdown cannot 
 
 ### Security & Privacy
 
-- Disabled by default — set `PI_SEARCH_DESKTOP_AUTOMATION=1` to enable
+- Not registered by default — set `PI_SEARCH_DESKTOP_AUTOMATION=1` to register it
 - Observation is AX-only by default; screenshots require explicit opt-in
 - Screenshots and AX trees can expose sensitive information — only use with trusted applications
 - Mutations are serialized per window; transport loss is not retried
