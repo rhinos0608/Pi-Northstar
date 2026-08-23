@@ -11,6 +11,7 @@ import { EmbeddingClient } from './embedding-client.js';
 import { SidecarManager } from './sidecar-manager.js';
 import { ScraplingBridge } from './scrapling-bridge.js';
 import { extractLinksFromHtml } from './link-extraction.js';
+import { resolvePublicHostname } from './network-policy.js';
 import { codexConfigured, searchCodex } from './codex-search.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
@@ -791,6 +792,8 @@ async function searchHackerNews(query: string, limit: number, signal?: AbortSign
 
 async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: ScraplingBridge): Promise<{ url: string; title: string; content: string; rawHtml?: string; links?: string[] }> {
   const url = validatePublicHttpUrl(rawUrl);
+  // DNS preflight: reject hostnames resolving to private/reserved IPs (matches browser path)
+  await resolvePublicHostname(new URL(url).hostname, signal);
 
   // Try Scrapling bridge first (if provided and enabled)
   if (bridge) {
