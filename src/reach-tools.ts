@@ -3,13 +3,12 @@ import { spawn } from 'node:child_process';
 import type { BackendCallOptions, BackendCallResult } from './backend.js';
 import { CliSearchBackend } from './cli-backend.js';
 import { callSetupTool } from './bootstrap.js';
-import { browser } from './browser-tools.js';
 import { fetchInit, fetchJson as boundedFetchJson, fetchJsonNoRedirect, fetchText as boundedFetchText, safeResponseJson, validatePublicHttpUrl } from './http.js';
 import { cookieAuthEnvironment, cookieHeaderForUrl } from './cookie-jar.js';
 import { authForChannel } from './providers.js';
 import { dedupeBy, guardResult, jsonTextResult, textResult } from './tool-output.js';
 
-export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds' | 'media' | 'browser';
+export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds' | 'media';
 
 interface ReachToolOptions {
   signal?: AbortSignal;
@@ -111,8 +110,6 @@ async function dispatchReachTool(
         return feeds({ url: args.url, limit: args.limit ?? 20 }, options);
       }
       return video(args, options);
-    case 'browser':
-      return browser(args, options);
     default:
       return undefined;
   }

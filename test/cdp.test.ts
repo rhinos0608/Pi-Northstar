@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { validateCdpEndpoint, resolveCdpEndpoint, requireWebSocket, importCookiesFromCdp, loginViaCdp, BROWSER_ENV_ALLOWLIST } from '../src/cdp.js';
+import { validateCdpEndpoint, resolveCdpEndpoint, requireWebSocket, importCookiesFromCdp, loginViaCdp, BROWSER_ENV_ALLOWLIST, CdpSession, openCdpSession, cdpScreenshot } from '../src/cdp.js';
 import { PROVIDER_DESCRIPTORS } from '../src/providers.js';
 
 // ── validateCdpEndpoint ──
@@ -329,4 +329,274 @@ test('BROWSER_ENV_ALLOWLIST does not contain API keys or tokens', () => {
   assert.equal(BROWSER_ENV_ALLOWLIST.includes('DEEP_RESEARCH_API_TOKEN'), false);
   // Allowlist is small — these are safe system env vars
   assert.ok(BROWSER_ENV_ALLOWLIST.length <= 14, 'BROWSER_ENV_ALLOWLIST should be small');
+});
+
+// ── CDP failure paths (fake WebSocket + controlled timers) ──
+
+/** Fake WebSocket: captures handlers, lets tests trigger events synchronously. */
+class FakeWs {
+  onopen: (() => void) | null = null;
+  onmessage: ((e: MessageEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  closed = false;
+  sent: string[] = [];
+
+  constructor(_url: string) {}
+  send(data: string): void { this.sent.push(data); }
+  close(): void { this.closed = true; }
+}
+
+function installFakeWs(): typeof FakeWs {
+  const saved = globalThis.WebSocket;
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = FakeWs;
+  return saved as unknown as typeof FakeWs;
+}
+
+function restoreFakeWs(saved: typeof FakeWs): void {
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = saved;
+}
+
+test('connectAndGetCookies: WebSocket error rejects promise and cleans up', async () => {
+  const savedWs = installFakeWs();
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/mock' }) }) as unknown as Response;
+
+  try {
+    let wsResolve!: (ws: FakeWs) => void;
+    const wsReady = new Promise<FakeWs>((r) => { wsResolve = r; });
+    (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+      constructor(url: string) { super(url); wsResolve(this); }
+    };
+
+    const resultPromise = importCookiesFromCdp('facebook', 'http://127.0.0.1:9222', {});
+    const ws = await wsReady;
+    ws.onerror?.();
+
+    const result = await resultPromise;
+    assert.equal(result.ok, false);
+    assert.match(result.message ?? '', /WebSocket connection failed/);
+    assert.equal(ws.closed, true);
+  } finally {
+    restoreFakeWs(savedWs);
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('connectAndGetCookies: command timeout rejects promise and cleans up', async () => {
+  const savedWs = installFakeWs();
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/mock' }) }) as unknown as Response;
+
+  // Intercept setTimeout to capture the CDP_TIMEOUT_MS callback
+  let timeoutCallback: (() => void) | null = null;
+  const origSetTimeout = globalThis.setTimeout as typeof globalThis.setTimeout;
+  const origClearTimeout = globalThis.clearTimeout;
+  const realSetTimeout = origSetTimeout.bind(globalThis) as typeof globalThis.setTimeout;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let leakedTimer: any;
+  (globalThis as any).setTimeout = (fn: (...a: unknown[]) => void, ms: number, ...rest: unknown[]) => {
+    if (ms === 30_000) { timeoutCallback = fn as () => void; leakedTimer = realSetTimeout(() => {}, 10_000_000, ...rest); return leakedTimer; }
+    return realSetTimeout(fn, ms, ...rest);
+  };
+
+  try {
+    let wsResolve!: (ws: FakeWs) => void;
+    const wsReady = new Promise<FakeWs>((r) => { wsResolve = r; });
+    (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+      constructor(url: string) { super(url); wsResolve(this); }
+    };
+
+    const resultPromise = importCookiesFromCdp('facebook', 'http://127.0.0.1:9222', {});
+    const ws = await wsReady;
+    // Fire onopen but never respond to commands
+    ws.onopen?.();
+    assert.ok(timeoutCallback, 'CDP timeout callback should have been registered');
+    // Fire the timeout — simulates CDP_TIMEOUT_MS expiry
+    (timeoutCallback as () => void)();
+
+    const result = await resultPromise;
+    assert.equal(result.ok, false);
+    assert.match(result.message ?? '', /timed out/);
+    assert.equal(ws.closed, true);
+  } finally {
+    // Always clear the leaked long timer so it can't hang later test runs
+    if (leakedTimer !== undefined) origClearTimeout(leakedTimer as any);
+    (globalThis as any).setTimeout = origSetTimeout;
+    globalThis.clearTimeout = origClearTimeout;
+    restoreFakeWs(savedWs);
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('CdpSession: mid-command disconnect rejects pending command with WebSocket closed', async () => {
+  const savedWs = installFakeWs();
+  let capturedWs!: FakeWs;
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+    constructor(url: string) { super(url); capturedWs = this; }
+  };
+
+  try {
+    const session = new CdpSession('ws://127.0.0.1:9222/devtools/browser/test');
+    capturedWs.onopen?.();
+    await session.ready();
+
+    // Send a command that won't get a response
+    const cmdPromise = session.send('Network.getCookies', { urls: ['https://example.com'] });
+
+    // Simulate WebSocket close
+    capturedWs.onclose?.();
+
+    // Pending command must reject with 'WebSocket closed'
+    await assert.rejects(cmdPromise, { message: 'WebSocket closed' });
+
+    // Session is closed — further sends throw
+    await assert.rejects(() => session.send('ping'), { message: 'WebSocket closed' });
+  } finally {
+    restoreFakeWs(savedWs);
+  }
+});
+
+test('CdpSession: onclose rejects all pending commands', async () => {
+  const savedWs = installFakeWs();
+  let capturedWs: FakeWs | null = null;
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+    constructor(url: string) {
+      super(url);
+      capturedWs = this;
+    }
+  };
+
+  try {
+    const session = new CdpSession('ws://127.0.0.1:9222/devtools/browser/test');
+    const ws = capturedWs!;
+    ws.onopen?.();
+    await session.ready();
+
+    // Send two commands that will never get responses
+    const p1 = session.send('Network.enable');
+    const p2 = session.send('Runtime.evaluate', { expression: '1+1' });
+
+    // Disconnect
+    ws.onclose?.();
+
+    // Both must reject with 'WebSocket closed'
+    await assert.rejects(p1, { message: 'WebSocket closed' });
+    await assert.rejects(p2, { message: 'WebSocket closed' });
+
+    // Further sends must throw immediately
+    await assert.rejects(() => session.send('ping'), { message: 'WebSocket closed' });
+  } finally {
+    restoreFakeWs(savedWs);
+  }
+});
+
+test('CdpSession: CDP protocol error response surfaces error field', async () => {
+  const savedWs = installFakeWs();
+  let capturedWs: FakeWs | null = null;
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+    constructor(url: string) { super(url); capturedWs = this; }
+  };
+
+  try {
+    const session = new CdpSession('ws://127.0.0.1:9222/devtools/browser/test');
+    const ws = capturedWs!;
+    ws.onopen?.();
+    await session.ready();
+
+    // Send a command and respond with a CDP error
+    const resultPromise = session.send('Network.getCookies', { urls: ['https://example.com/'] });
+    const cmd = JSON.parse(ws.sent[0]!);
+    ws.onmessage?.({ data: JSON.stringify({ id: cmd.id, error: { message: 'Protocol error: target closed' } }) } as MessageEvent);
+
+    const result = await resultPromise;
+    assert.ok(result.error, 'result should have error field');
+    assert.equal(result.error!.message, 'Protocol error: target closed');
+  } finally {
+    restoreFakeWs(savedWs);
+  }
+});
+
+test('cdpScreenshot: throws on CDP error response', async () => {
+  const savedWs = installFakeWs();
+  let capturedWs: FakeWs | null = null;
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+    constructor(url: string) { super(url); capturedWs = this; }
+  };
+
+  try {
+    const session = new CdpSession('ws://127.0.0.1:9222/devtools/browser/test');
+    const ws = capturedWs!;
+    ws.onopen?.();
+    await session.ready();
+
+    const screenshotPromise = cdpScreenshot(session);
+    // Respond to Page.captureScreenshot with a protocol error
+    const cmd = JSON.parse(ws.sent[0]!);
+    ws.onmessage?.({ data: JSON.stringify({ id: cmd.id, error: { message: 'CDP error: screenshot failed' } }) } as MessageEvent);
+
+    await assert.rejects(screenshotPromise, /CDP error: screenshot failed/);
+  } finally {
+    restoreFakeWs(savedWs);
+  }
+});
+
+test('openCdpSession: missing targetId from createTarget throws', async () => {
+  const savedWs = installFakeWs();
+  let wsResolve!: (ws: FakeWs) => void;
+  const wsReady = new Promise<FakeWs>((r) => { wsResolve = r; });
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+    constructor(url: string) { super(url); wsResolve(this); }
+  };
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/mock' }) }) as unknown as Response;
+
+  try {
+    const sessionPromise = openCdpSession('http://127.0.0.1:9222');
+    const ws = await wsReady;
+    ws.onopen?.();
+    // Yield so session.ready() resolves and Target.createTarget command is sent
+    await new Promise<void>(r => setTimeout(r, 0));
+    assert.ok(ws.sent.length > 0, 'session should have sent Target.createTarget');
+    const cmd = JSON.parse(ws.sent[0]!);
+    // Respond with NO targetId
+    ws.onmessage?.({ data: JSON.stringify({ id: cmd.id, result: {} }) } as MessageEvent);
+    await assert.rejects(sessionPromise, /CDP did not return a target id/);
+  } finally {
+    restoreFakeWs(savedWs);
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('openCdpSession: missing sessionId from attachToTarget throws', async () => {
+  const savedWs = installFakeWs();
+  let wsResolve!: (ws: FakeWs) => void;
+  const wsReady = new Promise<FakeWs>((r) => { wsResolve = r; });
+  (globalThis as unknown as { WebSocket: typeof FakeWs }).WebSocket = class extends FakeWs {
+    constructor(url: string) { super(url); wsResolve(this); }
+  };
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/mock' }) }) as unknown as Response;
+
+  try {
+    const sessionPromise = openCdpSession('http://127.0.0.1:9222');
+    const ws = await wsReady;
+    ws.onopen?.();
+    // Yield so session.ready() resolves and Target.createTarget command is sent
+    await new Promise<void>(r => setTimeout(r, 0));
+    assert.ok(ws.sent.length > 0, 'session should have sent Target.createTarget');
+    const cmd0 = JSON.parse(ws.sent[0]!);
+    // Respond with a valid targetId so session proceeds to attachToTarget
+    ws.onmessage?.({ data: JSON.stringify({ id: cmd0.id, result: { targetId: 't1' } }) } as MessageEvent);
+    // Yield so session sends Target.attachToTarget
+    await new Promise<void>(r => setTimeout(r, 0));
+    assert.ok(ws.sent.length >= 2, 'session should have sent Target.attachToTarget');
+    const cmd1 = JSON.parse(ws.sent[1]!);
+    // Respond with NO sessionId
+    ws.onmessage?.({ data: JSON.stringify({ id: cmd1.id, result: {} }) } as MessageEvent);
+    await assert.rejects(sessionPromise, /CDP did not return a session id/);
+  } finally {
+    restoreFakeWs(savedWs);
+    globalThis.fetch = savedFetch;
+  }
 });
