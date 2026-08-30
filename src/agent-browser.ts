@@ -49,8 +49,14 @@ function extractError(result: BackendCallResult): string | undefined {
 
 function sanitizeErrorMessage(message: string): string {
   return message
-    .replace(/(["']?(?:cookie|value|token|password|secret|authorization)["']?)\s*[:=]\s*["']?[^,\s}"']+["']?/gi, '$1=***')
+    .replace(/Proxy-Authorization\s*[:=]\s*[^,\s}"']+/gi, 'Proxy-Authorization: ***')
+    .replace(/Authorization\s*[:=]\s*(?:Bearer|Basic|token)?\s*\S+/gi, 'Authorization: ***')
+    .replace(/\/\/[^\/\s]*:[^\/\s]*@/g, '//***:***@')
+    .replace(/\/\/[^\/\s]*@/g, '//***@')
+    .replace(/(["']?(?:cookie|value|token|password|secret)["']?)\s*[:=]\s*["']?[^,\s}"']+["']?/gi, '$1=***')
     .replace(/Bearer\s+\S+/gi, 'Bearer ***')
+    .replace(/Cookie\s*[:=]\s*[^,\s}"']+/gi, 'Cookie: ***')
+    .replace(/Set-Cookie\s*[:=]\s*[^,\s}"']+/gi, 'Set-Cookie: ***')
     .slice(0, 2000);
 }
 
@@ -145,7 +151,8 @@ export class AgentBrowserAdapter {
     try {
       request = validateBrowserRequest(rawArgs);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const message = sanitizeErrorMessage(rawMessage);
       const result: BackendCallResult = { content: [{ type: 'text', text: message }], details: { error: message } };
       const action = typeof rawArgs.action === 'string' ? (rawArgs.action as BrowserRequest['action']) : 'status';
       return enrichResult(result, { action, errorMessage: message });
@@ -158,7 +165,8 @@ export class AgentBrowserAdapter {
         ? enrichResult(raw, { action: request.action, errorMessage })
         : enrichResult(raw, { action: request.action });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const message = sanitizeErrorMessage(rawMessage);
       const result: BackendCallResult = { content: [{ type: 'text', text: message }], details: { error: message } };
       return enrichResult(result, { action: request.action, errorMessage: message });
     }
@@ -291,17 +299,18 @@ export class AgentBrowserAdapter {
       await this.ensureSession(options);
       const merged = this.mergeOptions(options);
       const result = await runCommand(['open', 'about:blank'], merged);
-      return jsonTextResult(result.success ? { ok: true, message: 'Browser launched' } : { ok: false, error: result.error });
+      if (result.success) this.pageState.invalidate(this.session.namespace, 'navigation');
+      return jsonTextResult(result.success ? { ok: true, message: 'Browser launched' } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
     }
 
     // ── Loopback adapter: narrow exception path ──
     if (this.loopbackMode) {
       const loopbackPolicy = parseLoopbackDebugTarget(request.url);
       if (!loopbackPolicy) {
-        return jsonTextResult({ ok: false, error: `Loopback adapter rejected non-loopback URL: ${request.url}` });
+        return jsonTextResult({ ok: false, error: sanitizeErrorMessage(`Loopback adapter rejected non-loopback URL: ${request.url}`) });
       }
       if (loopbackPolicy.origin !== this.loopbackMode.origin) {
-        return jsonTextResult({ ok: false, error: `Different loopback origin rejected. Expected: ${this.loopbackMode.origin}, got: ${loopbackPolicy.origin}` });
+        return jsonTextResult({ ok: false, error: sanitizeErrorMessage(`Different loopback origin rejected. Expected: ${this.loopbackMode.origin}, got: ${loopbackPolicy.origin}`) });
       }
       // Skip public hostname/DNS check — proxy enforces containment
       // Keep exact hostname in allowedDomains so vendor containment remains active.
@@ -317,7 +326,8 @@ export class AgentBrowserAdapter {
       await this.ensureSession(options);
       const merged = this.mergeOptions(options);
       const result = await runCommand(['open', loopbackPolicy.navigationUrl], merged);
-      return jsonTextResult(result.success ? { ok: true, url: loopbackPolicy.navigationUrl } : { ok: false, error: result.error });
+      if (result.success) this.pageState.invalidate(this.session.namespace, 'navigation');
+      return jsonTextResult(result.success ? { ok: true, url: loopbackPolicy.navigationUrl } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
     }
 
     // ── Public adapter: SSRF defense-in-depth ──
@@ -348,7 +358,8 @@ export class AgentBrowserAdapter {
 
     // Use 'open' command (not 'navigate')
     const result = await runCommand(['open', url], merged);
-    return jsonTextResult(result.success ? { ok: true, url } : { ok: false, error: result.error });
+    if (result.success) this.pageState.invalidate(this.session.namespace, 'navigation');
+    return jsonTextResult(result.success ? { ok: true, url } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
   }
 
   private async handleEvaluate(request: BrowserRequest, options: AgentBrowserProcessOptions): Promise<BackendCallResult> {
@@ -371,7 +382,7 @@ export class AgentBrowserAdapter {
 
     const result = results[0];
     if (!result?.success) {
-      return jsonTextResult({ error: result?.error || 'Evaluation failed' });
+      return jsonTextResult({ error: sanitizeErrorMessage(result?.error || 'Evaluation failed') });
     }
 
     return textResult(String(result.data ?? ''), { raw: result.data });
@@ -402,7 +413,7 @@ export class AgentBrowserAdapter {
 
     const shotResult = await runScreenshot(merged);
     if ('error' in shotResult) {
-      return jsonTextResult({ error: shotResult.error });
+      return jsonTextResult({ error: sanitizeErrorMessage(shotResult.error) });
     }
 
     const image: ImageContent = {
@@ -446,7 +457,7 @@ export class AgentBrowserAdapter {
 
     const result = await runCommand(['click', selector], merged);
     if (!result.success) {
-      return jsonTextResult({ ok: false, error: result.error });
+      return jsonTextResult({ ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
     }
 
     if (eligible) {
@@ -459,10 +470,12 @@ export class AgentBrowserAdapter {
     if (before) {
       const after = await this.readOverlaySignature(merged);
       if (after && detectOverlayAppearance(before, after)) {
+        this.pageState.invalidate(this.session.namespace, 'click');
         return jsonTextResult({ ok: true, selector, overlay: { appeared: true } });
       }
     }
 
+    this.pageState.invalidate(this.session.namespace, 'click');
     return jsonTextResult({ ok: true, selector });
   }
 
@@ -490,6 +503,7 @@ export class AgentBrowserAdapter {
       merged,
     );
     const result = results[0];
+    if (result?.success) this.pageState.invalidate(this.session.namespace, 'type');
     return jsonTextResult(result?.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result?.error ?? 'Command failed') });
   }
 
@@ -504,7 +518,7 @@ export class AgentBrowserAdapter {
     const before = await this.readViewport(merged);
     const result = await runCommand(['scroll', direction, String(px)], merged);
     if (!result.success) {
-      return jsonTextResult({ ok: false, error: result.error });
+      return jsonTextResult({ ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
     }
     const after = await this.readViewport(merged);
     const noop = before && after ? isScrollNoop(before, after) : false;
@@ -534,6 +548,7 @@ export class AgentBrowserAdapter {
   private async handleClose(): Promise<BackendCallResult> {
     await this.ensureSession({});
     const result = await runCommand(['close'], this.mergeOptions({}));
+    if (result.success) this.pageState.clear(this.session.namespace);
     return jsonTextResult(result.success ? { ok: true, message: 'Browser closed' } : { error: sanitizeErrorMessage(result.error ?? 'Close failed') });
   }
 
@@ -542,7 +557,7 @@ export class AgentBrowserAdapter {
     const merged = this.mergeOptions(options);
     const result = await runCommand(['tab', 'list', '--json'], merged);
     if (!result.success) {
-      return jsonTextResult({ error: result.error || 'Failed to get tabs' });
+      return jsonTextResult({ error: sanitizeErrorMessage(result.error || 'Failed to get tabs') });
     }
     const data = result.data as { tabs?: unknown[] } | undefined;
     const tabs = Array.isArray(data?.tabs) ? data.tabs : (Array.isArray(result.data) ? result.data : []);
@@ -606,7 +621,7 @@ export class AgentBrowserAdapter {
     const token = this.pageState.currentToken(this.session.namespace);
     const result = await runCommand(['snapshot', '-i', '--json'], merged);
     if (!result.success) {
-      return jsonTextResult({ error: result.error || 'Snapshot failed' });
+      return jsonTextResult({ error: sanitizeErrorMessage(result.error || 'Snapshot failed') });
     }
     const refs = parseSnapshotRefs(result.data);
     const url = extractSnapshotUrl(result.data);
@@ -644,6 +659,7 @@ export class AgentBrowserAdapter {
       merged,
     );
     const result = results[0];
+    if (result?.success) this.pageState.invalidate(this.session.namespace, 'fill');
     return jsonTextResult(result?.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result?.error ?? 'Command failed') });
   }
 
@@ -656,18 +672,21 @@ export class AgentBrowserAdapter {
       const selector = validateSelector(request.selector);
       // agent-browser wait takes <sel|ms> as positional arg
       const result = await runCommand(['wait', selector], merged);
-      return jsonTextResult(result.success ? { ok: true } : { ok: false, error: result.error });
+      return jsonTextResult(result.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
     }
 
     // Wait for time
     const result = await runCommand(['wait', String(ms)], merged);
-    return jsonTextResult(result.success ? { ok: true } : { ok: false, error: result.error });
+    return jsonTextResult(result.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
   }
 
   private async handleGetUrl(options: AgentBrowserProcessOptions): Promise<BackendCallResult> {
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
     const result = await runCommand(['get', 'url'], merged);
+    if (!result.success) {
+      return jsonTextResult({ ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
+    }
     return textResult(String(result.data ?? ''), { raw: result.data });
   }
 
@@ -675,6 +694,9 @@ export class AgentBrowserAdapter {
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
     const result = await runCommand(['get', 'title'], merged);
+    if (!result.success) {
+      return jsonTextResult({ ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
+    }
     return textResult(String(result.data ?? ''), { raw: result.data });
   }
 
@@ -698,6 +720,7 @@ export class AgentBrowserAdapter {
         merged,
       );
       const result = results[0];
+      if (result?.success) this.pageState.invalidate(this.session.namespace, 'semantic');
       return jsonTextResult(result?.success
         ? { ok: true }
         : { ok: false, error: sanitizeErrorMessage(result?.error ?? 'Command failed') });
@@ -708,18 +731,20 @@ export class AgentBrowserAdapter {
       const eligible = true; // semantic locators are always role/text/label by construction
       if (eligible) await armClickProbe(this.evalRunner(merged), args.join(' '));
       const result = await runCommand(args, merged);
-      if (!result.success) return jsonTextResult({ ok: false, error: result.error });
+      if (!result.success) return jsonTextResult({ ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
       if (eligible) {
         const probe = await readClickProbe(this.evalRunner(merged));
         if (!probe.dispatched) {
           return jsonTextResult({ ok: false, error: `Click dispatch unverified: ${probe.reason}`, dispatchUnverified: true });
         }
       }
+      this.pageState.invalidate(this.session.namespace, 'semantic');
       return jsonTextResult({ ok: true });
     }
 
     const result = await runCommand(args, merged);
-    return jsonTextResult(result.success ? { ok: true } : { ok: false, error: result.error });
+    if (result.success) this.pageState.invalidate(this.session.namespace, 'semantic');
+    return jsonTextResult(result.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
   }
 
   // ── Component 10: job ──
@@ -784,6 +809,7 @@ export class AgentBrowserAdapter {
       ...(!r.success ? { error: sanitizeErrorMessage(r.error ?? 'Command failed') } : {}),
     }));
 
+    if (results.some(r => r.success)) this.pageState.invalidate(this.session.namespace, 'batch');
     const result = jsonTextResult({ steps }) as BackendCallResult;
     (result as { batchSteps?: BatchStepResult[] }).batchSteps = steps;
     return result;

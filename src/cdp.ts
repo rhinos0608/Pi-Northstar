@@ -623,6 +623,7 @@ export class CdpSession {
         entry.reject(error)
       }
       this.pending.clear()
+      this.listeners.clear()
     }
   }
 

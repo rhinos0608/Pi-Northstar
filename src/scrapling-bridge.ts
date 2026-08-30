@@ -376,6 +376,8 @@ export class ScraplingBridge {
   }
 
   private spawnProcess(scriptPath: string): void {
+    // Clear stale stdout fragment before new child — prevents old partial line joining new JSON
+    this._buffer = '';
     // Detach old listeners if any
     this.detachChildListeners();
 
@@ -460,6 +462,7 @@ export class ScraplingBridge {
 
   private async restartProcess(scriptPath: string): Promise<void> {
     if (this._closed || this._signal?.aborted) return;
+    this._buffer = '';
     this.killChild();
     // Brief yield to let OS release resources
     await new Promise((r) => setImmediate(r));

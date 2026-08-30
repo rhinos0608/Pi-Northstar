@@ -421,7 +421,7 @@ export async function runCommand(
     }, DEFAULT_CMD_TIMEOUT_MS);
 
     child.on('error', (err: Error) => {
-      settle({ success: false, error: `Process error: ${err.message}` });
+      settle({ success: false, error: sanitizeErrorMessage(`Process error: ${err.message}`) });
     });
 
     child.on('close', (code) => {
@@ -433,7 +433,8 @@ export async function runCommand(
       }
 
       if (tracker.stdout.trim()) {
-        const results = parseAgentBrowserOutput(tracker.stdout);
+        const raw = parseAgentBrowserOutput(tracker.stdout);
+        const results = raw.map(r => r.success ? r : { ...r, error: r.error ? sanitizeErrorMessage(String(r.error)) : undefined } as typeof r);
         if (results.length === 1) {
           settle(results[0]!);
           return;
@@ -446,7 +447,7 @@ export async function runCommand(
       }
 
       if (code === 0) {
-        settle({ success: true, data: tracker.stdout.trim() || undefined });
+        settle({ success: false, error: sanitizeErrorMessage('Command failed: no valid response envelope') });
       } else {
         const errorMsg = tracker.stderr.trim() || tracker.stdout.trim() || `Exited with code ${code}`;
         settle({ success: false, error: sanitizeErrorMessage(errorMsg) });
@@ -525,7 +526,7 @@ export async function runBatchStdin(
     }, DEFAULT_CMD_TIMEOUT_MS * 2);
 
     child.on('error', (err: Error) => {
-      settle([{ success: false, error: `Process error: ${err.message}` }]);
+      settle([{ success: false, error: sanitizeErrorMessage(`Process error: ${err.message}`) }]);
     });
 
     child.on('close', (code) => {
@@ -536,11 +537,12 @@ export async function runBatchStdin(
         return;
       }
 
-      const results = parseAgentBrowserOutput(tracker.stdout);
+      const raw = parseAgentBrowserOutput(tracker.stdout);
+      const results = raw.map(r => r.success ? r : { ...r, error: r.error ? sanitizeErrorMessage(String(r.error)) : undefined } as typeof r);
       if (results.length > 0) {
         settle(results);
       } else if (code === 0) {
-        settle([{ success: true, data: tracker.stdout.trim() || undefined }]);
+        settle([{ success: false, error: sanitizeErrorMessage('Batch failed: no valid response envelope') }]);
       } else {
         settle([{ success: false, error: sanitizeErrorMessage(tracker.stderr.trim() || tracker.stdout.trim() || `Exited with code ${code}`) }]);
       }
@@ -623,7 +625,7 @@ export async function runScreenshot(
     }, DEFAULT_CMD_TIMEOUT_MS);
 
     child.on('error', (err: Error) => {
-      settle({ error: `Screenshot process error: ${err.message}` });
+      settle({ error: sanitizeErrorMessage(`Screenshot process error: ${err.message}`) });
     });
 
     child.on('close', async (code) => {
@@ -655,7 +657,7 @@ export async function runScreenshot(
         const data = buf.toString('base64');
         settle({ data, mediaType: 'image/png', width, height, byteLength: buf.byteLength });
       } catch (err) {
-        settle({ error: `Screenshot read error: ${err instanceof Error ? err.message : String(err)}` });
+        settle({ error: sanitizeErrorMessage(`Screenshot read error: ${err instanceof Error ? err.message : String(err)}`) });
       } finally {
         await cleanupScreenshot();
       }
@@ -704,9 +706,13 @@ export async function closeSession(session: AgentBrowserSession, options: AgentB
 
 function sanitizeErrorMessage(msg: string): string {
   return msg
-    .replace(/Authorization:\s*(Bearer|token|Basic)\s+\S+/gi, 'Authorization: ***')
-    .replace(/Set-Cookie:\s*\S+/gi, 'Set-Cookie: ***')
-    .replace(/Cookie:\s*\S+/gi, 'Cookie: ***')
+    .replace(/Proxy-Authorization\s*[:=]\s*[^,\s}"']+/gi, 'Proxy-Authorization: ***')
+    .replace(/Authorization\s*[:=]\s*(?:Bearer|Basic|token)?\s*\S+/gi, 'Authorization: ***')
+    .replace(/\/\/[^\/\s]*:[^\/\s]*@/g, '//***:***@')
+    .replace(/\/\/[^\/\s]*@/g, '//***@')
+    .replace(/Set-Cookie\s*[:=]\s*[^,\s}"']+/gi, 'Set-Cookie: ***')
+    .replace(/Cookie\s*[:=]\s*[^,\s}"']+/gi, 'Cookie: ***')
     .replace(/([A-Z_]+_TOKEN|GH_TOKEN|API_KEY)[=:]\s*\S+/gi, '$1=***')
+    .replace(/([?&](?:token|access_token|api_key|password|secret)=)[^&\s"']+/gi, '$1***')
     .slice(0, 2000);
 }

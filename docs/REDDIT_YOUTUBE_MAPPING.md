@@ -1,3 +1,5 @@
+> **⚠️ SUPERSEDED:** This document is stale. It was written before native Reddit OAuth/Data-API backends and YouTube Data API v3 support were added to `src/reach-tools.ts`. Specific claims in this doc (e.g. "no native API implementations" for Reddit/YouTube) are outdated. The current source of truth is **[docs/plans/2026-08-22-reddit-youtube-resilience.md](plans/2026-08-22-reddit-youtube-resilience.md)**.
+
 # Reddit & YouTube Service Paths and Resilience Mapping
 
 **Generated:** 2026-08-22  
