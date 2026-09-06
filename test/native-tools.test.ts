@@ -282,6 +282,8 @@ test('sanitizeExternalOutput redacts known secret patterns', () => {
     { input: 'apiKey: some_secret_value', expected: 'apiKey:***' },
     { input: 'GITHUB_TOKEN=ghp_abcd1234', expected: 'GITHUB_TOKEN=***' },
     { input: 'TWITTER_COOKIE=auth_token=secret; ct0=secret', expected: 'TWITTER_COOKIE=***' },
+    { input: 'auth_token=abc123; ct0=xyz789', expected: 'auth_token=***; ct0=***' },
+    { input: 'SESSDATA=abcd1234; bili_jct=xyz999', expected: 'SESSDATA=***; bili_jct=***' },
     { input: 'YOUTUBE_API_KEY=youtube_secret', expected: 'YOUTUBE_API_KEY=***' },
     { input: 'DEEP_RESEARCH_API_TOKEN=deep_secret', expected: 'DEEP_RESEARCH_API_TOKEN=***' },
     { input: 'CRAWL4AI_API_TOKEN=crawl_secret', expected: 'CRAWL4AI_API_TOKEN=***' },
@@ -617,7 +619,7 @@ test('reddit native cookie: REDDIT_COOKIE env drives direct session request to w
   assert.doesNotMatch(requestedUrl, /oauth\.reddit\.com/);
 });
 
-test('reddit native cookie: uses stored cookie state via cookieAuthEnvironment', async () => {
+test('reddit native cookie: uses stored cookie state via scoped cookieHeaderForUrl match', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-reddit-cookie-'));
   try {
     await writeCookieState('reddit', [

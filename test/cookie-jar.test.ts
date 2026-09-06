@@ -89,6 +89,63 @@ test('cookieAuthEnvironment maps saved Twitter cookies to backend env vars', asy
   }
 });
 
+test('cookieAuthEnvironment drops expired Twitter cookies from derived env', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-expired-'));
+  try {
+    await writeCookieState('twitter', [
+      { name: 'auth_token', value: 'expired-auth-secret', domain: '.x.com', path: '/', expires: 1, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'ct0', value: 'fresh-ct0-secret', domain: '.x.com', path: '/', expires: 1_900_000_000, httpOnly: false, secure: true, sameSite: 'Lax' },
+    ], { PI_SEARCH_STATE_DIR: dir }, 'fixture');
+
+    const derived = cookieAuthEnvironment('twitter', { PI_SEARCH_STATE_DIR: dir });
+    assert.equal(derived.TWITTER_AUTH_TOKEN, undefined);
+    assert.equal(derived.TWITTER_CT0, 'fresh-ct0-secret');
+    assert.equal(derived.TWITTER_COOKIE, 'ct0=fresh-ct0-secret');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('cookieHeaderForUrl drops non-ByteString cookies instead of crashing fetch (ByteString repro)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-fffd-'));
+  try {
+    const env = { PI_SEARCH_STATE_DIR: dir } as Record<string, string | undefined>;
+    // Synthetic fixture: lossy utf8 decode of a Chromium encrypted blob yields
+    // U+FFFD, which fetch rejects as a ByteString at request time.
+    await writeCookieState('reddit', [
+      { name: 'session', value: '\uFFFDabc', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'token', value: 'valid-value', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+    ], env, 'synthetic-fixture');
+
+    const header = cookieHeaderForUrl('reddit', 'https://www.reddit.com/search.json?q=x', env);
+    assert.ok(header);
+    assert.doesNotMatch(header, /\uFFFD/);
+    assert.match(header, /token=valid-value/);
+    // The exact live failure mode must stay impossible at the fetch seam.
+    assert.doesNotThrow(() => new Headers({ Cookie: header }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('cookieAuthEnvironment drops non-ByteString cookies from derived env', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-env-fffd-'));
+  try {
+    const env = { PI_SEARCH_STATE_DIR: dir } as Record<string, string | undefined>;
+    await writeCookieState('reddit', [
+      { name: 'session', value: '\uFFFDabc', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'token', value: 'valid-value', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+    ], env, 'synthetic-fixture');
+
+    const derived = cookieAuthEnvironment('reddit', env);
+    assert.ok(derived.REDDIT_COOKIE);
+    assert.doesNotMatch(derived.REDDIT_COOKIE, /\uFFFD/);
+    assert.equal(derived.REDDIT_COOKIE, 'token=valid-value');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('default browser import handles large Chrome expires_utc integers', async (t) => {
   if (process.platform !== 'darwin') {
     t.skip('default browser import currently supports macOS only');

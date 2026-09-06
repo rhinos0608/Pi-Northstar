@@ -47,6 +47,17 @@ interface StorageState {
   origins: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
 }
 
+// HTTP header values are ByteStrings (RFC 7230): fetch rejects any character
+// > 255. Lossy utf8 decode of Chromium encrypted cookie blobs yields U+FFFD,
+// so imported values can be non-ByteString. Drop the pair rather than
+// crashing every request against the stored state.
+function isByteStringSafe(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 255) return false;
+  }
+  return true;
+}
+
 const DEFAULT_STATE_DIR = join(homedir(), '.pi-northstar');
 const CHROME_EPOCH_OFFSET_SECONDS = 11_644_473_600;
 const DEFAULT_STALE_MS = 12 * 60 * 60 * 1000;
@@ -197,8 +208,14 @@ export async function writeCookieState(
 export function cookieAuthEnvironment(provider: string, env: Record<string, string | undefined>): Record<string, string> {
   const storage = readCookieState(provider, env);
   if (!storage) return {};
-  const header = storage.cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
-  const byName = new Map(storage.cookies.map((cookie) => [cookie.name, cookie.value]));
+  const now = Date.now();
+  // Expired cookies must never reach derived env vars or CLI blobs: a stale
+  // value would poison the child session until the next forced re-import
+  // (fresh-skip window is up to PI_SEARCH_COOKIE_STALE_MS, default 12h).
+  const cookies = storage.cookies.filter((cookie) => !(cookie.expires > 0 && cookie.expires * 1000 < now)
+    && isByteStringSafe(cookie.name) && isByteStringSafe(cookie.value));
+  const header = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+  const byName = new Map(cookies.map((cookie) => [cookie.name, cookie.value]));
 
   switch (provider) {
     case 'twitter':
@@ -246,6 +263,7 @@ export function cookieHeaderForUrl(provider: string, urlValue: string, env: Reco
   const now = Date.now();
   const parts: string[] = [];
   for (const cookie of storage.cookies) {
+    if (!isByteStringSafe(cookie.name) || !isByteStringSafe(cookie.value)) continue;
     if (cookie.expires > 0 && cookie.expires * 1000 < now) continue;
     if (cookie.secure && url.protocol !== 'https:') continue;
     const domain = cookie.domain.toLowerCase();

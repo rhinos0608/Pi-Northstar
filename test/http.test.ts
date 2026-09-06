@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { safeResponseText, validatePublicHttpUrl } from '../src/http.js';
+import { fetchInit, safeResponseText, validatePublicHttpUrl } from '../src/http.js';
 
 test('validatePublicHttpUrl accepts public http/https and rejects private/reserved', () => {
   // Public URLs accepted
@@ -25,6 +25,13 @@ test('validatePublicHttpUrl accepts public http/https and rejects private/reserv
   // Non-HTTP schemes rejected
   assert.throws(() => validatePublicHttpUrl('ftp://example.com'), /scheme/);
   assert.throws(() => validatePublicHttpUrl('file:///etc/passwd'), /scheme/);
+});
+
+test('fetchInit rejects non-ByteString header values before fetch', () => {
+  // Synthetic fixture: U+FFFD from a lossy cookie decode must fail fast with a
+  // nameable error, not a cryptic undici ByteString TypeError at request time.
+  assert.throws(() => fetchInit({ Cookie: 'session=\uFFFDabc' }, undefined), /non-latin1/);
+  assert.doesNotThrow(() => fetchInit({ Cookie: 'session=ok; token=v1' }, undefined));
 });
 
 test('safeResponseText rejects content-length over cap', async () => {

@@ -74,11 +74,31 @@ export async function unsafeFetchJson(url: string, headersOrSignal: Record<strin
 }
 
 export function fetchInit(headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, redirect?: RequestRedirect): RequestInit {
+  assertByteStringHeaders(headers);
   return {
     headers,
     signal: composeSignal(signal, timeoutMs),
     ...(redirect ? { redirect } : {}),
   };
+}
+
+// Defense-in-depth: header values are HTTP ByteStrings (RFC 7230) and fetch
+// rejects any character > 255 deep inside undici. Fail fast with a nameable
+// error so the offending header is identified (e.g. a pasted REDDIT_COOKIE
+// or leaked stored state that bypassed the cookie-jar filters).
+function assertByteStringHeaders(headers: Record<string, string>): void {
+  for (const name of Object.keys(headers)) {
+    if (!isByteStringSafe(name) || !isByteStringSafe(headers[name]!)) {
+      throw new TypeError(`Header "${name}" contains non-latin1 characters and cannot be sent as an HTTP ByteString. Re-import browser cookies if this value came from stored cookie state.`);
+    }
+  }
+}
+
+function isByteStringSafe(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 255) return false;
+  }
+  return true;
 }
 
 export async function safeResponseJson(response: Response, url: string, maxBytes = DEFAULT_MAX_RESPONSE_BYTES): Promise<unknown> {

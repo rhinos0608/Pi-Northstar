@@ -142,6 +142,7 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'NO_PROXY',
     'TWITTER_AUTH_TOKEN',
     'TWITTER_CT0',
+    'TWITTER_COOKIE',
     'REDDIT_COOKIE',
     'OPENCLI_HOST',
     'OPENCLI_PORT',

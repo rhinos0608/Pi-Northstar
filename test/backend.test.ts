@@ -102,6 +102,16 @@ test('buildCliEnvironment forwards REDDIT_COOKIE into the Pi-owned CLI but block
   assert.equal(env.DATABASE_URL, undefined);
 });
 
+test('buildCliEnvironment forwards TWITTER_COOKIE like REDDIT_COOKIE but blocks unrelated secrets', () => {
+  const env = buildCliEnvironment({
+    PATH: '/usr/bin',
+    TWITTER_COOKIE: 'auth_token=tw-secret; ct0=tw-secret',
+    STRIPE_API_KEY: 'stripe-secret',
+  });
+  assert.equal(env.TWITTER_COOKIE, 'auth_token=tw-secret; ct0=tw-secret');
+  assert.equal(env.STRIPE_API_KEY, undefined);
+});
+
 test('buildCliEnvironment forwards PI_SEARCH_PLATFORM_WEB_FALLBACK opt-in flag', () => {
   const env = buildCliEnvironment({
     PATH: '/usr/bin',

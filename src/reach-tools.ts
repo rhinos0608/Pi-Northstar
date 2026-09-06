@@ -1063,6 +1063,11 @@ const SECRET_PATTERNS = [
   /Cookie:\s*\S+/gi,
   /(TWITTER_COOKIE|REDDIT_COOKIE|XHS_COOKIE|XIAOHONGSHU_COOKIE|BILIBILI_COOKIE|XUEQIU_COOKIE)[=:]\s*[^\n\r]+/gi,
   /(TWITTER_AUTH_TOKEN|TWITTER_CT0|BILIBILI_SESSDATA|BILIBILI_CSRF|GITHUB_TOKEN|GH_TOKEN|BRAVE_API_KEY|EXA_API_KEY|TAVILY_API_KEY|OPENCLI_TOKEN|REDDIT_CLIENT_SECRET|YOUTUBE_API_KEY|LISTENNOTES_API_KEY|PRODUCTHUNT_API_TOKEN|PATENTSVIEW_API_KEY|CRAWL4AI_API_TOKEN|DEEP_RESEARCH_API_TOKEN|SEARCH_LLM_API_TOKEN|EMBEDDING_SIDECAR_API_TOKEN|OPENAI_API_KEY|GROQ_API_KEY)[=:]\s*\S+/gi,
+  // Bare cookie pairs printed by CLI tools (e.g. `auth_token=<secret>; ct0=<secret>`):
+  // only known provider session-cookie names, so ordinary text like `session=` or
+  // URLs never match. Lookbehind keeps this from firing inside longer env labels
+  // (those are handled by the labeled pattern above).
+  /(?<![\w.-])(?:auth_token|ct0|SESSDATA|bili_jct)\s*=\s*[^\s;,]+/gi,
   /api[Kk]ey["']?\s*[:=]\s*["']?\S+/gi,
   /api_?key\s*[:=]\s*\S+/gi,
 ];
