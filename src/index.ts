@@ -7,9 +7,11 @@ import { registerGitHubTool } from './github.js';
 import { callSetupTool, ensureFirstStartBootstrap } from './bootstrap.js';
 import { loadSearchMcpEnvironment } from './local-config.js';
 import { PROVIDER_DESCRIPTORS } from './providers.js';
+import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, researchSourceIds, socialPlatforms as registrySocialPlatforms } from './capabilities.js';
 import { guardText } from './tool-output.js';
 import { isExternalToolName, wrapUntrustedText } from './untrusted-content.js';
 import { DesktopService } from './desktop-tools.js';
+import { validateWebRequest } from './web-contract.js';
 import { DESKTOP_ACTIONS } from './desktop-contract.js';
 import { desktopEnabled } from './desktop-policy.js';
 import { BROWSER_ACTIONS } from './browser-policy.js';
@@ -28,25 +30,25 @@ const searchCategoryNames = [
   'research',
 ] as const;
 
-const researchSources = [
-  'all',
-  'arxiv',
-  'semantic_scholar',
-  'openalex',
-  'crossref',
-  'pubmed',
-  'wikipedia',
-  'hackernews',
-  'stackoverflow',
-  'datacite',
-  'ror',
-  'gdelt',
-  'wikidata',
-] as const;
+const researchSources = ['all', ...researchSourceIds()] as const;
 
 const reachFamilies = ['social', 'media', 'web', 'dev', 'research', 'browser'] as const;
 const setupActions = ['auto', 'status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies', 'login'] as const;
-const socialPlatforms = ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook', 'instagram'] as const;
+// Platform/action enums derive from the canonical capability registry so the
+// model-facing schema cannot drift from runtime capability declarations.
+const socialPlatformEnum = registrySocialPlatforms();
+const mediaPlatformEnum = registryMediaPlatforms();
+
+function reachActionsForFamilies(families: readonly string[]): string[] {
+  return [...new Set(
+    CHANNEL_CAPABILITIES
+      .filter((channel) => families.includes(channel.family) && channel.availability === 'available')
+      .flatMap((channel) => channel.actions.map((action) => action.action)),
+  )].sort();
+}
+
+const socialActionEnum = reachActionsForFamilies(['social']);
+const mediaActionEnum = reachActionsForFamilies(['media']);
 
 export default function (pi: ExtensionAPI): void {
   const env = loadSearchMcpEnvironment(process.env);
@@ -91,10 +93,11 @@ export default function (pi: ExtensionAPI): void {
     ],
     parameters: Type.Object({
       query: Type.String({ description: 'Search query.' }),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 30, description: 'Maximum results, default 8 (web) / 12 (research).' })),
+      limit: Type.Optional(Type.Number({ minimum: 1, description: 'Maximum web results, default 8 (research category: default 12, max 30; per-category runtime caps apply).' })),
       category: Type.Optional(StringEnum(searchCategoryNames)),
       source: Type.Optional(StringEnum(researchSources)),
       yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: 2099, description: 'Earliest publication year; research category only.' })),
+      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque continuation cursor from a previous research result. Requires category "research" and one exact source (not "all").' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const route = buildSearchRoute(params);
@@ -113,7 +116,7 @@ export default function (pi: ExtensionAPI): void {
       searchQuery: Type.Optional(Type.String({ description: 'Discovery query when no URL is known.' })),
       topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Relevant chunks to return, default 8.' })),
       maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Maximum pages to crawl, default 10.' })),
-      maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Max characters in no-query readable-text mode, default 12000.' })),
+      maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Max characters of returned text on both read and crawl paths, default 12000.' })),
       followLinks: Type.Optional(Type.Boolean({ description: 'Crawl the site by following same-domain links from url. Requires query; results are always semantically packed.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
@@ -168,11 +171,12 @@ async function callSearchMcpTool(
 
 function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string | undefined>): void {
   pi.registerCommand('reach-status', {
-    description: 'Inspect search extension channel/backend health. Usage: /reach-status [social|media|web|dev|research|browser]',
+    description: 'Inspect search extension channel/backend health. Usage: /reach-status [social|media|web|dev|research|browser] [action]',
     getArgumentCompletions: (prefix) => reachFamilies.filter((family) => family.startsWith(prefix)).map((family) => ({ value: family, label: family })),
     handler: async (args, ctx) => {
-      const family = args.trim();
-      const result = await callSetupOrStatus('reach_status', family ? { family } : {}, env, ctx.signal);
+      const { family, action } = reachStatusCommandArgs(args);
+      const params = { ...(family ? { family } : {}), ...(action ? { action } : {}) };
+      const result = await callSetupOrStatus('reach_status', params, env, ctx.signal);
       await showCommandResult(ctx, 'Reach Status', resultToText(result));
     },
   });
@@ -206,6 +210,26 @@ export function setupCommandParams(action: string, rest: string[]): Record<strin
   return { action };
 }
 
+export function reachStatusCommandArgs(input: string): { family?: string; action?: string } {
+  const parts = input.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return {};
+  if (parts.length > 2) {
+    throw new Error('Usage: /reach-status [family] [action]');
+  }
+  const family = parts[0]!;
+  if (parts.length === 1) return { family };
+  const action = parts[1]!;
+  // Registry validation for the two-argument form: the action must be a
+  // canonical action of at least one available channel in the requested
+  // family. One-argument behavior is unchanged.
+  const channels = CHANNEL_CAPABILITIES.filter((channel) => channel.family === family && channel.availability === 'available');
+  const supported = [...new Set(channels.flatMap((channel) => channel.actions.map((actionCapability) => actionCapability.action)))].sort();
+  if (!supported.includes(action)) {
+    throw new Error(`Action "${action}" is not a supported ${family} action. Supported: ${supported.join(', ')}`);
+  }
+  return { family, action };
+}
+
 async function callSetupOrStatus(name: string, args: Record<string, unknown>, env: Record<string, string | undefined>, signal: AbortSignal | undefined) {
   const { callReachTool } = await import('./reach-tools.js');
   const result = await callReachTool(name, args, { env, ...(signal ? { signal } : {}) });
@@ -232,16 +256,20 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'Prefer read-only actions; do not post, like, comment, or mutate accounts.',
     ],
     parameters: Type.Object({
-      platform: Type.Optional(StringEnum(socialPlatforms)),
-      action: Type.Optional(Type.String()),
-      query: Type.Optional(Type.String()),
-      url: Type.Optional(Type.String()),
-      id: Type.Optional(Type.String()),
-      user: Type.Optional(Type.String()),
-      username: Type.Optional(Type.String()),
-      subreddit: Type.Optional(Type.String()),
-      node: Type.Optional(Type.String()),
-      filter: Type.Optional(StringEnum(['hot', 'popular'] as const)),
+      platform: Type.Optional(StringEnum(socialPlatformEnum)),
+      // Closed read-only enum: canonical actions from the registry.
+      // Flat optional canonical selectors (query/postId/commentId/user/
+      // community/topic + url/cursor/limit); runtime validates per
+      // platform/action. No legacy spellings advertised.
+      action: Type.Optional(StringEnum(socialActionEnum)),
+      query: Type.Optional(Type.String({ description: 'Search query for search actions.' })),
+      url: Type.Optional(Type.String({ description: 'Canonical platform URL; selectors derive from verified shapes.' })),
+      postId: Type.Optional(Type.String({ description: 'Post/note/topic id.' })),
+      commentId: Type.Optional(Type.String({ description: 'Comment id for comment-reply actions.' })),
+      community: Type.Optional(Type.String({ description: 'Community selector: subreddit, node, or group name.' })),
+      topic: Type.Optional(Type.String({ description: 'Topic id for V2EX topic reads.' })),
+      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque continuation cursor from a previous social result. Pins the backend; selector changes are rejected.' })),
+      user: Type.Optional(Type.String({ description: 'User handle for profile/user-scoped reads.' })),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
@@ -259,12 +287,11 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'Use media with feed action or rss platform to read an RSS/Atom URL instead of fetch, which parses structured entries.',
     ],
     parameters: Type.Object({
-      platform: Type.Optional(StringEnum(['youtube','bilibili','rss'] as const)),
-      action: Type.Optional(StringEnum(['search','details','transcript','hot','video','subtitle','feed'] as const)),
+      platform: Type.Optional(StringEnum(mediaPlatformEnum)),
+      action: Type.Optional(StringEnum(mediaActionEnum)),
       query: Type.Optional(Type.String()),
       url: Type.Optional(Type.String({ description: 'Video URL, or the RSS/Atom feed URL for the feed action (required for feed).' })),
       id: Type.Optional(Type.String()),
-      language: Type.Optional(Type.String({ description: 'Subtitle language pattern (retained for schema compatibility; YouTube transcripts are currently unavailable).' })),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Max results/entries. Feed default 20; video search default 10.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
@@ -349,25 +376,43 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   });
 }
 
-export function buildSearchRoute(params: { query: string; category?: string; source?: string; yearFrom?: number; limit?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
+export function buildSearchRoute(params: { query: string; category?: string; source?: string; yearFrom?: number; limit?: number; cursor?: string }): { tool: string; args: Record<string, unknown>; timeout: number } {
+  // Continuation cursors are research-only by contract; reject non-research
+  // cursor use before any dispatch.
+  if (params.cursor !== undefined && params.category !== 'research') {
+    throw new Error('cursor requires category "research"');
+  }
+  // Per-category caps enforced by the web contract: out-of-range limits reject
+  // with invalid_request instead of silently clamping.
   if (params.category === 'research') {
+    const researchInput: { action: string; query?: string; limit?: number; category?: string } = {
+      action: 'search',
+      query: params.query,
+      category: 'research',
+    };
+    if (params.limit !== undefined) researchInput.limit = params.limit;
+    const { request } = validateWebRequest({ ...researchInput, limit: researchInput.limit ?? 12 });
     return {
       tool: 'research',
       args: {
         action: 'academic',
         query: params.query,
         source: params.source ?? 'all',
-        limit: Math.min(params.limit ?? 12, 30),
+        limit: request.limit,
         ...(params.yearFrom ? { yearFrom: params.yearFrom } : {}),
+        ...(params.cursor ? { cursor: params.cursor } : {}),
       },
       timeout: 120_000,
     };
   }
+  const webInput: { action: string; query?: string; limit?: number } = { action: 'search', query: params.query };
+  if (params.limit !== undefined) webInput.limit = params.limit;
+  const { request } = validateWebRequest(webInput);
   return {
     tool: 'web_search',
     args: {
       query: params.query,
-      limit: Math.min(params.limit ?? 8, 20),
+      limit: request.limit,
       resultFormat: 'collated',
       ...(params.category ? { category: params.category } : {}),
     },
@@ -375,7 +420,7 @@ export function buildSearchRoute(params: { query: string; category?: string; sou
   };
 }
 
-export function buildMediaRoute(params: { platform?: string; action?: string; url?: string; query?: string; id?: string; language?: string; limit?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
+export function buildMediaRoute(params: { platform?: string; action?: string; url?: string; query?: string; id?: string; limit?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
   if (params.platform === 'rss' || params.action === 'feed') {
     return {
       tool: 'feeds',
@@ -389,7 +434,6 @@ export function buildMediaRoute(params: { platform?: string; action?: string; ur
   if (params.query) videoParams.query = params.query;
   if (params.url) videoParams.url = params.url;
   if (params.id) videoParams.id = params.id;
-  if (params.language) videoParams.language = params.language;
   if (params.limit !== undefined) videoParams.limit = params.limit;
   return {
     tool: 'video',
@@ -413,6 +457,7 @@ export function buildFetchRoute(params: { query?: string; url?: string; searchQu
         query: params.query,
         topK: params.topK ?? 8,
         maxPages: params.maxPages ?? 10,
+        ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}),
         followLinks: true,
         maxDepth: 3,
       },
@@ -436,6 +481,7 @@ export function buildFetchRoute(params: { query?: string; url?: string; searchQu
       query: params.query,
       topK: params.topK ?? 8,
       maxPages: params.maxPages ?? 10,
+      ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}),
       maxDepth: source.type === 'url' ? 1 : 0,
     },
     timeout: 300_000,

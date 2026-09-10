@@ -21,6 +21,13 @@ const mappings: Array<[string, string]> = [
   ['listennotes.apiKey', 'LISTENNOTES_API_KEY'],
   ['producthunt.apiToken', 'PRODUCTHUNT_API_TOKEN'],
   ['patentsview.apiKey', 'PATENTSVIEW_API_KEY'],
+  // Optional research API keys (Pi conventions, not vendor-standard names).
+  // All are optional; research sources work unauthenticated with lower quotas.
+  ['semanticScholar.apiKey', 'SEMANTIC_SCHOLAR_API_KEY'],
+  ['openalex.apiKey', 'OPENALEX_API_KEY'],
+  ['ncbi.apiKey', 'NCBI_API_KEY'],
+  ['ncbi.email', 'NCBI_EMAIL'],
+  ['stackexchange.key', 'STACKEXCHANGE_KEY'],
   ['crawl4ai.baseUrl', 'CRAWL4AI_BASE_URL'],
   ['crawl4ai.apiToken', 'CRAWL4AI_API_TOKEN'],
   ['deepResearch.baseUrl', 'DEEP_RESEARCH_BASE_URL'],

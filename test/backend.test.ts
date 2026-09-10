@@ -55,11 +55,13 @@ test('buildCliEnvironment forwards CODE* env overrides and blocks unrelated secr
   assert.equal(env.UNRELATED_API_KEY, undefined);
 });
 
-test('buildCliEnvironment forwards reach backend auth and override allowlist', () => {
+test('buildCliEnvironment forwards reach backend auth but blocks Twitter/XHS cookie secrets', () => {
   assert.deepEqual(buildCliEnvironment({
     PATH: '/usr/bin',
     TWITTER_AUTH_TOKEN: 'token',
     TWITTER_CT0: 'ct0',
+    TWITTER_COOKIE: 'auth_token=secret',
+    XHS_COOKIE: 'session=secret',
     REDDIT_COOKIE: 'session=secret',
     TWITTER_BACKEND: 'OpenCLI',
     PI_SEARCH_REDDIT_BACKEND: 'rdt',
@@ -73,8 +75,6 @@ test('buildCliEnvironment forwards reach backend auth and override allowlist', (
   }), {
     PATH: '/usr/bin',
     HTTPS_PROXY: 'http://proxy.example',
-    TWITTER_AUTH_TOKEN: 'token',
-    TWITTER_CT0: 'ct0',
     REDDIT_COOKIE: 'session=secret',
     EXA_API_KEY: 'exa',
     SEARCH_MCP_CONFIG_PATH: '/tmp/config.json',
@@ -102,25 +102,35 @@ test('buildCliEnvironment forwards REDDIT_COOKIE into the Pi-owned CLI but block
   assert.equal(env.DATABASE_URL, undefined);
 });
 
-test('buildCliEnvironment forwards TWITTER_COOKIE like REDDIT_COOKIE but blocks unrelated secrets', () => {
+test('buildCliEnvironment blocks TWITTER_COOKIE/TWITTER_AUTH_TOKEN like unrelated secrets', () => {
   const env = buildCliEnvironment({
     PATH: '/usr/bin',
     TWITTER_COOKIE: 'auth_token=tw-secret; ct0=tw-secret',
+    TWITTER_AUTH_TOKEN: 'tw-secret',
+    TWITTER_CT0: 'tw-secret',
+    REDDIT_COOKIE: 'session=reddit-cookie-secret',
     STRIPE_API_KEY: 'stripe-secret',
   });
-  assert.equal(env.TWITTER_COOKIE, 'auth_token=tw-secret; ct0=tw-secret');
+  // Dead Twitter/XHS Pi-cookie plumbing: Stage 2 workers never consume
+  // imported Pi cookie state, so these secrets must not reach the CLI child.
+  assert.equal(env.TWITTER_COOKIE, undefined);
+  assert.equal(env.TWITTER_AUTH_TOKEN, undefined);
+  assert.equal(env.TWITTER_CT0, undefined);
+  assert.equal(env.REDDIT_COOKIE, 'session=reddit-cookie-secret');
   assert.equal(env.STRIPE_API_KEY, undefined);
 });
 
-test('buildCliEnvironment forwards PI_SEARCH_PLATFORM_WEB_FALLBACK opt-in flag', () => {
+test('buildCliEnvironment drops PI_SEARCH_PLATFORM_WEB_FALLBACK and PI_SEARCH_AUTO_COOKIES', () => {
   const env = buildCliEnvironment({
     PATH: '/usr/bin',
     PI_SEARCH_PLATFORM_WEB_FALLBACK: '1',
+    PI_SEARCH_AUTO_COOKIES: '1',
     SEARCH_WEB_BACKENDS: 'duckduckgo',
     OTHER_SECRET_TOKEN: 'should-not-pass',
   });
-  assert.equal(env.PI_SEARCH_PLATFORM_WEB_FALLBACK, '1');
-  assert.equal(env.SEARCH_WEB_BACKENDS, 'duckduckgo');
+  assert.equal(env.PI_SEARCH_PLATFORM_WEB_FALLBACK, undefined);
+  assert.equal(env.PI_SEARCH_AUTO_COOKIES, undefined);
+  assert.equal(env.SEARCH_WEB_BACKENDS, undefined);
   assert.equal(env.OTHER_SECRET_TOKEN, undefined);
 });
 

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { callNativeTool } from './native-tools.js';
 import { DEFAULT_SEARCH_MCP_COMMAND, buildServerParameters } from './mcp-client.js';
 import type { BackendCallResult } from './backend.js';
+import { SocialError } from './social-contract.js';
 import { loadedConfigSummary, loadSearchMcpEnvironment } from './local-config.js';
 
 interface CliResult {
@@ -11,6 +12,8 @@ interface CliResult {
   error?: {
     code: string;
     message: string;
+    platform?: string;
+    backend?: string;
   };
 }
 
@@ -44,8 +47,27 @@ async function callResult(toolName: string | undefined, rawArgs: string | undefi
     const data = await callNativeTool(toolName, parsed.data as Record<string, unknown>, { env });
     return { ok: true, data };
   } catch (error) {
-    return errorResult('tool_error', error instanceof Error ? error.message : String(error));
+    return cliToolError(error);
   }
+}
+
+/** Map tool failures to the CLI envelope. SocialError codes pass through
+ * with platform/backend context; plain Errors collapse to 'tool_error'.
+ * Messages are pre-scrubbed at worker level; this path never adds raw
+ * URL/body material. */
+export function cliToolError(error: unknown): CliResult {
+  if (error instanceof SocialError) {
+    return {
+      ok: false,
+      error: {
+        code: error.code,
+        message: error.message,
+        ...(error.platform !== undefined ? { platform: error.platform } : {}),
+        ...(error.backend !== undefined ? { backend: error.backend } : {}),
+      },
+    };
+  }
+  return errorResult('tool_error', error instanceof Error ? error.message : String(error));
 }
 
 function statusResult(env: Record<string, string | undefined>): CliResult {

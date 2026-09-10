@@ -1,6 +1,31 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { runCommand } from '../src/cli.js';
+import { cliToolError, runCommand } from '../src/cli.js';
+import { buildCliEnvironment } from '../src/cli-backend.js';
+import { SocialError, type SocialErrorCode } from '../src/social-contract.js';
+
+test('buildCliEnvironment forwards optional research API keys when set', () => {
+  const env = buildCliEnvironment({
+    SEMANTIC_SCHOLAR_API_KEY: 's2-key',
+    OPENALEX_API_KEY: 'openalex-key',
+    NCBI_API_KEY: 'ncbi-key',
+    NCBI_EMAIL: 'research@example.com',
+    STACKEXCHANGE_KEY: 'se-key',
+    UNRELATED_SECRET: 'never-forwarded',
+  });
+  assert.equal(env.SEMANTIC_SCHOLAR_API_KEY, 's2-key');
+  assert.equal(env.OPENALEX_API_KEY, 'openalex-key');
+  assert.equal(env.NCBI_API_KEY, 'ncbi-key');
+  assert.equal(env.NCBI_EMAIL, 'research@example.com');
+  assert.equal(env.STACKEXCHANGE_KEY, 'se-key');
+  assert.equal(env.UNRELATED_SECRET, undefined);
+});
+
+test('buildCliEnvironment omits unset research keys', () => {
+  const env = buildCliEnvironment({ PATH: '/usr/bin' });
+  assert.equal(env.SEMANTIC_SCHOLAR_API_KEY, undefined);
+  assert.equal(env.NCBI_EMAIL, undefined);
+});
 
 test('runCommand status reports native CLI backend configuration', async () => {
   assert.deepEqual(await runCommand(['status'], { SEARCH_MCP_COMMAND: 'node', SEARCH_MCP_ARGS_JSON: '["server.js"]' }), {
@@ -146,4 +171,48 @@ test('runCommand reach_status includes auth metadata per channel', async () => {
 
   // rss channel should have configured=false (zero-config, no env keys)
   // but auth field present with loginFlow, cookieDomains, risk
+});
+
+test('cliToolError passes every SocialError code through with context', () => {
+  const codes: SocialErrorCode[] = [
+    'invalid_request',
+    'unsupported_action',
+    'not_found',
+    'backend_unavailable',
+    'authentication_required',
+    'permission_denied',
+    'rate_limited',
+    'upstream_error',
+    'malformed_upstream',
+    'cursor_invalid',
+    'cursor_mismatch',
+  ];
+  assert.equal(codes.length, 11);
+  for (const code of codes) {
+    const result = cliToolError(new SocialError(code, `probe ${code}`, { platform: 'reddit', backend: 'reddit-api' }));
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.error, {
+      code,
+      message: `probe ${code}`,
+      platform: 'reddit',
+      backend: 'reddit-api',
+    });
+  }
+});
+
+test('cliToolError omits absent platform/backend and keeps plain Error as tool_error', () => {
+  const bare = cliToolError(new SocialError('rate_limited', 'slow down', { backend: 'github-api' }));
+  assert.deepEqual(bare.error, { code: 'rate_limited', message: 'slow down', backend: 'github-api' });
+
+  const plain = cliToolError(new Error('boom'));
+  assert.deepEqual(plain.error, { code: 'tool_error', message: 'boom' });
+
+  const payload = JSON.stringify(cliToolError(new SocialError('not_found', 'missing', {})));
+  assert.doesNotMatch(payload, /http/);
+});
+
+test('runCommand surfaces SocialError codes instead of collapsing to tool_error', async () => {
+  const result = await runCommand(['call', 'github', '{"action":"bogus"}'], {});
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'unsupported_action');
 });

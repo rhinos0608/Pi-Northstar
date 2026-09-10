@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildBrowseArgs, buildSemanticSource, buildMediaRoute, buildSearchRoute, buildFetchRoute } from '../src/index.js';
+import { buildBrowseArgs, buildSemanticSource, buildMediaRoute, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs } from '../src/index.js';
+import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
+
+function registryActionEnum(family: string): string[] {
+  return [...new Set(
+    CHANNEL_CAPABILITIES
+      .filter((channel) => channel.family === family && channel.availability === 'available')
+      .flatMap((channel) => channel.actions.map((action) => action.action)),
+  )].sort();
+}
 
 test('buildBrowseArgs uses supported agentic_browse read action', () => {
   assert.deepEqual(buildBrowseArgs({ url: 'https://example.com' }), {
@@ -82,10 +91,9 @@ test('buildMediaRoute strips rss platform from video params', () => {
 });
 
 test('buildMediaRoute includes optional fields in video params', () => {
-  const route = buildMediaRoute({ platform: 'youtube', action: 'transcript', id: 'abc123', language: 'en.*', url: 'https://youtube.com/watch?v=abc123', limit: 1 });
+  const route = buildMediaRoute({ platform: 'youtube', action: 'transcript', id: 'abc123', url: 'https://youtube.com/watch?v=abc123', limit: 1 });
   assert.equal(route.tool, 'video');
   assert.equal(route.args.id, 'abc123');
-  assert.equal(route.args.language, 'en.*');
   assert.equal(route.args.url, 'https://youtube.com/watch?v=abc123');
   assert.equal(route.args.limit, 1);
 });
@@ -146,6 +154,12 @@ test('buildSearchRoute research category honors source and limit', () => {
   assert.equal(route.args.limit, 5);
 });
 
+test('buildSearchRoute passes research cursor and rejects non-research cursor', () => {
+  const route = buildSearchRoute({ query: 'NLP', category: 'research', source: 'arxiv', cursor: 'opaque-token' });
+  assert.equal(route.args.cursor, 'opaque-token');
+  assert.throws(() => buildSearchRoute({ query: 'x', cursor: 'opaque-token' }), /cursor requires category "research"/);
+});
+
 test('buildSearchRoute plain query routes to web_search backend', () => {
   const route = buildSearchRoute({ query: 'pi agent' });
   assert.equal(route.tool, 'web_search');
@@ -160,14 +174,27 @@ test('buildSearchRoute passes category to web_search', () => {
   assert.equal(route.args.category, 'news');
 });
 
-test('buildSearchRoute clamps limit on web route', () => {
-  const route = buildSearchRoute({ query: 'test', limit: 30 });
-  assert.equal(route.args.limit, 20);
+test('buildSearchRoute rejects out-of-range limit on web route with invalid_request', () => {
+  for (const limit of [0, 21, 30, 100000]) {
+    assert.throws(
+      () => buildSearchRoute({ query: 'test', limit }),
+      (err: unknown) => (err as { code?: string }).code === 'invalid_request',
+      `web limit ${limit} must reject with invalid_request`,
+    );
+  }
+  // At-cap values still pass.
+  assert.equal(buildSearchRoute({ query: 'test', limit: 20 }).args.limit, 20);
+  assert.equal(buildSearchRoute({ query: 'test' }).args.limit, 8);
 });
 
-test('buildSearchRoute research limit maxes at 30', () => {
-  const route = buildSearchRoute({ query: 'test', category: 'research', limit: 50 });
-  assert.equal(route.args.limit, 30);
+test('buildSearchRoute research limit rejects above 30 with invalid_request', () => {
+  assert.throws(
+    () => buildSearchRoute({ query: 'test', category: 'research', limit: 50 }),
+    (err: unknown) => (err as { code?: string }).code === 'invalid_request',
+  );
+  // Research-category default stays 12 and the 30 cap still passes.
+  assert.equal(buildSearchRoute({ query: 'test', category: 'research' }).args.limit, 12);
+  assert.equal(buildSearchRoute({ query: 'test', category: 'research', limit: 30 }).args.limit, 30);
 });
 
 test('buildMediaRoute handles empty params object', () => {
@@ -228,6 +255,43 @@ test('buildFetchRoute followLinks routes to semantic_crawl with maxDepth 3', () 
   assert.equal(route.timeout, 300_000);
 });
 
+test('buildFetchRoute passes maxChars to semantic_crawl on crawl paths', () => {
+  const queryRoute = buildFetchRoute({ query: 'docs', searchQuery: 'topic', maxChars: 5000 });
+  assert.equal(queryRoute.tool, 'semantic_crawl');
+  assert.equal(queryRoute.args.maxChars, 5000);
+  const followRoute = buildFetchRoute({ followLinks: true, url: 'https://example.com', query: 'docs', maxChars: 5000 });
+  assert.equal(followRoute.tool, 'semantic_crawl');
+  assert.equal(followRoute.args.maxChars, 5000);
+  const defaultRoute = buildFetchRoute({ query: 'docs', searchQuery: 'topic' });
+  assert.equal(defaultRoute.args.maxChars, undefined);
+});
+
+test('web_search schema leaves limit cap to per-category runtime validation', async () => {
+  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  process.env.PI_SEARCH_BOOTSTRAP = 'off';
+  let captured: { name: string; parameters: unknown } | undefined;
+  const pi = {
+    on: () => {},
+    registerTool: (def: { name: string; parameters: unknown }) => {
+      if (def.name === 'web_search') captured = { name: def.name, parameters: def.parameters };
+    },
+    registerCommand: () => {},
+  };
+  try {
+    const mod = await import('../src/index.js');
+    (mod.default as (pi: unknown) => void)(pi);
+  } finally {
+    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+  }
+  assert.ok(captured, 'web_search tool must be registered');
+  const props = (captured!.parameters as { properties: Record<string, { maximum?: number; minimum?: number }> }).properties;
+  // No static maximum: research 21-30 is reachable; per-category runtime
+  // caps (20 web, 30 research) reject via validateWebRequest.
+  assert.equal(props.limit?.maximum, undefined, 'web_search limit schema must not impose a static 20 cap');
+  assert.equal(props.limit?.minimum, 1);
+});
+
 test('buildFetchRoute without followLinks behaves as before', () => {
   const route = buildFetchRoute({ url: 'https://example.com', query: 'test' });
   assert.equal(route.tool, 'semantic_crawl');
@@ -240,11 +304,14 @@ test('buildFetchRoute no-followLinks no-query still requires url', () => {
 });
 
 
-test('buildSearchRoute limit clamping: 30 on research, 20 on web', () => {
+test('buildSearchRoute caps: 30 on research, 20 on web', () => {
   const researchRoute = buildSearchRoute({ query: 'test', category: 'research', limit: 30 });
   assert.equal(researchRoute.args.limit, 30);
-  const webRoute = buildSearchRoute({ query: 'test', limit: 30 });
+  const webRoute = buildSearchRoute({ query: 'test', limit: 20 });
   assert.equal(webRoute.args.limit, 20);
+  // Cross-category overflow rejects instead of clamping.
+  assert.throws(() => buildSearchRoute({ query: 'test', limit: 21 }));
+  assert.throws(() => buildSearchRoute({ query: 'test', category: 'research', limit: 31 }));
 });
 
 test('browser tool registration: no maxChars param, browse action rejected', async () => {
@@ -309,16 +376,34 @@ test('social and media tool schemas remain unchanged', async () => {
   assert.ok(defs.media, 'media tool must be registered');
 
   const socialProps = Object.keys((defs.social.parameters.properties ?? {})).sort();
-  assert.deepEqual(socialProps, ['action', 'filter', 'id', 'limit', 'node', 'platform', 'query', 'subreddit', 'url', 'user', 'username']);
+  assert.deepEqual(socialProps, ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']);
   const socialPlatform = (defs.social.parameters.properties as Record<string, { enum?: string[] }>).platform;
-  assert.deepEqual(socialPlatform?.enum, ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook', 'instagram']);
+  assert.deepEqual([...(socialPlatform?.enum ?? [])].sort(), [...registrySocialPlatforms()].sort());
+  const socialAction = (defs.social.parameters.properties as Record<string, { enum?: string[] }>).action;
+  assert.deepEqual([...(socialAction?.enum ?? [])].sort(), registryActionEnum('social'));
+  // Canonical-only contract: legacy aliases are never advertised.
+  for (const legacy of ['tweet', 'topic', 'note', 'hot', 'popular', 'post', 'explore', 'user']) {
+    assert.equal(socialAction?.enum?.includes(legacy), false, `social action enum must not advertise legacy alias ${legacy}`);
+  }
+  // Mutation verbs never appear in the social action schema.
+  for (const mutation of ['like', 'follow', 'retweet']) {
+    assert.equal(socialAction?.enum?.includes(mutation), false, `social action enum must reject ${mutation}`);
+  }
+  // Canonical-only selectors: legacy spellings and generic bags removed.
+  const socialPropBag = defs.social.parameters.properties as Record<string, unknown>;
+  for (const legacySelector of ['id', 'username', 'subreddit', 'node', 'filter']) {
+    assert.equal(legacySelector in socialPropBag, false, `social schema must not advertise legacy selector ${legacySelector}`);
+  }
 
   const mediaProps = Object.keys((defs.media.parameters.properties ?? {})).sort();
-  assert.deepEqual(mediaProps, ['action', 'id', 'language', 'limit', 'platform', 'query', 'url']);
+  assert.deepEqual(mediaProps, ['action', 'id', 'limit', 'platform', 'query', 'url']);
   const mediaPlatform = (defs.media.parameters.properties as Record<string, { enum?: string[] }>).platform;
-  assert.deepEqual(mediaPlatform?.enum, ['youtube', 'bilibili', 'rss']);
+  assert.deepEqual([...(mediaPlatform?.enum ?? [])].sort(), [...registryMediaPlatforms()].sort());
   const mediaAction = (defs.media.parameters.properties as Record<string, { enum?: string[] }>).action;
-  assert.deepEqual(mediaAction?.enum, ['search', 'details', 'transcript', 'hot', 'video', 'subtitle', 'feed']);
+  assert.deepEqual([...(mediaAction?.enum ?? [])].sort(), registryActionEnum('media'));
+  for (const legacy of ['video', 'subtitle']) {
+    assert.equal(mediaAction?.enum?.includes(legacy), false, `media action enum must not advertise legacy alias ${legacy}`);
+  }
 });
 
 type CapturedHandlers = Record<string, (event: Record<string, unknown>) => Record<string, unknown> | undefined>;
@@ -494,4 +579,53 @@ test('browser schema job steps exposes kind subfield', async () => {
   const job = props.job as { properties: Record<string, unknown> };
   const steps = job.properties.steps as { items: { properties: Record<string, unknown> } };
   assert.ok(steps.items.properties.kind, 'job steps[].kind must be present');
+});
+
+// ── /reach-status <family> <action> command parsing (registry-validated) ──
+
+test('reachStatusCommandArgs preserves zero/one-argument behavior', () => {
+  assert.deepEqual(reachStatusCommandArgs(''), {});
+  assert.deepEqual(reachStatusCommandArgs('   '), {});
+  assert.deepEqual(reachStatusCommandArgs('media'), { family: 'media' });
+  assert.deepEqual(reachStatusCommandArgs('  social '), { family: 'social' });
+});
+
+test('reachStatusCommandArgs accepts canonical actions only', () => {
+  assert.deepEqual(reachStatusCommandArgs('media details'), { family: 'media', action: 'details' });
+  assert.deepEqual(reachStatusCommandArgs('social search'), { family: 'social', action: 'search' });
+  assert.deepEqual(reachStatusCommandArgs('social get_post'), { family: 'social', action: 'get_post' });
+});
+
+test('reachStatusCommandArgs rejects legacy aliases', () => {
+  assert.throws(() => reachStatusCommandArgs('social topic'), /not a supported social action/);
+  assert.throws(() => reachStatusCommandArgs('social read'), /not a supported social action/);
+  assert.throws(() => reachStatusCommandArgs('media video'), /not a supported media action/);
+});
+
+test('canonical-only module import succeeds without alias consumption', async () => {
+  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  process.env.PI_SEARCH_BOOTSTRAP = 'off';
+  try {
+    const mod = await import('../src/index.js');
+    assert.equal(typeof mod.default, 'function', 'extension entrypoint must import');
+    assert.equal(typeof mod.reachStatusCommandArgs, 'function', 'status parser must be exported');
+  } finally {
+    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+  }
+});
+
+test('reachStatusCommandArgs rejects actions outside the family registry', () => {
+  assert.throws(
+    () => reachStatusCommandArgs('media repo'),
+    /not a supported media action/,
+  );
+  assert.throws(
+    () => reachStatusCommandArgs('rss repo'),
+    /not a supported rss action/,
+  );
+});
+
+test('reachStatusCommandArgs rejects more than two arguments', () => {
+  assert.throws(() => reachStatusCommandArgs('media details extra'), /Usage: \/reach-status/);
 });

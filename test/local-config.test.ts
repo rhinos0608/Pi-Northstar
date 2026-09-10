@@ -72,3 +72,26 @@ test('loadSearchMcpEnvironment ignores placeholder null strings', async () => {
 
   assert.equal(loadSearchMcpEnvironment({ PI_SEARCH_ENV_PATH: join(dir, 'missing.env'), SEARCH_MCP_CONFIG_PATH: path }).SEARCH_LLM_API_TOKEN, undefined);
 });
+
+test('optional research API keys map from config without overriding env', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-search-research-keys-'));
+  const path = join(dir, 'config.json');
+  await writeFile(path, JSON.stringify({
+    semanticScholar: { apiKey: 's2-key-from-config' },
+    openalex: { apiKey: 'openalex-key-from-config' },
+    ncbi: { apiKey: 'ncbi-key-from-config', email: 'research@example.com' },
+    stackexchange: { key: 'se-key-from-config' },
+  }));
+
+  const env = loadSearchMcpEnvironment({ PI_SEARCH_ENV_PATH: join(dir, 'missing.env'), SEARCH_MCP_CONFIG_PATH: path, OPENALEX_API_KEY: 'from-env' });
+
+  assert.equal(env.SEMANTIC_SCHOLAR_API_KEY, 's2-key-from-config');
+  assert.equal(env.OPENALEX_API_KEY, 'from-env');
+  assert.equal(env.NCBI_API_KEY, 'ncbi-key-from-config');
+  assert.equal(env.NCBI_EMAIL, 'research@example.com');
+  assert.equal(env.STACKEXCHANGE_KEY, 'se-key-from-config');
+
+  const summary = loadedConfigSummary({ PI_SEARCH_ENV_PATH: join(dir, 'missing.env'), SEARCH_MCP_CONFIG_PATH: path });
+  assert.ok(summary.mappedKeys.includes('SEMANTIC_SCHOLAR_API_KEY'));
+  assert.ok(summary.mappedKeys.includes('NCBI_EMAIL'));
+});

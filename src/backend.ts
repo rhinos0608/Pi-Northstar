@@ -8,6 +8,12 @@ export interface BackendCallOptions {
 
 export interface BackendCallResult {
   content?: unknown;
+  /**
+   * Structured detail payload alongside `content`. Legacy fields are
+   * preserved; canonical V1 results attach additively under
+   * `details.northstar` (see result-contract.ts, tool-output.ts).
+   */
+  details?: unknown;
   [key: string]: unknown;
 }
 

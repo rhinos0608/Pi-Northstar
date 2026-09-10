@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -30,7 +30,7 @@ test('callSetupTool defaults to local setup automation', async () => {
   const data = JSON.parse(text) as Record<string, unknown>;
   assert.equal(data.action, 'auto');
   assert.match(text, /Install execution disabled/);
-  assert.match(text, /Browser cookie import disabled/);
+  assert.match(text, /Browser cookie import never runs/);
 });
 
 test('ensureFirstStartBootstrap with off mode does nothing', async () => {
@@ -279,16 +279,21 @@ test('callSetupTool plan includes cookie domains per provider', async () => {
   assert.ok(Array.isArray(data.providers), 'providers must be an array');
   const cookieProviders = (data.providers as Array<Record<string, unknown>>).filter((provider) => Array.isArray(provider.cookieDomains) && (provider.cookieDomains as string[]).length > 0);
 
-  // At least some cookie-backed providers
-  const facebook = cookieProviders.find((p) => p.provider === 'facebook');
-  assert.ok(facebook, 'facebook must be in cookieProviders');
-  assert.ok(Array.isArray(facebook.cookieDomains));
-  assert.ok((facebook.cookieDomains as string[]).includes('facebook.com'));
+  // Only operational registry providers whose backend consumes the Pi cookie
+  // jar may import. Twitter/Xiaohongshu workers use CLI-owned local session
+  // stores and OpenCLI Chrome-session providers never collect unused
+  // cookies, so twitter, xiaohongshu, facebook, instagram, and linkedin stay
+  // out of this list.
+  for (const unconsumed of ['twitter', 'xiaohongshu', 'facebook', 'instagram', 'linkedin']) {
+    assert.equal(cookieProviders.find((p) => p.provider === unconsumed), undefined, `${unconsumed} must not import unused cookies`);
+  }
 
-  const twitter = cookieProviders.find((p) => p.provider === 'twitter');
-  assert.ok(twitter, 'twitter must be in cookieProviders');
-  assert.ok(Array.isArray(twitter.cookieDomains));
-  assert.ok((twitter.cookieDomains as string[]).includes('twitter.com'));
+  const reddit = cookieProviders.find((p) => p.provider === 'reddit');
+  assert.ok(reddit, 'reddit must be in cookieProviders');
+  assert.ok((reddit.cookieDomains as string[]).includes('reddit.com'));
+
+  const bilibili = cookieProviders.find((p) => p.provider === 'bilibili');
+  assert.ok(bilibili, 'bilibili must be in cookieProviders');
 
   // Each has loginFlow and risk
   for (const cp of cookieProviders) {
@@ -358,7 +363,7 @@ test('callSetupTool login with non-cookie provider returns error', async () => {
 });
 
 test('callSetupTool login with any cookie provider reaches port validation', async () => {
-  const result = await callSetupTool({ action: 'login', provider: 'github', port: 80 }, { env: {} });
+  const result = await callSetupTool({ action: 'login', provider: 'reddit', port: 80 }, { env: {} });
   const text = textFromResult(result);
   const data = JSON.parse(text) as Record<string, unknown>;
   assert.equal(data.ok, false);
@@ -401,4 +406,129 @@ test('callSetupTool plan: reddit not configured for incomplete OAuth triple', as
   const fullReddit = fullData.providers.find((p) => p.provider === 'reddit');
   assert.equal(fullReddit?.configured, true, 'complete OAuth triple must claim configured');
   assert.doesNotMatch(partialText, /sec/);
+});
+
+// ── Stage 0.3: explicit cookie-import consent ──
+
+test('first start does not import browser cookies without explicit opt-in', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-northstar-consent-'));
+  try {
+    await ensureFirstStartBootstrap({ PI_SEARCH_BOOTSTRAP: 'auto', PI_SEARCH_ALLOW_INSTALL: '0', PI_SEARCH_STATE_DIR: dir });
+    const state = JSON.parse(await readFile(join(dir, 'bootstrap.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal('cookies' in state, false, 'no cookie import may run without PI_SEARCH_AUTO_COOKIES=1');
+    const cookieFiles = await readdir(join(dir, 'cookies')).catch(() => [] as string[]);
+    assert.equal(cookieFiles.filter((f) => f.endsWith('.storageState.json')).length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('first start never imports browser cookies even with PI_SEARCH_AUTO_COOKIES=1', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-northstar-state-'));
+  try {
+    await ensureFirstStartBootstrap({ PI_SEARCH_BOOTSTRAP: 'auto', PI_SEARCH_ALLOW_INSTALL: '0', PI_SEARCH_AUTO_COOKIES: '1', PI_SEARCH_STATE_DIR: dir });
+    const state = JSON.parse(await readFile(join(dir, 'bootstrap.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal('cookies' in state, false, 'startup must never import cookies, legacy opt-in flag ignored');
+    const cookieFiles = await readdir(join(dir, 'cookies')).catch(() => [] as string[]);
+    assert.equal(cookieFiles.filter((f) => f.endsWith('.storageState.json')).length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('bare auto setup never imports cookies instead of importing', async () => {
+  const result = await callSetupTool({}, { env: { PI_SEARCH_ALLOW_INSTALL: '0' } });
+  const data = JSON.parse(textFromResult(result)) as Record<string, unknown>;
+  const cookies = data.cookies as Record<string, unknown>;
+  assert.equal(cookies.ok, false);
+  assert.match(cookies.message as string, /never runs/);
+});
+
+test('bare auto never imports cookies even with kill switches set', async () => {
+  const result = await callSetupTool({}, { env: { PI_SEARCH_ALLOW_INSTALL: '0', PI_SEARCH_AUTO_COOKIES: '1', PI_SEARCH_BROWSER_AUTOMATION: '0' } });
+  const data = JSON.parse(textFromResult(result)) as Record<string, unknown>;
+  const cookies = data.cookies as Record<string, unknown>;
+  assert.equal(cookies.ok, false);
+  assert.match(cookies.message as string, /never runs/);
+});
+
+test('import_cookies rejects session-owned providers without cookie-consuming backends', async () => {
+  for (const provider of ['twitter', 'xiaohongshu', 'facebook', 'instagram', 'linkedin']) {
+    const result = await callSetupTool({ action: 'import_cookies', provider }, { env: {} });
+    const data = JSON.parse(textFromResult(result)) as Record<string, unknown>;
+    assert.equal(data.status, 'error', `${provider} must not import unused cookies`);
+    assert.match(data.message as string, /no working cookie-consuming backend/);
+    assert.doesNotMatch(data.message as string, /planned/, `${provider} refusal must not claim planned status`);
+  }
+});
+
+test('import_cookies with removed providers returns unknown error', async () => {
+  for (const provider of ['xueqiu', 'xiaoyuzhou']) {
+    const result = await callSetupTool({ action: 'import_cookies', provider }, { env: {} });
+    const data = JSON.parse(textFromResult(result)) as Record<string, unknown>;
+    assert.equal(data.status, 'error', `${provider} must stay unknown after dead channel purge`);
+    assert.match(data.message as string, /Unknown provider/);
+  }
+});
+
+test('install_channels treats linkedin as operational', async () => {
+  const result = await callSetupTool({ action: 'install_channels', channels: 'linkedin' }, { env: { PI_SEARCH_ALLOW_INSTALL: '0' } });
+  const data = JSON.parse(textFromResult(result)) as Record<string, unknown>;
+  assert.equal(data.descriptor, true);
+  assert.equal('plannedChannels' in data, false, 'linkedin is available, never a planned skip');
+  const providers = data.backends as Array<Record<string, unknown>>;
+  assert.ok(providers.find((p) => p.provider === 'linkedin'), 'linkedin must be in operational backends');
+});
+
+test('install_channels rejects removed channels as unknown', async () => {
+  const result = await callSetupTool({ action: 'install_channels', channels: 'xueqiu' }, { env: {} });
+  const data = JSON.parse(textFromResult(result)) as Record<string, unknown>;
+  assert.equal(data.status, 'error');
+  assert.match(data.message as string, /Unknown channels: xueqiu/);
+});
+
+test('install_channels with available channels reports no planned skips', async () => {
+  const result = await callSetupTool({ action: 'install_channels', channels: 'github,linkedin' }, { env: { PI_SEARCH_ALLOW_INSTALL: '0' } });
+  const data = JSON.parse(textFromResult(result)) as Record<string, unknown>;
+  assert.equal(data.descriptor, true);
+  assert.equal('plannedChannels' in data, false, 'no planned channels remain in the registry');
+  const providers = data.backends as Array<Record<string, unknown>>;
+  assert.equal(providers.length, 2);
+});
+
+test('plan reflects canonical registry: linkedin available, dead channels gone', async () => {
+  const result = await callSetupTool({ action: 'plan' }, {});
+  const text = textFromResult(result);
+  const data = JSON.parse(text) as Record<string, unknown>;
+  const platforms = data.platforms as Array<Record<string, unknown>>;
+  const providers = data.providers as Array<Record<string, unknown>>;
+
+  const linkedinPlatform = platforms.find((p) => p.platform === 'linkedin');
+  assert.ok(linkedinPlatform, 'linkedin must remain in plan');
+  assert.equal(linkedinPlatform.availability, 'available');
+  assert.equal(linkedinPlatform.ready, '—', 'linkedin must not claim ready capability beyond its unlock line');
+  assert.doesNotMatch(String(linkedinPlatform.unlock), /planned/);
+  assert.match(String(linkedinPlatform.setup), /OpenCLI/);
+
+  const twitterPlatform = platforms.find((p) => p.platform === 'twitter');
+  assert.ok(twitterPlatform, 'twitter must remain in plan');
+  assert.match(String(twitterPlatform.setup), /twitter-cli/);
+  assert.doesNotMatch(String(twitterPlatform.setup), /TWITTER_AUTH_TOKEN|TWITTER_CT0/);
+
+  const linkedinProvider = providers.find((p) => p.provider === 'linkedin');
+  assert.ok(linkedinProvider, 'linkedin provider must be present');
+  assert.equal(linkedinProvider.availability, 'available');
+  // Session readiness is never inferred from binary presence: empty env means
+  // unconfigured regardless of which CLIs exist on the machine.
+  assert.equal(linkedinProvider.configured, false);
+
+  for (const removed of ['xueqiu', 'xiaoyuzhou']) {
+    assert.equal(platforms.find((p) => p.platform === removed), undefined, `${removed} platform must be gone`);
+    assert.equal(providers.find((p) => p.provider === removed), undefined, `${removed} provider must be gone`);
+  }
+
+  // False capability claims are gone.
+  assert.doesNotMatch(text, /Jina Reader/);
+  assert.doesNotMatch(text, /xueqiu|xiaoyuzhou/i);
+  assert.doesNotMatch(text, /planned/i);
 });
