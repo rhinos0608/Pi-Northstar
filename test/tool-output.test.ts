@@ -8,8 +8,11 @@ import {
   guardText,
   jsonTextResult,
   maxToolOutputChars,
+  northstarTextResult,
   textResult,
+  withNorthstarDetails,
 } from '../src/tool-output.js';
+import { buildNorthstarResult, validateNorthstarResult } from '../src/result-contract.js';
 import { callNativeTool } from '../src/native-tools.js';
 
 test('guardText returns text under the limit unchanged', () => {
@@ -143,6 +146,40 @@ test('native feeds dedupes entries with identical links', async () => {
   }
 });
 
+test('withNorthstarDetails attaches northstar while preserving legacy detail fields', () => {
+  const northstar = buildNorthstarResult({
+    request: { tool: 'web_search', channel: 'research', action: 'search', source: 'openalex' },
+    outcomes: [],
+  });
+  const details = withNorthstarDetails({ platform: 'reddit', action: 'hot', items: [1, 2] }, northstar);
+
+  // Legacy observable fields keep their requested values.
+  assert.equal(details.platform, 'reddit');
+  assert.equal(details.action, 'hot');
+  assert.deepEqual(details.items, [1, 2]);
+  assert.equal(details.northstar, northstar);
+  // Canonical envelope records the canonical action, not the legacy alias.
+  assert.equal(northstar.request.action, 'search');
+
+  assert.deepEqual(withNorthstarDetails(undefined, northstar), { northstar });
+});
+
+test('northstarTextResult guards text and carries legacy plus northstar details', () => {
+  const northstar = buildNorthstarResult({
+    request: { tool: 'media', channel: 'youtube', action: 'details', requestedAction: 'details' },
+    outcomes: [{ source: 'youtube', backend: 'youtube-oembed', entities: [], degraded: true }],
+  });
+  const result = northstarTextResult('ok', { platform: 'youtube', action: 'details', backend: 'youtube-oembed' }, northstar, { maxChars: 1000 });
+  const details = result.details as Record<string, unknown>;
+
+  assert.equal(details.platform, 'youtube');
+  assert.equal(details.action, 'details');
+  assert.equal(details.backend, 'youtube-oembed');
+  assert.equal(details.northstar, northstar);
+  const content = result.content as Array<{ text: string }>;
+  assert.equal(content[0]?.text, 'ok');
+});
+
 test('callNativeTool applies the context guard to oversized tool text', async () => {
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(
@@ -165,4 +202,78 @@ test('callNativeTool applies the context guard to oversized tool text', async ()
   } finally {
     globalThis.fetch = savedFetch;
   }
+});
+
+// ── northstarTextResult fail-closed envelope validation ──
+
+test('northstarTextResult attaches a valid envelope unchanged', () => {
+  const northstar = buildNorthstarResult({
+    request: { tool: 'web_search', channel: 'research', action: 'search', requestedAction: 'search' },
+    outcomes: [{ source: 'wikipedia', backend: 'wikipedia-api', entities: [], }],
+  });
+  const result = northstarTextResult('text', undefined, northstar, { maxChars: 1000 });
+  const details = result.details as Record<string, unknown>;
+  assert.equal(details.northstar, northstar);
+});
+
+test('northstarTextResult fails closed on a malformed envelope', () => {
+  const malformed = buildNorthstarResult({
+    request: { tool: 'web_search', channel: 'research', action: 'search', requestedAction: 'search' },
+    outcomes: [{ source: 'wikipedia', backend: 'wikipedia-api', entities: [], }],
+  });
+  // Corrupt one entity row (empty required url) so semantic validation fails.
+  malformed.data = { kind: 'entities', entities: [{ entityVersion: 1, kind: 'article', id: 'x', source: 'wikipedia', title: 'x', url: '' } as never] };
+  const result = northstarTextResult('text', { legacy: true }, malformed, { maxChars: 1000 });
+  const details = result.details as Record<string, unknown>;
+  // BackendCallResult shape unchanged: content plus details.
+  assert.ok(Array.isArray(result.content));
+  assert.ok(details.legacy);
+  const northstar = details.northstar as { status: string; errors: Array<{ code: string }>; data: { entities?: unknown[] } };
+  assert.equal(northstar.status, 'error');
+  assert.equal(northstar.errors[0]?.code, 'invalid_backend_response');
+  // Malformed rows are withheld, not surfaced.
+  assert.equal(northstar.data.entities?.length ?? 0, 0);
+});
+
+test('northstarTextResult fails closed on non-object cast data (null envelope)', () => {
+  const result = northstarTextResult('text', { legacy: true }, undefined as never, { maxChars: 1000 });
+  const details = result.details as Record<string, unknown>;
+  assert.ok(Array.isArray(result.content));
+  assert.ok(details.legacy);
+  const northstar = details.northstar as { status: string; request: Record<string, unknown> };
+  assert.equal(northstar.status, 'error');
+  // Sanitized request: missing fields become 'unknown', not the cast garbage.
+  assert.equal(northstar.request.tool, 'unknown');
+  assert.equal(northstar.request.channel, 'unknown');
+  assert.equal(northstar.request.action, 'unknown');
+  // The replacement envelope itself passes runtime validation.
+  assert.equal(validateNorthstarResult(details.northstar).ok, true);
+});
+
+test('northstarTextResult fail-closed errors are secret-safe and the replacement validates', () => {
+  const malformed = buildNorthstarResult({
+    request: { tool: 'web_search', channel: 'research', action: 'search', requestedAction: 'search' },
+    outcomes: [],
+  });
+  // Tainted cast data: a request object carrying secret-shaped fields, plus a
+  // request.source that fails validation semantics.
+  const tainted = malformed as unknown as Record<string, unknown>;
+  tainted.request = { tool: 'web_search', channel: 'research', action: 'search', apiKey: 'sk-super-secret-token', source: '' };
+  tainted.errors = 'not-an-array' as never;
+
+  const result = northstarTextResult('text', undefined, tainted as never, { maxChars: 1000 });
+  const details = result.details as Record<string, unknown>;
+  const northstar = details.northstar as { status: string; request: Record<string, unknown>; errors: Array<{ code: string; message: string }> };
+
+  assert.equal(northstar.status, 'error');
+  assert.equal(northstar.errors[0]?.code, 'invalid_backend_response');
+  assert.equal(northstar.errors[0]?.message, 'Canonical result envelope failed validation; malformed data withheld.');
+  // Sanitized request: unknown extra fields and empty source are dropped.
+  assert.equal(northstar.request.apiKey, undefined);
+  assert.equal(northstar.request.source, undefined);
+  // The secret never reaches the serialized output.
+  assert.ok(!JSON.stringify(details).includes('sk-super-secret-token'));
+  // Replacement envelope passes full runtime validation.
+  const check = validateNorthstarResult(details.northstar);
+  assert.equal(check.ok, true, check.issues.join('; '));
 });

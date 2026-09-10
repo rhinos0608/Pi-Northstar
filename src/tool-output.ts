@@ -1,4 +1,6 @@
 import type { BackendCallResult } from './backend.js';
+import type { NorthstarRequestV1, NorthstarResultV1 } from './result-contract.js';
+import { buildNorthstarResult, validateNorthstarResult } from './result-contract.js';
 import { normalizeUrl } from './fusion.js';
 
 export const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 60_000;
@@ -62,6 +64,73 @@ export function textResult(text: string, details: unknown, options: GuardOptions
 
 export function jsonTextResult(data: unknown, options: GuardOptions = {}): BackendCallResult {
   return textResult(JSON.stringify(data, null, 2) ?? String(data), data, options);
+}
+
+/**
+ * Attach the canonical V1 result under `details.northstar` while preserving
+ * every legacy detail field (platform/action/backend/items/...). Never
+ * destructive: legacy observable keys keep their requested values.
+ */
+export function withNorthstarDetails(
+  details: Record<string, unknown> | undefined,
+  northstar: NorthstarResultV1,
+): Record<string, unknown> {
+  return { ...(details ?? {}), northstar };
+}
+
+/**
+ * Build a guarded text result whose details carry the legacy payload plus the
+ * canonical `northstar` envelope under its own key.
+ *
+ * Fail-closed: the envelope is semantically validated before it is attached.
+ * A malformed envelope is never surfaced; it is replaced by a safe error
+ * envelope (status `error`, code `invalid_backend_response`) with a sanitized
+ * request. BackendCallResult shape is unchanged either way.
+ */
+export function northstarTextResult(
+  text: string,
+  legacyDetails: Record<string, unknown> | undefined,
+  northstar: NorthstarResultV1,
+  options: GuardOptions = {},
+): BackendCallResult {
+  const check = validateNorthstarResult(northstar);
+  const envelope = check.ok ? northstar : failClosedEnvelope(northstar, check.issues);
+  return textResult(text, withNorthstarDetails(legacyDetails, envelope), options);
+}
+
+/**
+ * Replace a malformed canonical envelope with a minimal valid error envelope.
+ * Request fields are sanitized so the replacement itself always validates.
+ */
+function failClosedEnvelope(original: NorthstarResultV1, issues: string[]): NorthstarResultV1 {
+  const request = safeNorthstarRequest(original?.request);
+  return buildNorthstarResult({
+    request,
+    outcomes: [{
+      source: request.source ?? 'unknown',
+      backend: 'native',
+      error: {
+        code: 'invalid_backend_response',
+        message: 'Canonical result envelope failed validation; malformed data withheld.',
+        retryable: false,
+      },
+    }],
+    pagination: { supported: false, limit: 0, hasMore: false },
+    notes: issues.slice(0, 10),
+  });
+}
+
+function safeNorthstarRequest(value: unknown): NorthstarRequestV1 {
+  const raw = (typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+  const field = (v: unknown) => (typeof v === 'string' && v.trim() ? v : 'unknown');
+  const request: NorthstarRequestV1 = {
+    tool: field(raw.tool),
+    channel: field(raw.channel),
+    action: field(raw.action),
+  };
+  if (typeof raw.source === 'string' && raw.source.trim()) request.source = raw.source;
+  if (typeof raw.requestedAction === 'string' && raw.requestedAction.trim()) request.requestedAction = raw.requestedAction;
+  return request;
 }
 
 function isTextContent(item: unknown): item is { type: 'text'; text: string } {
