@@ -157,13 +157,13 @@ test('importCookiesFromCdp rejects provider without cookieDomains', async () => 
 });
 
 test('importCookiesFromCdp returns opt-out when PI_SEARCH_BROWSER_AUTOMATION=0', async () => {
-  const result = await importCookiesFromCdp('facebook', 'ws://127.0.0.1:9222', { PI_SEARCH_BROWSER_AUTOMATION: '0' });
+  const result = await importCookiesFromCdp('reddit', 'ws://127.0.0.1:9222', { PI_SEARCH_BROWSER_AUTOMATION: '0' });
   assert.equal(result.ok, false);
   assert.match(result.message ?? '', /Browser automation disabled/);
 });
 
 test('importCookiesFromCdp returns opt-out when PI_SEARCH_BROWSER_AUTOMATION=false', async () => {
-  const result = await importCookiesFromCdp('facebook', 'ws://127.0.0.1:9222', { PI_SEARCH_BROWSER_AUTOMATION: 'false' });
+  const result = await importCookiesFromCdp('reddit', 'ws://127.0.0.1:9222', { PI_SEARCH_BROWSER_AUTOMATION: 'false' });
   assert.equal(result.ok, false);
   assert.match(result.message ?? '', /Browser automation disabled/);
 });
@@ -199,7 +199,7 @@ test('importCookiesFromCdp imports provider cookies from browser-level CDP endpo
     if (method === 'Network.getCookies') {
       return {
         cookies: [
-          { name: 'c_user', value: 'facebook_secret', domain: '.facebook.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+          { name: 'reddit_session', value: 'reddit_secret', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
           { name: 'ignored', value: 'other_secret', domain: '.example.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
         ],
       };
@@ -211,19 +211,53 @@ test('importCookiesFromCdp imports provider cookies from browser-level CDP endpo
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWebSocket as unknown as typeof WebSocket;
 
   try {
-    const result = await importCookiesFromCdp('facebook', 'http://127.0.0.1:9222', { PI_SEARCH_STATE_DIR: dir });
+    const result = await importCookiesFromCdp('reddit', 'http://127.0.0.1:9222', { PI_SEARCH_STATE_DIR: dir });
     assert.equal(result.ok, true);
     assert.equal(result.count, 1);
-    assert.equal(result.storagePath, join(dir, 'cookies', 'facebook.storageState.json'));
+    assert.equal(result.storagePath, join(dir, 'cookies', 'reddit.storageState.json'));
 
-    const storage = JSON.parse(await readFile(join(dir, 'cookies', 'facebook.storageState.json'), 'utf8')) as { cookies: Array<Record<string, unknown>> };
+    const storage = JSON.parse(await readFile(join(dir, 'cookies', 'reddit.storageState.json'), 'utf8')) as { cookies: Array<Record<string, unknown>> };
     assert.equal(storage.cookies.length, 1);
-    assert.equal(storage.cookies[0]?.name, 'c_user');
-    assert.equal(storage.cookies[0]?.value, 'facebook_secret');
+    assert.equal(storage.cookies[0]?.name, 'reddit_session');
+    assert.equal(storage.cookies[0]?.value, 'reddit_secret');
   } finally {
     globalThis.fetch = savedFetch;
     (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = savedWebSocket;
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── non-cookie providers reject before WebSocket construction ──
+// Twitter/X and Xiaohongshu manage their own CLI/Chrome sessions and no
+// longer declare cookieDomains, so both entry points must reject without
+// ever touching WebSocket (proving stale fixtures cannot hang). WebSocket is
+// deliberately removed here: rejection must not depend on it existing.
+
+test('importCookiesFromCdp rejects twitter and xiaohongshu as non-cookie providers without WebSocket', async () => {
+  const saved = globalThis.WebSocket;
+  (globalThis as any).WebSocket = undefined;
+  try {
+    for (const provider of ['twitter', 'xiaohongshu']) {
+      const result = await importCookiesFromCdp(provider, 'ws://127.0.0.1:9222', {});
+      assert.equal(result.ok, false);
+      assert.match(result.message ?? '', /does not use cookies/);
+    }
+  } finally {
+    (globalThis as any).WebSocket = saved;
+  }
+});
+
+test('loginViaCdp rejects twitter and xiaohongshu as non-cookie providers without WebSocket', async () => {
+  const saved = globalThis.WebSocket;
+  (globalThis as any).WebSocket = undefined;
+  try {
+    for (const provider of ['twitter', 'xiaohongshu']) {
+      const result = await loginViaCdp(provider, 9222, {});
+      assert.equal(result.ok, false);
+      assert.match(result.message ?? '', /does not use cookies/);
+    }
+  } finally {
+    (globalThis as any).WebSocket = saved;
   }
 });
 
@@ -248,25 +282,25 @@ test('loginViaCdp rejects provider without loginUrl', async () => {
 });
 
 test('loginViaCdp rejects port below 1024', async () => {
-  const result = await loginViaCdp('facebook', 80, {});
+  const result = await loginViaCdp('reddit', 80, {});
   assert.equal(result.ok, false);
   assert.match(result.message ?? '', /CDP port must be in range 1024-65535/);
 });
 
 test('loginViaCdp rejects port above 65535', async () => {
-  const result = await loginViaCdp('facebook', 99999, {});
+  const result = await loginViaCdp('reddit', 99999, {});
   assert.equal(result.ok, false);
   assert.match(result.message ?? '', /CDP port must be in range 1024-65535/);
 });
 
 test('loginViaCdp rejects NaN port', async () => {
-  const result = await loginViaCdp('facebook', Number.NaN, {});
+  const result = await loginViaCdp('reddit', Number.NaN, {});
   assert.equal(result.ok, false);
   assert.match(result.message ?? '', /CDP port must be in range 1024-65535/);
 });
 
 test('loginViaCdp returns opt-out when PI_SEARCH_BROWSER_AUTOMATION=0', async () => {
-  const result = await loginViaCdp('facebook', 9222, { PI_SEARCH_BROWSER_AUTOMATION: '0' });
+  const result = await loginViaCdp('reddit', 9222, { PI_SEARCH_BROWSER_AUTOMATION: '0' });
   assert.equal(result.ok, false);
   assert.match(result.message ?? '', /Browser automation disabled/);
 });
@@ -369,7 +403,7 @@ test('connectAndGetCookies: WebSocket error rejects promise and cleans up', asyn
       constructor(url: string) { super(url); wsResolve(this); }
     };
 
-    const resultPromise = importCookiesFromCdp('facebook', 'http://127.0.0.1:9222', {});
+    const resultPromise = importCookiesFromCdp('reddit', 'http://127.0.0.1:9222', {});
     const ws = await wsReady;
     ws.onerror?.();
 
@@ -407,7 +441,7 @@ test('connectAndGetCookies: command timeout rejects promise and cleans up', asyn
       constructor(url: string) { super(url); wsResolve(this); }
     };
 
-    const resultPromise = importCookiesFromCdp('facebook', 'http://127.0.0.1:9222', {});
+    const resultPromise = importCookiesFromCdp('reddit', 'http://127.0.0.1:9222', {});
     const ws = await wsReady;
     // Fire onopen but never respond to commands
     ws.onopen?.();
