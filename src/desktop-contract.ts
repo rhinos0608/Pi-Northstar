@@ -9,6 +9,9 @@ export interface Observation { stateId:string; pid:number; windowId:string; gene
 export interface DesktopResult { action: DesktopAction; stateId?: string; data?: unknown; details?: unknown; capability?: Capability; }
 export interface Capability { status: 'tested'|'upstream_reported'|'degraded'|'unsupported'|'unverified'; version?: string; platform?: string; }
 export const MAX_TEXT_LENGTH=10000; export const MAX_AX_NODES=1000; export const MAX_AX_DEPTH=32; export const MAX_SCREENSHOT_BYTES=10_000_000; export const MAX_DIMENSION=10_000;
+export const MAX_SELECTOR_TEXT_LENGTH=200; export const MAX_ID_LENGTH=200; export const MAX_COORD_ABS=100000; const ECHO_LIMIT=32;
+// text/key carry user-typed secrets: reject without value echo. All other fields echo a capped slice.
+function invalidParam(key: string, value: unknown, secret: boolean): Error { if (secret || typeof value !== 'string') return new Error(`INVALID_REQUEST: invalid ${key}`); return new Error(`INVALID_REQUEST: invalid ${key} ${JSON.stringify(value.slice(0, ECHO_LIMIT))}`); }
 export function isMutation(action: DesktopAction): action is MutationAction { return action==='click'||action==='type_text'||action==='press_key'||action==='scroll'; }
 export function validateDesktopRequest(raw: Record<string, unknown>): DesktopRequest {
   const allowed = new Set(['action','pid','windowId','stateId','includeScreenshot','predicate','text','key','x','y','deltaX','deltaY','timeoutMs']);
@@ -18,10 +21,10 @@ export function validateDesktopRequest(raw: Record<string, unknown>): DesktopReq
   const req: DesktopRequest = { action: action as DesktopAction };
   if (raw.pid !== undefined && (!Number.isInteger(raw.pid)||Number(raw.pid)<=0)) throw new Error('INVALID_REQUEST: pid must be positive integer');
   if (typeof raw.pid==='number') req.pid=raw.pid;
-  for (const key of ['windowId','stateId','text','key'] as const) if (raw[key]!==undefined) { if(typeof raw[key]!=='string'||(key==='text'&&raw[key].length>MAX_TEXT_LENGTH)) throw new Error(`INVALID_REQUEST: invalid ${key}`); req[key]=raw[key] as never; }
+  for (const key of ['windowId','stateId','text','key'] as const) if (raw[key]!==undefined) { const secret = key==='text'||key==='key'; const limit = key==='text' ? MAX_TEXT_LENGTH : MAX_ID_LENGTH; if(typeof raw[key]!=='string'||(raw[key] as string).length>limit) throw invalidParam(key, raw[key], secret); req[key]=raw[key] as never; }
   if (raw.includeScreenshot!==undefined) { if(typeof raw.includeScreenshot!=='boolean') throw new Error('INVALID_REQUEST: includeScreenshot must be boolean'); req.includeScreenshot=raw.includeScreenshot; }
-  if (raw.predicate!==undefined) { if(typeof raw.predicate!=='object'||raw.predicate===null) throw new Error('INVALID_REQUEST: predicate must be object'); const p=raw.predicate as Record<string,unknown>; req.predicate={...(typeof p.text==='string'?{text:p.text}:{}),...(typeof p.role==='string'?{role:p.role}:{})}; }
-  for (const key of ['x','y','deltaX','deltaY','timeoutMs'] as const) if(raw[key]!==undefined) { if(typeof raw[key]!=='number'||!Number.isFinite(raw[key])) throw new Error(`INVALID_REQUEST: invalid ${key}`); req[key]=raw[key] as never; }
+  if (raw.predicate!==undefined) { if(typeof raw.predicate!=='object'||raw.predicate===null) throw new Error('INVALID_REQUEST: predicate must be object'); const p=raw.predicate as Record<string,unknown>; for (const key of ['text','role'] as const) if (p[key]!==undefined && (typeof p[key]!=='string'||(p[key] as string).length>MAX_SELECTOR_TEXT_LENGTH)) throw invalidParam(`predicate.${key}`, p[key], false); req.predicate={...(typeof p.text==='string'?{text:p.text}:{}),...(typeof p.role==='string'?{role:p.role}:{})}; }
+  for (const key of ['x','y','deltaX','deltaY','timeoutMs'] as const) if(raw[key]!==undefined) { if(typeof raw[key]!=='number'||!Number.isFinite(raw[key])) throw new Error(`INVALID_REQUEST: invalid ${key}`); if(key!=='timeoutMs'&&Math.abs(raw[key] as number)>MAX_COORD_ABS) throw new Error(`INVALID_REQUEST: invalid ${key} out of range`); req[key]=raw[key] as never; }
   if (req.timeoutMs!==undefined && (req.timeoutMs<0||req.timeoutMs>60000)) throw new Error('INVALID_REQUEST: timeout exceeds 60000ms');
   return req;
 }

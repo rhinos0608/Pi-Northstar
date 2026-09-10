@@ -233,14 +233,26 @@ export function validateCookiesArray(cookies: unknown[]): void {
   }
 }
 
-export function validateScrollCoord(value: unknown, _name: string): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
-  return Math.max(-MAX_SCROLL_COORD, Math.min(MAX_SCROLL_COORD, value));
+export function validateScrollCoord(value: unknown, name: string): number {
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`invalid_request: ${name} must be a finite number`);
+  }
+  if (value < -MAX_SCROLL_COORD || value > MAX_SCROLL_COORD) {
+    throw new Error(`invalid_request: ${name} out of range (max absolute ${MAX_SCROLL_COORD})`);
+  }
+  return value;
 }
 
 export function validateWaitMs(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(MAX_WAIT_MS, value));
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error('invalid_request: waitMs must be a finite number');
+  }
+  if (value < 0 || value > MAX_WAIT_MS) {
+    throw new Error(`invalid_request: waitMs out of range (max ${MAX_WAIT_MS})`);
+  }
+  return value;
 }
 
 // ── Legacy endpoint validator (kept for rollback path) ──

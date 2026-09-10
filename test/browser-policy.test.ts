@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { validateNavigationUrl, validateAllowedDomain, freezeAllowedDomains, checkDomainAllowed, validateBrowserRequest, isSensitiveAction, validateSemanticActionRequest, validateBatchRequest, validateNoLoopbackInBatch, validateAllowedDomainsDns, dnsPreflight, MAX_TEXT_LENGTH } from '../src/browser-policy.js';
+import { validateNavigationUrl, validateAllowedDomain, freezeAllowedDomains, checkDomainAllowed, validateBrowserRequest, isSensitiveAction, validateSemanticActionRequest, validateBatchRequest, validateNoLoopbackInBatch, validateAllowedDomainsDns, dnsPreflight, validateScrollCoord, validateWaitMs, MAX_TEXT_LENGTH, MAX_SCROLL_COORD, MAX_WAIT_MS } from '../src/browser-policy.js';
 import type { DnsLookup } from '../src/network-policy.js';
 
 test('browser policy accepts http/https URLs, rejects private/reserved from public validator', () => {
@@ -232,6 +232,27 @@ test('validateBatchRequest rejects credentialed IPv6 loopback URL in navigate co
     () => validateBatchRequest({ commands: [{ args: ['navigate', 'https://user:pass@[::1]:3000/'] }] }),
     /credentials/,
   );
+});
+
+test('validateScrollCoord rejects out-of-range instead of clamping', () => {
+  assert.equal(validateScrollCoord(0, 'x'), 0);
+  assert.equal(validateScrollCoord(MAX_SCROLL_COORD, 'x'), MAX_SCROLL_COORD);
+  assert.equal(validateScrollCoord(-MAX_SCROLL_COORD, 'y'), -MAX_SCROLL_COORD);
+  assert.equal(validateScrollCoord(undefined, 'x'), 0);
+  assert.throws(() => validateScrollCoord(MAX_SCROLL_COORD + 1, 'x'), /invalid_request.*x.*100000/);
+  assert.throws(() => validateScrollCoord(-MAX_SCROLL_COORD - 1, 'y'), /invalid_request.*y.*100000/);
+  assert.throws(() => validateScrollCoord(Number.NaN, 'x'), /invalid_request.*x/);
+  assert.throws(() => validateScrollCoord('10' as unknown as number, 'x'), /invalid_request.*x/);
+});
+
+test('validateWaitMs rejects out-of-range instead of clamping', () => {
+  assert.equal(validateWaitMs(0), 0);
+  assert.equal(validateWaitMs(MAX_WAIT_MS), MAX_WAIT_MS);
+  assert.equal(validateWaitMs(undefined), 0);
+  assert.throws(() => validateWaitMs(MAX_WAIT_MS + 1), /invalid_request.*waitMs.*120000/);
+  assert.throws(() => validateWaitMs(-1), /invalid_request.*waitMs/);
+  assert.throws(() => validateWaitMs(Number.NaN), /invalid_request.*waitMs/);
+  assert.throws(() => validateWaitMs('500' as unknown as number), /invalid_request.*waitMs/);
 });
 
 test('validateBatchRequest caps effective max at 20 even when caller supplies higher maxCommands', () => {

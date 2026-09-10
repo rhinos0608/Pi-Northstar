@@ -1,3 +1,4 @@
+import { parseLoopbackDebugTarget } from './loopback-debug-policy.js';
 import type { BrowserAction, BrowserRequest } from './browser-policy.js';
 
 // ── Types ──
@@ -81,7 +82,31 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
     steps.push(step);
   }
 
+  validateNoLoopbackInJob(steps);
+
   return { steps, maxSteps };
+}
+
+/** Reject job steps with loopback URLs in open-step URLs (mirrors batch policy). */
+export function validateNoLoopbackInJob(steps: JobStep[]): void {
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]!;
+    if (step.kind === 'open') {
+      const url = step.url;
+      if (typeof url === 'string') {
+        if (url.includes('@')) {
+          throw new Error(
+            `step ${i}: URL with credentials is not allowed in job steps.`,
+          );
+        }
+        if (parseLoopbackDebugTarget(url)) {
+          throw new Error(
+            `step ${i}: loopback URL '${url}' is not allowed in job steps. Use a single navigate action instead.`,
+          );
+        }
+      }
+    }
+  }
 }
 
 /** Map a JobStep to a BrowserRequest for the adapter's execute() method. */

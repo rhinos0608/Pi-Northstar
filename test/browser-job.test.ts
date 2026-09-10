@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { validateJobRequest, jobStepToBrowserRequest } from '../src/browser-job.js';
+import { validateJobRequest, validateNoLoopbackInJob, jobStepToBrowserRequest } from '../src/browser-job.js';
 
 // ── validateJobRequest ──
 
@@ -163,6 +163,50 @@ test('jobStepToBrowserRequest maps assert to wait', () => {
   const req = jobStepToBrowserRequest({ kind: 'assert', selector: 'body', assertText: 'Done' });
   assert.equal(req.action, 'wait');
   assert.equal(req.selector, 'body');
+});
+
+test('validateJobRequest rejects loopback URL in open step', () => {
+  assert.throws(
+    () => validateJobRequest({ steps: [{ kind: 'open', url: 'http://127.0.0.1:3000/' }] }),
+    /loopback URL/,
+  );
+});
+
+test('validateJobRequest rejects localhost URL in open step', () => {
+  assert.throws(
+    () => validateJobRequest({ steps: [{ kind: 'open', url: 'http://localhost:8080/' }] }),
+    /loopback URL/,
+  );
+});
+
+test('validateJobRequest rejects loopback URL in later step (whole job pre-execution)', () => {
+  assert.throws(
+    () =>
+      validateJobRequest({
+        steps: [
+          { kind: 'open', url: 'https://example.com' },
+          { kind: 'click', selector: '#btn' },
+          { kind: 'open', url: 'http://[::1]:3000/' },
+        ],
+      }),
+    /step 2.*loopback URL/,
+  );
+});
+
+test('validateJobRequest rejects credentialed URL in open step', () => {
+  assert.throws(
+    () => validateJobRequest({ steps: [{ kind: 'open', url: 'http://user:pass@localhost:3000/' }] }),
+    /credentials/,
+  );
+});
+
+test('validateJobRequest passes non-loopback open URL', () => {
+  const r = validateJobRequest({ steps: [{ kind: 'open', url: 'https://example.com' }] });
+  assert.equal(r.steps.length, 1);
+});
+
+test('validateNoLoopbackInJob passes steps without open URLs', () => {
+  validateNoLoopbackInJob([{ kind: 'click', selector: '#btn' }]);
 });
 
 test('validateJobRequest caps effective max at 20 even when caller supplies higher maxSteps', () => {

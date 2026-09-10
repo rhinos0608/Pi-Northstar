@@ -59,6 +59,7 @@ const BLOCKED_KEYS = new Set([
 
 /** Default timeout for agent-browser commands */
 const DEFAULT_CMD_TIMEOUT_MS = 60_000;
+const CLOSE_SESSION_TIMEOUT_MS = 10_000;
 const SIGKILL_AFTER_MS = 5_000;
 const MAX_STDOUT_BYTES = 5_000_000;  // 5MB per stream
 const MAX_STDERR_BYTES = 1_000_000;  // 1MB stderr
@@ -327,13 +328,13 @@ function createOutputTracker(): OutputTracker {
   return { stdoutBytes: 0, stderrBytes: 0, stdout: '', stderr: '', capped: false };
 }
 
-function trackOutput(tracker: OutputTracker, child: ReturnType<typeof spawn>): void {
+function trackOutput(tracker: OutputTracker, child: ReturnType<typeof spawn>): () => void {
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const terminate = () => {
     if (tracker.capped) return;
     tracker.capped = true;
     try { child.kill('SIGTERM'); } catch { /* ignore */ }
-    killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } }, SIGKILL_AFTER_MS);
+    killTimer ??= setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } }, SIGKILL_AFTER_MS);
   };
   const append = (stream: 'stdout' | 'stderr', chunk: Buffer, cap: number) => {
     const bytes = Buffer.byteLength(chunk);
@@ -348,7 +349,10 @@ function trackOutput(tracker: OutputTracker, child: ReturnType<typeof spawn>): v
   };
   child.stdout!.on('data', (chunk: Buffer) => append('stdout', chunk, MAX_STDOUT_BYTES));
   child.stderr!.on('data', (chunk: Buffer) => append('stderr', chunk, MAX_STDERR_BYTES));
-  child.once('close', () => { if (killTimer) clearTimeout(killTimer); });
+  child.once('close', () => { if (killTimer) clearTimeout(killTimer); killTimer = undefined; });
+  // Settle-path cleanup (mirror cli-backend.ts cleanup): early settle
+  // (error/timeout) must disarm the pending SIGKILL timer, not just close.
+  return () => { if (killTimer) clearTimeout(killTimer); killTimer = undefined; };
 }
 
 // ── Command execution ──
@@ -381,12 +385,15 @@ export async function runCommand(
     const tracker = createOutputTracker();
     let settled = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let untrackOutput: () => void = () => {};
 
+    let timeoutFired = false;
     const settle = (result: AgentBrowserResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(cmdTimer);
-      if (killTimer) clearTimeout(killTimer);
+      if (!timeoutFired && killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+      untrackOutput();
       if (options.signal) {
         try { options.signal.removeEventListener('abort', abortHandler); } catch { /* ignore */ }
       }
@@ -396,7 +403,8 @@ export async function runCommand(
     const abortHandler = () => {
       if (settled) return;
       child.kill('SIGTERM');
-      killTimer = setTimeout(() => {
+      killTimer ??= setTimeout(() => {
+        killTimer = undefined;
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
       }, SIGKILL_AFTER_MS);
     };
@@ -411,9 +419,10 @@ export async function runCommand(
       shell: false,
     });
 
-    trackOutput(tracker, child);
+    untrackOutput = trackOutput(tracker, child);
 
     const cmdTimer = setTimeout(() => {
+      timeoutFired = true;
       abortHandler();
       if (!settled) {
         settle({ success: false, error: 'Command timed out' });
@@ -425,7 +434,10 @@ export async function runCommand(
     });
 
     child.on('close', (code) => {
-      if (settled) return;
+      if (settled) {
+        if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+        return;
+      }
 
       if (tracker.capped) {
         settle({ success: false, error: 'Output limit exceeded' });
@@ -486,12 +498,15 @@ export async function runBatchStdin(
     const tracker = createOutputTracker();
     let settled = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let untrackOutput: () => void = () => {};
 
+    let timeoutFired = false;
     const settle = (results: AgentBrowserResult[]) => {
       if (settled) return;
       settled = true;
       clearTimeout(cmdTimer);
-      if (killTimer) clearTimeout(killTimer);
+      if (!timeoutFired && killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+      untrackOutput();
       if (options.signal) {
         try { options.signal.removeEventListener('abort', abortHandler); } catch { /* ignore */ }
       }
@@ -501,7 +516,8 @@ export async function runBatchStdin(
     const abortHandler = () => {
       if (settled) return;
       child.kill('SIGTERM');
-      killTimer = setTimeout(() => {
+      killTimer ??= setTimeout(() => {
+        killTimer = undefined;
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
       }, SIGKILL_AFTER_MS);
     };
@@ -516,9 +532,10 @@ export async function runBatchStdin(
       shell: false,
     });
 
-    trackOutput(tracker, child);
+    untrackOutput = trackOutput(tracker, child);
 
     const cmdTimer = setTimeout(() => {
+      timeoutFired = true;
       abortHandler();
       if (!settled) {
         settle([{ success: false, error: 'Batch command timed out' }]);
@@ -587,11 +604,14 @@ export async function runScreenshot(
       cleaned = true;
       await unlink(screenshotPath).catch(() => {});
     };
+    let untrackOutput: () => void = () => {};
+    let timeoutFired = false;
     const settle = (result: { data: string; mediaType: string; width: number; height: number; byteLength: number } | { error: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(cmdTimer);
-      if (killTimer) clearTimeout(killTimer);
+      if (!timeoutFired && killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+      untrackOutput();
       if (options.signal) {
         try { options.signal.removeEventListener('abort', abortHandler); } catch { /* ignore */ }
       }
@@ -601,7 +621,8 @@ export async function runScreenshot(
     const abortHandler = () => {
       if (settled) return;
       child.kill('SIGTERM');
-      killTimer = setTimeout(() => {
+      killTimer ??= setTimeout(() => {
+        killTimer = undefined;
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
       }, SIGKILL_AFTER_MS);
     };
@@ -617,9 +638,10 @@ export async function runScreenshot(
     });
 
     const tracker = createOutputTracker();
-    trackOutput(tracker, child);
+    untrackOutput = trackOutput(tracker, child);
 
     const cmdTimer = setTimeout(() => {
+      timeoutFired = true;
       abortHandler();
       if (!settled) settle({ error: 'Screenshot timed out' });
     }, DEFAULT_CMD_TIMEOUT_MS);
@@ -680,19 +702,41 @@ export async function closeSession(session: AgentBrowserSession, options: AgentB
         shell: false,
       });
 
+      let settled = false;
       const timer = setTimeout(() => {
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        settle();
+      }, CLOSE_SESSION_TIMEOUT_MS);
+
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (options.signal) {
+          try { options.signal.removeEventListener('abort', onAbort); } catch { /* ignore */ }
+        }
         resolveSettle();
-      }, 10_000);
+      };
+
+      const onAbort = () => {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        settle();
+      };
+
+      if (options.signal) {
+        if (options.signal.aborted) {
+          onAbort();
+        } else {
+          options.signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }
 
       child.on('close', () => {
-        clearTimeout(timer);
-        resolveSettle();
+        settle();
       });
 
       child.on('error', () => {
-        clearTimeout(timer);
-        resolveSettle();
+        settle();
       });
     });
   } catch {

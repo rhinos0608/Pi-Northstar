@@ -133,6 +133,18 @@ test('DENIED_DESKTOP_ACTIONS: contains upstream-only tools', () => {
   assert.ok(!(DENIED_DESKTOP_ACTIONS as readonly string[]).includes('status'));
 });
 
+test('requiresConfirmation: no gate by product decision (PII covered by promptGuidelines)', () => {
+  // Mutations run without a confirmation gate; adding one needs product approval.
+  for (const a of ['status','list_apps','list_windows','observe_window','wait','click','type_text','press_key','scroll'] as const) assert.equal(requiresConfirmation(a), false);
+});
+test('validatePolicy: rejects oversized ids, predicate text, and out-of-range coords', () => {
+  const env = { PI_SEARCH_DESKTOP_AUTOMATION: '1' };
+  assert.throws(() => validatePolicy({ action: 'list_windows', windowId: 'w'.repeat(201) }, env), /INVALID_REQUEST/);
+  assert.throws(() => validatePolicy({ action: 'wait', pid: 1, windowId: 'w', predicate: { text: 't'.repeat(201) } }, env), /INVALID_REQUEST/);
+  assert.throws(() => validatePolicy({ action: 'wait', pid: 1, windowId: 'w', predicate: { role: 'r'.repeat(201) } }, env), /INVALID_REQUEST/);
+  assert.throws(() => validatePolicy({ action: 'click', pid: 1, windowId: 'w', stateId: 's', x: 100001 }, env), /INVALID_REQUEST/);
+  assert.throws(() => validatePolicy({ action: 'scroll', pid: 1, windowId: 'w', stateId: 's', deltaY: -100001 }, env), /INVALID_REQUEST/);
+});
 test('validatePolicy: defense-in-depth DENIED_DESKTOP_ACTIONS check exists', () => {
   // Assert that validatePolicy would catch a hypothetically allowed-but-denied action
   // Can't test directly since no overlap exists today — structural assertion only

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ChildProcess } from 'node:child_process';
 import { test } from 'node:test';
-import { agentBrowserExecutableConfigured, buildSandboxEnvironment, generateNamespace, parseAgentBrowserOutput } from '../src/agent-browser-process.js';
+import { agentBrowserExecutableConfigured, buildSandboxEnvironment, closeSession, generateNamespace, parseAgentBrowserOutput, runBatchStdin, runCommand, runScreenshot } from '../src/agent-browser-process.js';
 
 test('sandbox environment strips hostile inherited variables', () => {
   const env = buildSandboxEnvironment({ PATH: '/bin', HOME: '/tmp', AGENT_BROWSER_SESSION: 'evil', NODE_OPTIONS: '--import evil', GITHUB_TOKEN: 'secret' }, { runtimeRoot: '/tmp/pi', namespace: 'owned' });
@@ -39,6 +43,193 @@ test('sandbox environment does not include proxy vars in normal mode', () => {
   );
   assert.equal(env.AGENT_BROWSER_PROXY, undefined);
   assert.equal(env.AGENT_BROWSER_PROXY_BYPASS, undefined);
+});
+
+function activeTimeoutCount(): number {
+  const handles = (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles();
+  return handles.filter((h) => (h as { constructor?: { name?: string } })?.constructor?.name === 'Timeout').length;
+}
+
+async function writeStubExecutable(body: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ab-'));
+  const path = join(dir, 'fake-agent-browser.sh');
+  await writeFile(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  await chmod(path, 0o755);
+  return path;
+}
+
+async function makeRuntimeRoot(): Promise<string> {
+  return mkdtemp(join(tmpdir(), 'pi-ab-rt-'));
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+test('runCommand success path leaves no pending timers', async () => {
+  const exe = await writeStubExecutable(`echo '{"success":true,"data":{"ok":1}}'`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const before = activeTimeoutCount();
+  const result = await runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-timer-ok' });
+  assert.equal(result.success, true);
+  await sleep(50);
+  assert.ok(activeTimeoutCount() <= before, `timer leak: before=${before} after=${activeTimeoutCount()}`);
+});
+
+test('runCommand error path leaves no pending timers', async () => {
+  const exe = await writeStubExecutable(`echo boom >&2\nexit 1`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const before = activeTimeoutCount();
+  const result = await runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-timer-err' });
+  assert.equal(result.success, false);
+  await sleep(50);
+  assert.ok(activeTimeoutCount() <= before, `timer leak: before=${before} after=${activeTimeoutCount()}`);
+});
+
+test('runCommand output-cap settle leaves no pending SIGKILL timer', async () => {
+  const exe = await writeStubExecutable(`head -c 6000000 /dev/zero | tr '\\0' 'x'\nexit 0`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const before = activeTimeoutCount();
+  const result = await runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-timer-cap' });
+  assert.equal(result.success, false);
+  assert.match(String(result.error ?? ''), /Output limit exceeded/);
+  await sleep(50);
+  assert.ok(activeTimeoutCount() <= before, `timer leak: before=${before} after=${activeTimeoutCount()}`);
+});
+
+test('closeSession returns promptly on abort instead of waiting 10s', async () => {
+  const exe = await writeStubExecutable(`sleep 30`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 100);
+  const start = Date.now();
+  await closeSession({ runtimeRoot, namespace: 'ns-abort' }, { executablePath: exe, signal: controller.signal });
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 5000, `closeSession ignored abort: took ${elapsed}ms`);
+});
+
+test('closeSession honors already-aborted signal', async () => {
+  const exe = await writeStubExecutable(`sleep 30`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const controller = new AbortController();
+  controller.abort();
+  const start = Date.now();
+  await closeSession({ runtimeRoot, namespace: 'ns-abort-pre' }, { executablePath: exe, signal: controller.signal });
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 5000, `closeSession ignored pre-aborted signal: took ${elapsed}ms`);
+});
+
+test('runCommand timeout path still fires SIGKILL when child ignores SIGTERM', async (t) => {
+  // Stub ignores SIGTERM so only SIGKILL can reap it.
+  const exe = await writeStubExecutable(`trap '' TERM\nexec sleep 30`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const kills: string[] = [];
+  const pids: number[] = [];
+  const origKill = ChildProcess.prototype.kill;
+  ChildProcess.prototype.kill = function (
+    ...args: Parameters<ChildProcess['kill']>
+  ): ReturnType<ChildProcess['kill']> {
+    const sig = args[0] === undefined ? 'SIGTERM' : String(args[0]);
+    kills.push(sig);
+    if (this.pid !== undefined && !pids.includes(this.pid)) pids.push(this.pid);
+    return (origKill as (...a: unknown[]) => ReturnType<ChildProcess['kill']>).apply(this, args);
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const pending = runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-timeout-kill' });
+    // Let the async runner reach spawn before advancing mocked clocks.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    t.mock.timers.tick(60_000);
+    const result = await pending;
+    assert.equal(result.success, false);
+    assert.match(String(result.error ?? ''), /Command timed out/);
+    assert.ok(kills.includes('SIGTERM'), `expected SIGTERM, got ${JSON.stringify(kills)}`);
+    // The SIGKILL grace timer must survive settle so a SIGTERM-ignoring child is reaped.
+    t.mock.timers.tick(5_000);
+    assert.ok(kills.includes('SIGKILL'), `expected SIGKILL after grace, got ${JSON.stringify(kills)}`);
+  } finally {
+    ChildProcess.prototype.kill = origKill;
+    t.mock.timers.reset();
+    for (const pid of pids) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already reaped */ }
+    }
+  }
+});
+
+test('runBatchStdin timeout path still fires SIGKILL when child ignores SIGTERM', async (t) => {
+  // Stub ignores SIGTERM so only SIGKILL can reap it.
+  const exe = await writeStubExecutable(`trap '' TERM\nexec sleep 30`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const kills: string[] = [];
+  const pids: number[] = [];
+  const origKill = ChildProcess.prototype.kill;
+  ChildProcess.prototype.kill = function (
+    ...args: Parameters<ChildProcess['kill']>
+  ): ReturnType<ChildProcess['kill']> {
+    const sig = args[0] === undefined ? 'SIGTERM' : String(args[0]);
+    kills.push(sig);
+    if (this.pid !== undefined && !pids.includes(this.pid)) pids.push(this.pid);
+    return (origKill as (...a: unknown[]) => ReturnType<ChildProcess['kill']>).apply(this, args);
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const pending = runBatchStdin([{ args: ['snapshot'] }], { executablePath: exe, runtimeRoot, namespace: 'ns-batch-timeout-kill' });
+    // Let the async runner reach spawn before advancing mocked clocks.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    t.mock.timers.tick(120_000);
+    const results = await pending;
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.success, false);
+    assert.match(String(results[0]!.error ?? ''), /Batch command timed out/);
+    assert.ok(kills.includes('SIGTERM'), `expected SIGTERM, got ${JSON.stringify(kills)}`);
+    // The SIGKILL grace timer must survive settle so a SIGTERM-ignoring child is reaped.
+    t.mock.timers.tick(5_000);
+    assert.ok(kills.includes('SIGKILL'), `expected SIGKILL after grace, got ${JSON.stringify(kills)}`);
+  } finally {
+    ChildProcess.prototype.kill = origKill;
+    t.mock.timers.reset();
+    for (const pid of pids) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already reaped */ }
+    }
+  }
+});
+
+test('runScreenshot timeout path still fires SIGKILL when child ignores SIGTERM', async (t) => {
+  // Stub ignores SIGTERM so only SIGKILL can reap it.
+  const exe = await writeStubExecutable(`trap '' TERM\nexec sleep 30`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const kills: string[] = [];
+  const pids: number[] = [];
+  const origKill = ChildProcess.prototype.kill;
+  ChildProcess.prototype.kill = function (
+    ...args: Parameters<ChildProcess['kill']>
+  ): ReturnType<ChildProcess['kill']> {
+    const sig = args[0] === undefined ? 'SIGTERM' : String(args[0]);
+    kills.push(sig);
+    if (this.pid !== undefined && !pids.includes(this.pid)) pids.push(this.pid);
+    return (origKill as (...a: unknown[]) => ReturnType<ChildProcess['kill']>).apply(this, args);
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const pending = runScreenshot({ executablePath: exe, runtimeRoot, namespace: 'ns-shot-timeout-kill' });
+    // Let the async runner reach spawn before advancing mocked clocks.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    t.mock.timers.tick(60_000);
+    const result = await pending;
+    assert.ok('error' in result);
+    assert.match(String((result as { error: string }).error ?? ''), /Screenshot timed out/);
+    assert.ok(kills.includes('SIGTERM'), `expected SIGTERM, got ${JSON.stringify(kills)}`);
+    // The SIGKILL grace timer must survive settle so a SIGTERM-ignoring child is reaped.
+    t.mock.timers.tick(5_000);
+    assert.ok(kills.includes('SIGKILL'), `expected SIGKILL after grace, got ${JSON.stringify(kills)}`);
+  } finally {
+    ChildProcess.prototype.kill = origKill;
+    t.mock.timers.reset();
+    for (const pid of pids) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already reaped */ }
+    }
+  }
 });
 
 test('hostile parent proxy vars are overridden by adapter-controlled values', () => {
