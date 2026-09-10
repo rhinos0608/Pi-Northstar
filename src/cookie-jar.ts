@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { cookieImportProviders } from './capabilities.js';
 import { PROVIDER_DESCRIPTORS } from './providers.js';
 
 export interface BrowserCookie {
@@ -61,7 +62,6 @@ function isByteStringSafe(value: string): boolean {
 const DEFAULT_STATE_DIR = join(homedir(), '.pi-northstar');
 const CHROME_EPOCH_OFFSET_SECONDS = 11_644_473_600;
 const DEFAULT_STALE_MS = 12 * 60 * 60 * 1000;
-const DEFAULT_COOKIE_IMPORT_PROVIDERS = new Set(['twitter', 'reddit', 'xiaohongshu', 'bilibili']);
 
 const browserProfiles = {
   chrome: {
@@ -87,7 +87,7 @@ export async function importCookiesFromDefaultBrowser(
   env: Record<string, string | undefined>,
   options: { providers?: string[]; force?: boolean } = {},
 ): Promise<{ ok: boolean; message: string; results: CookieImportSummary[] }> {
-  if (browserAutomationDisabled(env) || disabled(env.PI_SEARCH_AUTO_COOKIES)) {
+  if (browserAutomationDisabled(env)) {
     return { ok: false, message: 'Browser cookie import disabled by environment.', results: [] };
   }
 
@@ -99,9 +99,11 @@ export async function importCookiesFromDefaultBrowser(
     };
   }
 
+  // Default importable set derives from the canonical capability registry:
+  // operational channels whose backend genuinely consumes browser sessions.
   const providerNames = options.providers?.length
     ? options.providers
-    : PROVIDER_DESCRIPTORS.filter((provider) => DEFAULT_COOKIE_IMPORT_PROVIDERS.has(provider.provider)).map((provider) => provider.provider);
+    : cookieImportProviders();
   const descriptors = providerNames.flatMap((providerName) => {
     const descriptor = PROVIDER_DESCRIPTORS.find((provider) => provider.provider === providerName);
     return descriptor && descriptor.cookieDomains.length > 0 ? [descriptor] : [];
@@ -205,7 +207,37 @@ export async function writeCookieState(
   };
 }
 
+/**
+ * Cookie-derived backend env var names per provider: single source of truth
+ * for the derived environment (cookieAuthEnvironment), reach-tools child-env
+ * allowlists, and reach-tools output redaction labels.
+ */
+export const COOKIE_ENV_KEYS: Readonly<Record<string, readonly string[]>> = {
+  reddit: ['REDDIT_COOKIE'],
+  bilibili: ['BILIBILI_SESSDATA', 'BILIBILI_CSRF', 'BILIBILI_COOKIE'],
+  youtube: ['YOUTUBE_COOKIE'],
+};
+
+/**
+ * CLI command name → cookie-consuming provider. Reach-tools child environments
+ * derive cookie vars only through this mapping; unmapped commands (e.g.
+ * opencli, which reads its own Chrome session) never receive stored cookies.
+ */
+export function cookieProviderForCommand(command: string): string | undefined {
+  switch (command) {
+    case 'bili': return 'bilibili';
+    default: return undefined;
+  }
+}
+
+export function cookieEnvKeysForProvider(provider: string): readonly string[] {
+  return COOKIE_ENV_KEYS[provider] ?? [];
+}
+
 export function cookieAuthEnvironment(provider: string, env: Record<string, string | undefined>): Record<string, string> {
+  // Retired Pi-cookie providers: Stage 2 Twitter/XHS workers never consume
+  // imported Pi cookie state, so never derive env vars from their storage.
+  if (provider === 'twitter' || provider === 'xiaohongshu') return {};
   const storage = readCookieState(provider, env);
   if (!storage) return {};
   const now = Date.now();
@@ -218,24 +250,16 @@ export function cookieAuthEnvironment(provider: string, env: Record<string, stri
   const byName = new Map(cookies.map((cookie) => [cookie.name, cookie.value]));
 
   switch (provider) {
-    case 'twitter':
-      return compactEnv({
-        TWITTER_AUTH_TOKEN: env.TWITTER_AUTH_TOKEN ?? byName.get('auth_token'),
-        TWITTER_CT0: env.TWITTER_CT0 ?? byName.get('ct0'),
-        TWITTER_COOKIE: header,
-      });
     case 'reddit':
       return compactEnv({ REDDIT_COOKIE: header });
-    case 'xiaohongshu':
-      return compactEnv({ XHS_COOKIE: header, XIAOHONGSHU_COOKIE: header });
     case 'bilibili':
       return compactEnv({
         BILIBILI_SESSDATA: byName.get('SESSDATA'),
         BILIBILI_CSRF: byName.get('bili_jct'),
         BILIBILI_COOKIE: header,
       });
-    case 'xueqiu':
-      return compactEnv({ XUEQIU_COOKIE: header });
+    case 'youtube':
+      return compactEnv({ YOUTUBE_COOKIE: header });
     default:
       return header ? { [`PI_SEARCH_${provider.toUpperCase()}_COOKIE`]: header } : {};
   }

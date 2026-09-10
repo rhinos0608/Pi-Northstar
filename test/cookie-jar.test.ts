@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { cookieAuthEnvironment, cookieHeaderForUrl, filterCookiesForDomains, importCookiesFromDefaultBrowser, writeCookieState, type BrowserCookie } from '../src/cookie-jar.js';
+import { COOKIE_ENV_KEYS, cookieAuthEnvironment, cookieEnvKeysForProvider, cookieHeaderForUrl, filterCookiesForDomains, importCookiesFromDefaultBrowser, writeCookieState, type BrowserCookie } from '../src/cookie-jar.js';
 
 const cookies: BrowserCookie[] = [
   { name: 'auth', value: 'secret-facebook', domain: '.facebook.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
@@ -71,7 +71,7 @@ test('cookieHeaderForUrl matches only the exact scoped host, path, and secure/ex
   }
 });
 
-test('cookieAuthEnvironment maps saved Twitter cookies to backend env vars', async () => {
+test('cookieAuthEnvironment never derives Twitter env from stored state (retired Pi-cookie path)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-env-'));
   try {
     await writeCookieState('twitter', [
@@ -79,28 +79,25 @@ test('cookieAuthEnvironment maps saved Twitter cookies to backend env vars', asy
       { name: 'ct0', value: 'tw-ct0-secret', domain: '.x.com', path: '/', expires: 1_900_000_000, httpOnly: false, secure: true, sameSite: 'Lax' },
     ], { PI_SEARCH_STATE_DIR: dir }, 'fixture');
 
-    assert.deepEqual(cookieAuthEnvironment('twitter', { PI_SEARCH_STATE_DIR: dir }), {
-      TWITTER_AUTH_TOKEN: 'tw-auth-secret',
-      TWITTER_CT0: 'tw-ct0-secret',
-      TWITTER_COOKIE: 'auth_token=tw-auth-secret; ct0=tw-ct0-secret',
-    });
+    assert.deepEqual(cookieAuthEnvironment('twitter', { PI_SEARCH_STATE_DIR: dir }), {});
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('cookieAuthEnvironment drops expired Twitter cookies from derived env', async () => {
+test('cookieAuthEnvironment never derives Twitter or Xiaohongshu env even with fresh cookies', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-expired-'));
   try {
     await writeCookieState('twitter', [
       { name: 'auth_token', value: 'expired-auth-secret', domain: '.x.com', path: '/', expires: 1, httpOnly: true, secure: true, sameSite: 'Lax' },
       { name: 'ct0', value: 'fresh-ct0-secret', domain: '.x.com', path: '/', expires: 1_900_000_000, httpOnly: false, secure: true, sameSite: 'Lax' },
     ], { PI_SEARCH_STATE_DIR: dir }, 'fixture');
+    await writeCookieState('xiaohongshu', [
+      { name: 'web_session', value: 'xhs-secret', domain: '.xiaohongshu.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+    ], { PI_SEARCH_STATE_DIR: dir }, 'fixture');
 
-    const derived = cookieAuthEnvironment('twitter', { PI_SEARCH_STATE_DIR: dir });
-    assert.equal(derived.TWITTER_AUTH_TOKEN, undefined);
-    assert.equal(derived.TWITTER_CT0, 'fresh-ct0-secret');
-    assert.equal(derived.TWITTER_COOKIE, 'ct0=fresh-ct0-secret');
+    assert.deepEqual(cookieAuthEnvironment('twitter', { PI_SEARCH_STATE_DIR: dir }), {});
+    assert.deepEqual(cookieAuthEnvironment('xiaohongshu', { PI_SEARCH_STATE_DIR: dir }), {});
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -168,10 +165,10 @@ test('default browser import handles large Chrome expires_utc integers', async (
 
     const db = new DatabaseSync(join(networkDir, 'Cookies'));
     db.exec('create table cookies (host_key text, name text, value text, encrypted_value blob, path text, expires_utc integer, is_secure integer, is_httponly integer, samesite integer)');
-    db.prepare('insert into cookies values (?, ?, ?, ?, ?, ?, ?, ?, ?)').run('.x.com', 'auth_token', 'large-expiry-token', null, '/', 13439400717159052n, 1, 1, 1);
+    db.prepare('insert into cookies values (?, ?, ?, ?, ?, ?, ?, ?, ?)').run('.reddit.com', 'session', 'large-expiry-token', null, '/', 13439400717159052n, 1, 1, 1);
     db.close();
 
-    const result = await importCookiesFromDefaultBrowser({ BROWSER_PROFILE_DIR: profileDir, PI_SEARCH_STATE_DIR: stateDir }, { providers: ['twitter'], force: true });
+    const result = await importCookiesFromDefaultBrowser({ BROWSER_PROFILE_DIR: profileDir, PI_SEARCH_STATE_DIR: stateDir }, { providers: ['reddit'], force: true });
 
     assert.equal(result.ok, true);
     assert.equal(result.results[0]?.status, 'imported');
@@ -188,6 +185,47 @@ test('default browser import honors browser automation opt-out', async () => {
 
   assert.equal(result.ok, false);
   assert.match(result.message, /disabled/);
+});
+
+test('cookie registry covers only live cookie-consuming providers (reddit + bilibili + youtube)', () => {
+  assert.deepEqual(Object.keys(COOKIE_ENV_KEYS).sort(), ['bilibili', 'reddit', 'youtube']);
+  assert.deepEqual(cookieEnvKeysForProvider('youtube'), ['YOUTUBE_COOKIE']);
+  assert.equal('twitter' in COOKIE_ENV_KEYS, false);
+  assert.equal('xiaohongshu' in COOKIE_ENV_KEYS, false);
+  assert.equal('xueqiu' in COOKIE_ENV_KEYS, false);
+  assert.deepEqual(cookieEnvKeysForProvider('twitter'), []);
+  assert.deepEqual(cookieEnvKeysForProvider('xiaohongshu'), []);
+  assert.deepEqual(cookieEnvKeysForProvider('xueqiu'), []);
+});
+
+test('cookieAuthEnvironment derives YOUTUBE_COOKIE header from stored state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-youtube-'));
+  try {
+    const env = { PI_SEARCH_STATE_DIR: dir } as Record<string, string | undefined>;
+    await writeCookieState('youtube', [
+      { name: 'CONSENT', value: 'youtube-secret', domain: '.youtube.com', path: '/', expires: 1_900_000_000, httpOnly: false, secure: true, sameSite: 'Lax' },
+    ], env, 'fixture');
+    const derived = cookieAuthEnvironment('youtube', env);
+    assert.equal(derived.YOUTUBE_COOKIE, 'CONSENT=youtube-secret');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeCookieState summary and meta never embed cookie values', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-redaction-'));
+  try {
+    const env = { PI_SEARCH_STATE_DIR: dir } as Record<string, string | undefined>;
+    const summary = await writeCookieState('reddit', [
+      { name: 'session', value: 'reddit-redact-me', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'token', value: 'reddit-token-redact-me', domain: '.reddit.com', path: '/', expires: 1_900_000_000, httpOnly: false, secure: true, sameSite: 'Lax' },
+    ], env, 'fixture');
+    assert.doesNotMatch(JSON.stringify(summary), /redact-me/);
+    const metaRaw = await readFile(join(dir, 'cookies', 'reddit.meta.json'), 'utf8');
+    assert.doesNotMatch(metaRaw, /redact-me/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('default browser import degrades on unsupported platforms', async (t) => {
