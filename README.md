@@ -25,19 +25,38 @@ Each public tool validates input, calls into the shared services above, and shap
 
 | Tool | What it does |
 |---|---|
-| `web_search` | Search the web. Add `category: "research"` for academic sources (arXiv, PubMed, Crossref, Wikipedia, Hacker News). |
-| `fetch` | Read any webpage as clean text, or do semantic retrieval — give it a query and it crawls pages, finds the most relevant passages, and returns ranked chunks. |
-| `github` | Browse repos, read files, search code, discover trending projects. With an embedding sidecar, unlock `code_search` for AST-aware semantic code retrieval. |
-| `social` | Read and search Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram. |
-| `media` | YouTube (official Data API) and Bilibili search, metadata, and details. RSS/Atom feed reading. |
+| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
+| `fetch` | Canonical action `read` without a `query` (full readable text of one URL); canonical action `crawl` with a `query` (crawls pages, returns ranked relevant chunks). `maxChars` ≤ 50000 is honored on both paths; crawl takes `topK` ≤ 20 and `maxPages` ≤ 25. Out-of-range input is rejected, never silently clamped. |
+| `github` | Canonical actions `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits` (REST API only — GraphQL not offered). `GITHUB_TOKEN` or `GH_TOKEN` optional for public reads (harder rate limits without a token); unauthenticated `/search/code` is heavily rate-limited. `list_dir` and `code_search` legacy spellings rejected, never clamped. Results are normalized entities. |
+| `social` | Read-only lookup over canonical actions only (unknown/legacy spellings rejected before dispatch). Available: Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram (no verified post-detail adapter, no download; `get_post`/`get_thread`/`get_comments` unadvertised on Instagram), LinkedIn (read actions via verified OpenCLI Chrome session). Xueqiu/Xiaoyuzhou are absent — not available or planned providers. |
+| `media` | YouTube (official Data API for search/details/hot; keyless unofficial transcript) and Bilibili search, metadata, details, and subtitles. RSS/Atom feed reading. |
 | `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. |
 | `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
 
-### Platform terms, authorization, and opt-in fallbacks
+### Research sources (exact-source guarantee)
 
-Reddit and YouTube tool paths first use official, sanctioned sources, then safe
-keyless endpoints, and only then — **when you opt in** — last-resort web
-fallbacks. Please read this before enabling fallbacks:
+Research exposes a single canonical action, `search`, over exactly 12 sources —
+there is never DuckDuckGo/generic-web substitution: `semantic_scholar`,
+`openalex`, `pubmed`, `stackoverflow`, `datacite`, `ror`, `gdelt`, `wikipedia`,
+`wikidata`, `arxiv`, `crossref`, `hackernews` (`source: "all"` fans out over
+all in registry order). Unsupported or unknown sources return an explicit safe
+error instead of substituted results. Optional filters (`yearFrom`/`yearTo`,
+`author`, `doi`, `venue`) match per-source capability — an unsupported filter
+surfaces per-source rather than being silently dropped. Results carry a
+canonical `details.northstar` envelope (schema `pi-northstar.result` v1)
+beside the legacy `{query, source, results}` fields; per-source failures
+surface as `partial`/`error` status with `errors[]`, not silent empty results.
+Continuation `cursor` values are opaque, bound to one exact source + query +
+`yearFrom` (max 4096 chars), rejected for `source: "all"` and non-research
+categories, and never store provider URLs. `source: "all"` does not support
+pagination; a pinned source whose page is valid-empty stops cleanly with no
+further selection.
+
+### Platform terms, authorization, and routing
+
+Reddit and YouTube tool paths run only official, keyless, and degraded
+capability-declared backends — there is no generic web/archive fallback tier.
+Please read this before using cookie-based paths:
 
 - **Terms of service.** Reddit and YouTube prohibit unauthorized automated
   access/scraping; neither platform's terms permit scraping merely because a
@@ -52,46 +71,91 @@ fallbacks. Please read this before enabling fallbacks:
   for what you paste into `REDDIT_COOKIE` and for protecting cookie state
   (`~/.pi-northstar/cookies/`, stored plaintext with `0600` perms).
   Use throwaway/dedicated accounts for any cookie-based fallback.
-- **Opt-in web fallback is off by default.** Set
-  `PI_SEARCH_PLATFORM_WEB_FALLBACK=1` to enable the last-resort
-  web-search/web-fetch fallbacks (steps 5/3 below). The rest of the source
-  ordering — official APIs, saved-session-cookie path, legacy CLIs, Arctic
-  Shift archive, oEmbed — is **not** gated by this flag, and automatic
-  browser-cookie import remains governed by its own `PI_SEARCH_AUTO_COOKIES`
-  setting.
+- **No web fallback tier.** There is no `PI_SEARCH_PLATFORM_WEB_FALLBACK`
+  behavior: YouTube `search`/`hot` require `YOUTUBE_API_KEY`, and `details`
+  falls back only to keyless oEmbed (limited fields, details-only — see media
+  ordering below). The social path has no archive or generic web fallback —
+  only capability-declared backends run. Cookie ingestion/login happen only
+  through explicit `/reach-setup import_cookies <provider>` or
+  `/reach-setup login <provider>`; first start and bare `/reach-setup auto`
+  never import cookies, and no environment variable triggers cookie import.
+  `/reach-setup import_cookies <provider>` remains the per-provider consent
+  path, and `PI_SEARCH_BROWSER_AUTOMATION=0` remains the kill switch for
+  explicit import/login. Xueqiu/Xiaoyuzhou are absent — not available or
+  planned providers — and LinkedIn is available via its verified OpenCLI read
+  backend, which authenticates through its own Chrome session and never
+  imports stored cookies.
 
-Source ordering, Reddit (`social`):
+### Canonical social surface (Stage 2)
 
-1. Official Reddit Data API (OAuth `REDDIT_CLIENT_ID`/`SECRET`/`USER_AGENT`) —
-   `backend: "reddit-api"`.
-2. Saved Reddit session cookie, direct to `www.reddit.com` only (fixed host,
-   no redirects) — `backend: "reddit-cookie"`.
-3. Legacy CLI compatibility fallback (`opencli`, `rdt-cli`) when no live
-   credentials/session exist.
-4. Arctic Shift archive (`arctic-shift.photon-reddit.com`, fixed host, one
-   attempt, clearly labeled `[ARCHIVE]`, deleted/removed items filtered).
-5. **Opt-in only** (`PI_SEARCH_PLATFORM_WEB_FALLBACK=1`, last resort):
-   Pi-owned `web_search`/`agentic_browse` through a sanitized child process
-   (no cookies, no proxy vars, no platform/API credentials, one-shot fetch,
-   and the child never re-reads the repo `.env`/JSON config).
-   Output uses a **separate data model** — `backend: "web-search-fallback"`
-   with `dataModel: "search-results"`, or `backend: "web-fetch-fallback"`
-   with `dataModel: "page-text"`, both `degraded: true` — and is never
-   merged into the official API result models.
+`social` is canonical-only and read-only in practice. Registry (`src/capabilities.ts` +
+`src/social-contract.ts`) is source of truth for platforms, actions, and
+backends; unknown/legacy spellings (read/post/subreddit/note/topic/...) throw
+`unsupported_action` before dispatch. No archive or generic web fallback runs
+in the social path — only capability-declared backends run.
+
+- **Platforms:** Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram,
+  LinkedIn available (LinkedIn read actions via verified OpenCLI Chrome
+  session). Xueqiu/Xiaoyuzhou are absent — not available or planned.
+- **Canonical actions per platform:**
+  - twitter: search, get_post, get_thread, get_comments, get_comment_replies,
+    get_profile, get_user_posts, get_followers, get_following, get_feed,
+    get_trending, get_saved, get_notifications
+  - reddit: search, get_post, get_thread, get_comments, get_comment_replies,
+    get_profile, get_user_posts, get_user_comments, get_feed, get_trending,
+    get_saved, get_community, get_community_posts
+  - xiaohongshu: search, get_post, get_comments, get_profile, get_user_posts,
+    get_followers, get_following, get_feed, get_saved, get_notifications
+  - facebook: search, get_profile, get_feed, get_notifications, get_community
+  - instagram: search, get_profile, get_user_posts, get_followers,
+    get_following, get_trending, get_saved (no verified post-detail adapter;
+    no post read, no download, no mutation)
+  - v2ex: get_topic, get_thread, get_comments, get_profile, get_trending,
+    get_community, get_community_posts, get_notifications
+  - linkedin: search, get_profile, get_user_posts, get_feed
+- **Normalized envelopes:** results render from validated `social_*` entities
+  only and carry additive `details.northstar` (schema `pi-northstar.result`
+  v1, entities + pagination + per-source status). `content` never renders raw
+  backend payloads.
+- **Routing:** scoped cookie-jar/session first when action completeness is
+  equal, anonymous/keyless before optional API keys otherwise; cursor-capable
+  preferred; platform preference breaks ties; cursors pin backend (no
+  switching). `/reach-status [family] [action]` reports capability-aware
+  eligibility, active backend, and usability for the requested action.
+- **Auth is opt-in and live behavior unverified:** cookie ingestion/login only
+  through explicit `/reach-setup import_cookies <provider> [endpoint]` or
+  `/reach-setup login <provider> [port]` — never startup or env auto-import.
+  Startup and bare-auto never import cookies; no environment variable triggers
+  cookie import. `PI_SEARCH_BROWSER_AUTOMATION=0` remains
+  the kill switch for explicit import/login. Explicit Pi cookie import/login
+  supports only the current genuine consumers Reddit, Bilibili, and YouTube.
+  Twitter, Xiaohongshu, Facebook, Instagram, and LinkedIn use their
+  CLI/OpenCLI-owned
+  authenticated sessions and therefore are not Pi cookie-import targets;
+  TWITTER_AUTH_TOKEN/TWITTER_CT0 and imported Twitter/Xiaohongshu cookies do
+  not configure active Stage 2 reads. Live authenticated reads remain opt-in and
+  unverified — confirm via `/reach-status social <action>` and tool behavior,
+  never assume a provider is unlocked.
+- **Write boundary (deny-by-default, Stage 8):** `social` remains read-only in practice — no provider currently supports writes, and no write capability is available in this release. Gate lives in `src/social-write-policy.ts` / `src/social-write-contract.ts`: `PI_SEARCH_SOCIAL_WRITE` kill switch defaults off (only the exact string `'1'` enables), the per-provider write allowlist is empty, and every write-shaped request returns a denied result or a dry-run preview with zero side effects. Future adapters (OpenCLI session CLIs) require upstream verification before any action is allowlisted. Permanently forbidden: downloads, archives, destructive actions (delete/follow-at-scale), generic-web substitution. Any future write path stays user-initiated only, like explicit `/reach-setup import_cookies` / `login` — never startup/env auto.
 
 Source ordering, YouTube (`media`):
 
 1. Official YouTube Data API v3 when `YOUTUBE_API_KEY` is set (`search`,
-   `details`, `hot`).
-2. Keyless `www.youtube.com/oembed` for `details` only (limited fields).
-3. **Opt-in only** last resort (`PI_SEARCH_PLATFORM_WEB_FALLBACK=1`): the same
-   sanitized web-search/web-fetch fallbacks with the same separate data model
-   for `search`/`hot` (no key or API failure) and for `details` once oEmbed
-   fails.
+   `details`, `hot` — captions endpoints are OAuth-only, so the Data API
+   never serves `transcript`).
+2. Keyless `www.youtube.com/oembed` for `details` only (limited fields:
+   title, author, thumbnail — never used for `search` or `hot`).
+3. Keyless unofficial `youtube-transcript` backend for `transcript` only
+   (watch-page + timedtext adapter; degraded, may break without notice).
+`search`/`hot` without a key fail closed with an explicit error — there is no
+web-search/web-fetch fallback tier. `details` tries the Data API first when `YOUTUBE_API_KEY` is set; keyless oEmbed runs only when keyless or after Data API failure; when both are unavailable it
+fails closed.
 
-Transcripts/subtitles for YouTube are **not supported** (a clear error is
-returned); Pi-Northstar does not scrape transcripts or use transcript services,
-and automatic calls never route to `yt-dlp`. An **OAuth management dashboard**
+YouTube `transcript` is served only by the unofficial keyless adapter above;
+stored YouTube cookies (via explicit `/reach-setup import_cookies youtube`)
+can be attached to the watch-page fetch for consent-gated videos. Pi-Northstar
+uses no third-party transcript services, never routes automatic calls to
+`yt-dlp`, and never scrapes transcripts outside this adapter. An **OAuth management dashboard**
 for these services is future, deferred work — this release adds no dashboard,
 redirect endpoint, token storage, schema field, or tool.
 
@@ -99,17 +163,19 @@ redirect endpoint, token storage, schema field, or tool.
 
 ```ts
 social({ platform: 'reddit', action: 'search', query: 'self-hosting', limit: 10 })
-social({ platform: 'reddit', action: 'read', url: 'https://www.reddit.com/r/example/comments/POST_ID/' })
+social({ platform: 'reddit', action: 'get_post', url: 'https://www.reddit.com/r/example/comments/POST_ID/' })
 
-media({ platform: 'youtube', action: 'search', query: 'WebAssembly GC' }) // requires YOUTUBE_API_KEY, or opt-in web fallback
-media({ platform: 'youtube', action: 'details', url: 'https://youtu.be/VIDEO_ID' }) // Data API, then keyless oEmbed
-media({ platform: 'youtube', action: 'hot' }) // requires YOUTUBE_API_KEY, or opt-in web fallback
+media({ platform: 'youtube', action: 'search', query: 'WebAssembly GC' }) // requires YOUTUBE_API_KEY; no web fallback
+media({ platform: 'youtube', action: 'details', url: 'https://youtu.be/VIDEO_ID' }) // Data API first when YOUTUBE_API_KEY is set (limited fields); keyless oEmbed only when keyless or after Data API failure
+media({ platform: 'youtube', action: 'hot' }) // requires YOUTUBE_API_KEY; no web fallback
+media({ platform: 'youtube', action: 'transcript', url: 'https://youtu.be/VIDEO_ID' }) // keyless unofficial adapter; may break; never yt-dlp
 ```
 
-Inspect `details.backend` and `details.degraded`: `reddit-api`,
-`reddit-cookie`, `arctic-shift`, and `youtube-data-api` retain their native
-result models. `web-search-fallback` and `web-fetch-fallback` are degraded,
-with `search-results` and `page-text` models respectively.
+Inspect `details.backend` and `details.northstar`: social results carry the
+normalized `pi-northstar.result` envelope with validated entities. YouTube
+results report `youtube-data-api` (full), `youtube-oembed` (degraded,
+details-only, limited fields), or `youtube-transcript` (degraded,
+transcript-only, unofficial).
 
 ## Quick start
 
@@ -176,7 +242,7 @@ Set variables in your shell profile (`.zshrc`, `.bashrc`) or a package-local `.e
 All optional. DuckDuckGo covers web search without any keys.
 
 ```bash
-export GITHUB_TOKEN="ghp_..."           # GitHub API (private repos, higher rate limits)
+export GITHUB_TOKEN="ghp_..."           # GitHub API (or GH_TOKEN; optional — public reads work keyless with harder rate limits)
 export EXA_API_KEY="..."                # Exa semantic search
 export BRAVE_API_KEY="..."              # Brave Search API
 export TAVILY_API_KEY="..."             # Tavily AI-native search
@@ -197,7 +263,7 @@ export CODEX_ACCOUNT_ID="..."         # Optional account routing
 export CODEX_HOME="$HOME/.codex"       # Optional auth-file location
 ```
 
-`PI_SEARCH_WEB_BACKENDS` is exact. If set, Codex runs only when `codex` appears in list.
+`PI_SEARCH_WEB_BACKENDS` is the exclusive override and is exact. If set, Codex runs only when `codex` appears in list. The legacy `SEARCH_WEB_BACKENDS` variable was removed and is no longer read.
 
 > **Limited-support notice:** This integration uses undocumented, reverse-engineered ChatGPT/Codex search endpoint. It is best-effort, not official OpenAI integration, and may change, become unavailable, or be limited by account eligibility and usage limits. Usage may be governed by OpenAI/ChatGPT terms and policies. Confirm your intended use complies with those terms before enabling or relying on it.
 
@@ -205,9 +271,27 @@ export CODEX_HOME="$HOME/.codex"       # Optional auth-file location
 
 ```bash
 export PI_SEARCH_WEB_BACKENDS="codex,duckduckgo,brave"  # Exact provider set; codex remains primary when listed
+```
+
+Search backends: `codex` (primary-first when listed — Codex results lead, remaining rankings are RRF-fused and URL-deduplicated), `duckduckgo` (always configured), `searxng` (operator-configured, local), `brave`, `exa`, `tavily`, `ollama-search`. Override exclusively via `PI_SEARCH_WEB_BACKENDS`.
+
+```bash
 export PI_SEARCH_BROWSER_BACKEND="cdp"                     # Deprecated: CDP fallback (no reliability checks)
 export PI_SEARCH_BROWSER_ALLOW_SENSITIVE="1"              # Enable evaluate/set_cookies
 export PI_SEARCH_DESKTOP_AUTOMATION="1"                   # Enable desktop tool
+```
+
+### Research source keys (optional)
+
+Pi convention names, not vendor-standard names. All research sources work
+unauthenticated; these keys only raise provider quota limits.
+
+```bash
+export SEMANTIC_SCHOLAR_API_KEY="..."   # Semantic Scholar Graph API quota
+export OPENALEX_API_KEY="..."           # OpenAlex mailto pool
+export NCBI_API_KEY="..."               # PubMed E-utilities optional key
+export NCBI_EMAIL="you@example.com"     # PubMed contact (recommended)
+export STACKEXCHANGE_KEY="..."          # Stack Exchange API quota
 ```
 
 ### Bootstrap control
@@ -216,9 +300,18 @@ export PI_SEARCH_DESKTOP_AUTOMATION="1"                   # Enable desktop tool
 export PI_SEARCH_BOOTSTRAP="off"         # Skip startup automation
 export PI_SEARCH_AUTO_INSTALL="0"        # Skip startup installs
 export PI_SEARCH_ALLOW_INSTALL="0"       # Disable all install execution
-export PI_SEARCH_AUTO_COOKIES="off"      # Skip cookie import
-export PI_SEARCH_BROWSER_AUTOMATION="0"  # Disable all browser features
+export PI_SEARCH_BROWSER_AUTOMATION="0"  # Disable all browser features (kill switch for explicit import/login)
 ```
+
+First start and bare `/reach-setup auto` never import browser cookies —
+no environment variable triggers cookie import.
+`/reach-setup import_cookies
+<provider> [endpoint]` remains the explicit per-provider consent path.
+Xueqiu/Xiaoyuzhou are absent providers. Explicit Pi cookie import/login
+supports only Reddit, Bilibili, and YouTube; Twitter, Xiaohongshu, Facebook,
+Instagram,
+and LinkedIn use their CLI/OpenCLI-owned authenticated sessions and are not
+Pi cookie-import targets.
 
 ### Output & state
 
@@ -238,7 +331,7 @@ Pi-Northstar has two layers of semantic capability:
 
 When you call `fetch` with a `query` parameter, Pi-Northstar performs **hybrid search**:
 
-1. **URL discovery** — queries configured search backends (Codex when detected, DuckDuckGo, Brave, Exa, Tavily, SearXNG, Ollama); Codex results lead, then remaining rankings are RRF-fused and URL-deduplicated
+1. **URL discovery** — queries configured search backends (`codex` primary-first when listed, `duckduckgo` always configured, operator-configured local `searxng`, `brave`, `exa`, `tavily`, `ollama-search`; override exclusively via `PI_SEARCH_WEB_BACKENDS`); Codex results lead, then remaining rankings are RRF-fused and URL-deduplicated
 2. **Page fetching** — optionally uses Scrapling (Python stealth browser) for JS-rendered pages and anti-bot bypass, falls back to plain HTTP
 3. **Chunking** — sentence-boundary-aware text splitting with overlap
 4. **BM25 ranking** — Okapi BM25 lexical scoring (TF saturation, IDF weighting, length normalization)
@@ -272,12 +365,15 @@ fetch({ query: "How does React concurrent rendering work?", searchQuery: "React 
 - `searchQuery` — what to search the web for (defaults to `query` if omitted)
 - `topK` — how many chunks to return (default 8, max 20)
 - `maxPages` — how many pages to crawl (default 10, max 25)
+- `maxChars` — output budget honored on both fetch paths (`read` and `crawl`), max 50000
 
-Without a `query`, `fetch` returns the full readable text of a URL (plain extraction, no semantic processing).
+Out-of-range `limit`/`topK`/`maxPages`/`maxChars` values are rejected, never silently clamped.
 
-### 2. Embedding sidecar (semantic search + GitHub `code_search`)
+Without a `query`, `fetch` (canonical `read`) returns the full readable text of a URL (plain extraction, no semantic processing).
 
-Pi-Northstar can connect to an embedding service for **vector-based semantic search** in `fetch` and **AST-aware semantic code search** in GitHub `code_search`.
+### 2. Embedding sidecar (semantic search)
+
+Pi-Northstar can connect to an embedding service for **vector-based semantic search** in `fetch`.
 
 Configure the sidecar (works with any OpenAI-compatible embedding API — LM Studio, Ollama, OpenAI, etc.):
 
@@ -323,15 +419,15 @@ Optional proxy:
 export PI_SEARCH_SCRAPLING_PROXY="http://user:pass@host:port"
 ```
 
-### 3. GitHub `code_search`
+### 3. GitHub actions
+
+Canonical actions: `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits` (REST API only — GraphQL not offered). Results are normalized entities. Out-of-range input is rejected, never clamped. `list_dir` and `code_search` legacy spellings are unsupported.
 
 ```
-github({ action: "code_search", repository: "owner/repo", query: "authentication middleware with JWT verification" })
+github({ action: "releases", repository: "owner/repo" })
 ```
 
-The `profile` parameter lets you tune retrieval: `balanced`, `lexical-heavy`, `semantic-heavy`, `high-precision`, `fast`, `precision`, or `recall`.
-
-Without the embedding sidecar, `code_search` falls back to lexical GitHub code search.
+`GITHUB_TOKEN` or `GH_TOKEN` is optional: public reads work keyless with harder rate limits. Unauthenticated `/search/code` is heavily rate-limited; `issues`/`pulls`/`releases`/`commits` work keyless for public repos.
 
 ## CLI
 
@@ -343,7 +439,7 @@ npm run cli -- config
 npm run cli -- call web_search '{"query":"pi agent extensions"}'
 npm run cli -- call fetch '{"url":"https://example.com"}'
 npm run cli -- call fetch '{"query":"error handling patterns","searchQuery":"Rust error handling best practices"}'
-npm run cli -- call social '{"platform":"reddit","action":"subreddit","subreddit":"python","filter":"hot"}'
+npm run cli -- call social '{"platform":"reddit","action":"get_community_posts","community":"python"}'
 npm run cli -- call media '{"platform":"rss","url":"https://example.com/feed.xml"}'
 npm run cli -- call reach_setup '{"action":"plan"}'
 ```
@@ -354,7 +450,7 @@ All CLI output is JSON: `{ "ok": true, "data": { "content": [...] } }`.
 
 User-facing setup and status commands (not LLM tools):
 
-- `/reach-status [family]` — inspect channels and backends, e.g. `/reach-status social`
+- `/reach-status [family] [action]` — inspect channels and backends, e.g. `/reach-status social` or `/reach-status social get_post`. The optional action is validated against the canonical registry; unknown/legacy spellings are rejected.
 - `/reach-setup [action]` — `auto`, `status`, `plan`, `install_core`, `install_all`, `install_channels`, `import_cookies`, `login`
 
 ## Browser automation
@@ -606,6 +702,7 @@ Mutations (click, type, press_key, scroll) require a fresh `stateId` from the mo
 - Tree depth capped at 32 levels; node count capped at 1 000
 - Redacts sensitive fields: passwords, tokens, secrets, paths
 - Screenshot bytes capped at 10 MB (prevents large binaries)
+- Tool outputs additionally bounded via guardText (default 60k chars); strings >10k chars go through guardText with a 60k cap (head+tail kept) after secret redaction; data/details payloads exceeding 120k chars are replaced with a guardText-bounded summary
 
 ### Permissions
 
@@ -623,6 +720,7 @@ Permissions are user-owned and persist across sessions. Session shutdown cannot 
 - Observation is AX-only by default; screenshots require explicit opt-in
 - Screenshots and AX trees can expose sensitive information — only use with trusted applications
 - Mutations are serialized per window; transport loss is not retried
+- No confirmation gate: requiresConfirmation() always returns false; PII/screenshot warnings are advisory only — operator must close sensitive apps
 - Redaction is applied to output (passwords, tokens, paths removed before AI sees them)
 
 ## Package contract

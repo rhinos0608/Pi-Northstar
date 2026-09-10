@@ -1,5 +1,10 @@
 # Research: search-mcp Config & Platform Env Patterns — Reuse & Orchestrator Design
 
+> SUPERSEDED (Stage 2): per-platform cookie/token env injection described below was
+> removed. Stage 2 social workers run CLI-owned authenticated sessions; twitter-cli
+> no longer receives TWITTER_AUTH_TOKEN/TWITTER_CT0 and xhs no longer derives
+> XHS_COOKIE. Only genuine Pi cookie-jar consumers (Reddit, Bilibili) derive cookie env.
+
 ## Summary
 
 Existing search/platform MCP servers follow a near-universal pattern: credentials as `UPPER_SNAKE_CASE` env vars, optional `config.json` bridge, and no built-in orchestrator — each MCP server is a single-purpose process. This extension's `local-config.ts` already maps an external `config.json` to env vars, mirroring the `search-mcp` CLI's own bridge. A minimal in-house orchestrator should be a **channel-aware router + ordered backend fallback** (already partially implemented in `reach-tools.ts`), not a full multi-process MCP supervisor. The embedding/LLM sidecar and browser CDP/profile configs follow the same env-var patterns as search API keys.

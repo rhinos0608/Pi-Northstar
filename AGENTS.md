@@ -34,7 +34,7 @@ Residual risks: DNS rebinding, Chromium DNS TOCTOU, redirects, and debug-server 
 ### desktop-contract.ts constants (ground truth)
 - `MAX_AX_NODES = 1000` (not 5000 — the README was wrong and has been fixed)
 - `MAX_AX_DEPTH = 32` (not 50)
-- `MAX_DIMENSION = 10000` (not 2048 — this is the desktop screenshot cap; browser screenshots have a separate `SCREENSHOT_MAX_DIMENSION = 8000` in `src/agent-browser.ts:74`)
+- `MAX_DIMENSION = 10000` (not 2048 — this is the desktop screenshot cap; browser screenshots have a separate `SCREENSHOT_MAX_DIMENSION = 8000` in `src/agent-browser.ts:86`)
 
 ### Browser tool schema
 The registered `browser` tool in `src/index.ts` exposes `compact`, `semanticAction`, `job`, and `batch` parameters in its schema, matching the capabilities handled by `src/browser-policy.ts:validateBrowserRequest`.
