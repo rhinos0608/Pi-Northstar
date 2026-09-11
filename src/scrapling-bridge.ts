@@ -51,17 +51,48 @@ def main():
                     fetcher_kwargs["proxy"] = proxy
                 if cmd.get("solve_cloudflare"):
                     fetcher_kwargs["cloudflare_solver"] = True
+                # Explicit safe redirect policy: the static Fetcher rejects
+                # hops to internal/private IPs (SSRF protection); the cap
+                # bounds redirect chains. Browser-engine fetchers ignore
+                # unknown kwargs, so this stays on the verified static path —
+                # the Node boundary still validates the final URL for all paths.
+                safe_redirect_kwargs = {"follow_redirects": "safe", "max_redirects": 10}
+
+                # Browser-engine route interception (enforced by Scrapling via
+                # Playwright request abortion, suffix-matched). Mirrors the
+                # Node BLOCKED_HOSTNAMES plus the highest-risk IP literals;
+                # CIDR ranges cannot be expressed here - the static Fetcher
+                # safe mode and the Node final-URL check cover those.
+                browser_blocked = {
+                    "localhost", "metadata", "metadata.google.internal",
+                    "metadata.azure.com", "instance-data",
+                    "host.docker.internal", "gateway.docker.internal",
+                    "127.0.0.1", "::1", "169.254.169.254",
+                    "0.0.0.0", "10.0.0.1",
+                }
 
                 if fetcher_name == "dynamic":
                     fetcher = DynamicFetcher(**fetcher_kwargs)
                 elif fetcher_name == "fetcher":
-                    fetcher = Fetcher(**fetcher_kwargs)
+                    fetcher = Fetcher(**{**fetcher_kwargs, **safe_redirect_kwargs})
                 else:
                     fetcher = StealthyFetcher(**fetcher_kwargs)
+                # Older Scrapling releases predate blocked_domains: retry
+                # without it rather than failing into a silent downgrade loop.
+                # (Static Fetcher stays on safe-redirect kwargs only.)
+                if fetcher_name in ("dynamic", "stealthy"):
+                    try:
+                        fetcher = (DynamicFetcher if fetcher_name == "dynamic" else StealthyFetcher)(
+                            **{**fetcher_kwargs, "blocked_domains": browser_blocked})
+                    except TypeError:
+                        pass
 
                 # Fetcher.get timeout is in seconds
                 timeout_sec = timeout / 1000 if timeout > 1000 else timeout
-                result = fetcher.get(url, timeout=timeout_sec)
+                if fetcher_name == "fetcher":
+                    result = fetcher.get(url, timeout=timeout_sec, **safe_redirect_kwargs)
+                else:
+                    result = fetcher.get(url, timeout=timeout_sec)
                 # Extract same-page links if requested
                 links = []
                 if cmd.get("extract_links"):

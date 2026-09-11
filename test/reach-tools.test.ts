@@ -330,7 +330,10 @@ test('v2ex canonical get_thread works; legacy topic throws unsupported_action', 
       /Unsupported v2ex action: topic/,
     );
   });
-  assert.match(urls[0]!, /topics\/show\.json\?id=123/);
+  // Order-insensitive: the two legacy fetches race through independent DNS
+  // preflights, so fetch-invocation order is not deterministic. Both must fire.
+  assert.ok(urls.some((u) => /topics\/show\.json\?id=123/.test(u)), `topics fetch missing in ${JSON.stringify(urls)}`);
+  assert.ok(urls.some((u) => /replies\/show\.json\?topic_id=123/.test(u)), `replies fetch missing in ${JSON.stringify(urls)}`);
 });
 
 // ── YouTube details binding order: keyed Data API first, keyless oEmbed fallback ──

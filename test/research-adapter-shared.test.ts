@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promises as dnsPromises } from 'node:dns';
 import { test } from 'node:test';
 import { ResearchHttpError } from '../src/research-adapter-shared.js';
 import {
@@ -38,17 +39,21 @@ test('envApiKey trims and treats blank as absent', () => {
 
 test('fetchResearchJson sanitizes http.ts error URLs into status-only failures', async () => {
   const savedFetch = globalThis.fetch;
+  const savedLookup = dnsPromises.lookup;
   globalThis.fetch = async () => {
-    throw new Error('HTTP 500 for https://api.example.com/path?secret=leak-me');
+    throw new Error('HTTP 500 for https://example.com/path?secret=leak-me');
   };
+  // Stub DNS preflight with an allowed public address: no public-DNS reliance.
+  (dnsPromises as { lookup: unknown }).lookup = async () => [{ address: '93.184.215.14', family: 4 }];
   try {
-    await assert.rejects(fetchResearchJson('https://api.example.com/path', {}), (error: unknown) => {
+    await assert.rejects(fetchResearchJson('https://example.com/path', {}), (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.equal((error as Error & { status?: number }).status, 500);
       assert.doesNotMatch((error as Error).message, /leak-me/);
       return true;
     });
   } finally {
+    (dnsPromises as { lookup: unknown }).lookup = savedLookup;
     globalThis.fetch = savedFetch;
   }
 });

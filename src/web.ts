@@ -1073,10 +1073,24 @@ export async function fetchReadablePage(
   if (bridge) {
     try {
       const result = await bridge.fetch(url);
+      // Evidence-boundary validation (not prevention): Scrapling runs in
+      // Python and may already have followed redirects before Node sees the
+      // result. Validate the returned final URL statically and via DNS with
+      // the caller signal/resolver before it can enter evidence; fail closed.
+      // A missing bridge URL falls back to the already-validated request URL.
+      // Rejections use a fixed boundary message: the validator echoes the URL
+      // (including embedded credentials) in its error text.
+      let bridgeFinalUrl: string;
+      try {
+        bridgeFinalUrl = typeof result.url === 'string' && result.url.trim() ? validateHttpUrl(result.url) : url;
+      } catch {
+        throw new Error('Scrapling bridge returned blocked URL');
+      }
+      await resolvePublicHostname(new URL(bridgeFinalUrl).hostname, signal, lookup);
       const content = stripHtml(result.content);
       if (content.trim()) {
         const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
-        return { url: result.url, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
+        return { url: bridgeFinalUrl, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
       }
       if (!hasToken) {
         // No Diffbot token: Analyze skipped, but gated external fetch
@@ -1085,7 +1099,7 @@ export async function fetchReadablePage(
         const external = await tryExternalFetch(url, noTokenEnv, signal, lookup, undefined);
         if (external) return external;
         const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
-        return { url: result.url, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
+        return { url: bridgeFinalUrl, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
       }
     } catch (error) {
       if (!hasToken) {

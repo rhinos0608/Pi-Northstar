@@ -41,10 +41,21 @@ export async function fetchText(url: string, headersOrSignal: Record<string, str
  */
 async function fetchFollowingRedirects(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, maxRedirects = 10, lookup?: DnsLookup): Promise<Response> {
   const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
-  // Initial host: static literal check only. DNS preflight for the initial URL
-  // stays with callers (e.g. fetchReadablePage), which own the injectable lookup.
-  // Every redirect hop below gets static + DNS preflight.
+  // Single choke point: initial host gets static + DNS preflight here, and
+  // every redirect hop below gets static + DNS preflight. Caller preflights
+  // that guard non-helper paths (e.g. the Scrapling bridge in
+  // fetchReadablePage) stay; helper-path duplicates are harmless.
+  // Residual TOCTOU remains (fetch resolves independently); container egress stays outer boundary.
   let currentUrl = validatePublicHttpUrl(url);
+  // A pre-aborted signal dispatches nothing, so there is nothing to preflight:
+  // skip straight to fetch and let it surface AbortError as before (keeps
+  // caller abort semantics and dispatch counting unchanged).
+  // DNS budget precedes the fetch timeout: without a caller signal, arm a
+  // timeout signal from timeoutMs so DNS preflight cannot outlive the fetch.
+  const dnsSignal = effectiveSignal ?? AbortSignal.timeout(timeoutMs);
+  if (!effectiveSignal?.aborted) {
+    await resolvePublicHostname(new URL(currentUrl).hostname, dnsSignal, lookup);
+  }
   for (let hop = 0; ; hop++) {
     const response = await fetch(currentUrl, fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
     if (response.status < 300 || response.status >= 400) return response;
@@ -55,7 +66,7 @@ async function fetchFollowingRedirects(url: string, headersOrSignal: Record<stri
     // DNS preflight every hop: static literal check above is not enough —
     // a redirect hostname can resolve to private/reserved space. Fail closed.
     // Residual TOCTOU remains (fetch resolves independently); container egress stays outer boundary.
-    await resolvePublicHostname(new URL(nextUrl).hostname, effectiveSignal, lookup);
+    await resolvePublicHostname(new URL(nextUrl).hostname, dnsSignal, lookup);
     currentUrl = nextUrl;
   }
 }
@@ -65,9 +76,15 @@ async function fetchFollowingRedirects(url: string, headersOrSignal: Record<stri
  * requests must use this so credentials are never forwarded off the initial
  * host (credential-routing control, not SSRF-policy restoration).
  */
-export async function fetchJsonNoRedirect(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<unknown> {
+export async function fetchJsonNoRedirect(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, lookup?: DnsLookup): Promise<unknown> {
   const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
-  const response = await fetch(validatePublicHttpUrl(url), fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
+  const validated = validatePublicHttpUrl(url);
+  // Same DNS preflight as the redirect-following path: a hostile DNS answer
+  // for even a fixed vendor hostname must fail closed before credentials move.
+  if (!effectiveSignal?.aborted) {
+    await resolvePublicHostname(new URL(validated).hostname, effectiveSignal ?? AbortSignal.timeout(timeoutMs), lookup);
+  }
+  const response = await fetch(validated, fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
   if (response.status >= 300 && response.status < 400) {
     throw new Error(`Redirect rejected for ${url}: credentials are never forwarded off the fixed host`);
   }
