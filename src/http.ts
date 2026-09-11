@@ -52,7 +52,7 @@ async function fetchFollowingRedirects(url: string, headersOrSignal: Record<stri
   // caller abort semantics and dispatch counting unchanged).
   // DNS budget precedes the fetch timeout: without a caller signal, arm a
   // timeout signal from timeoutMs so DNS preflight cannot outlive the fetch.
-  const dnsSignal = effectiveSignal ?? AbortSignal.timeout(timeoutMs);
+  const dnsSignal = composeSignal(effectiveSignal, timeoutMs);
   if (!effectiveSignal?.aborted) {
     await resolvePublicHostname(new URL(currentUrl).hostname, dnsSignal, lookup);
   }
@@ -82,7 +82,7 @@ export async function fetchJsonNoRedirect(url: string, headersOrSignal: Record<s
   // Same DNS preflight as the redirect-following path: a hostile DNS answer
   // for even a fixed vendor hostname must fail closed before credentials move.
   if (!effectiveSignal?.aborted) {
-    await resolvePublicHostname(new URL(validated).hostname, effectiveSignal ?? AbortSignal.timeout(timeoutMs), lookup);
+    await resolvePublicHostname(new URL(validated).hostname, composeSignal(effectiveSignal, timeoutMs), lookup);
   }
   const response = await fetch(validated, fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
   if (response.status >= 300 && response.status < 400) {

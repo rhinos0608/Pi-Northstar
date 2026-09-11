@@ -178,6 +178,17 @@ test('ontology without token returns auth_required with zero calls', async () =>
   assert.equal(calls.length, 0);
 });
 
+test('probe without token returns auth_required for every query with zero calls', async () => {
+  const { calls, fetchFn } = mockFetch(() => ({ hits: 1 }));
+  const out = await probeDiffbotGraph({ queries: ['type:Person', 'type:Organization'] }, { token: '', fetchFn });
+  assert.equal(out.items.length, 2);
+  for (const item of out.items) {
+    assert.equal(item.status, 'error');
+    if (item.status === 'error') assert.equal(item.error.code, 'auth_required');
+  }
+  assert.equal(calls.length, 0);
+});
+
 // ── probe ──
 
 test('probe rejects known non-countable syntax without HTTP', async () => {

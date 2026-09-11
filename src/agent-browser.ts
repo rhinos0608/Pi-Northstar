@@ -694,6 +694,14 @@ export class AgentBrowserAdapter {
     if (rawValues.length > MAX_SELECT_VALUES) {
       return jsonTextResult({ error: `too many values (max ${MAX_SELECT_VALUES})` });
     }
+    try {
+      preflightRef(this.pageState, this.session.namespace, selector);
+    } catch (err) {
+      if (err instanceof StaleRefError) {
+        return jsonTextResult({ ok: false, error: err.message, staleRef: true });
+      }
+      throw err;
+    }
     // Option values ride the stdin batch as sensitive payloads, never argv.
     const values = rawValues.map((v) => validateText(v));
     await this.ensureSession(options);
@@ -712,12 +720,18 @@ export class AgentBrowserAdapter {
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
 
-    // Text post-condition (job assert steps): CLI substring-matches page text.
-    // With a selector, scope first (wait for element), then check the text.
+    // Text post-condition (job assert steps): selector-scoped substring match.
+    // A page-wide `--text` wait would pass when the text appears anywhere else,
+    // so wait for the element first, then check the element's own text.
     if (request.selector && request.text) {
       const selector = validateSelector(request.selector);
+      const text = validateText(request.text);
       const scoped = await runCommand(['wait', selector], merged);
       if (!scoped.success) return jsonTextResult({ ok: false, error: sanitizeErrorMessage(scoped.error ?? 'Command failed') });
+      const snippet = await runCommand(['get', 'text', selector], merged);
+      if (!snippet.success) return jsonTextResult({ ok: false, error: sanitizeErrorMessage(snippet.error ?? 'Command failed') });
+      const haystack = typeof snippet.data === 'string' ? snippet.data : JSON.stringify(snippet.data ?? '');
+      return jsonTextResult(haystack.includes(text) ? { ok: true } : { ok: false, error: `text not found in element ${selector}` });
     }
     if (request.text) {
       const text = validateText(request.text);

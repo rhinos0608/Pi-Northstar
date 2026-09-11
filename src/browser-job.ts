@@ -68,6 +68,7 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
     if (kind === 'select') {
       if (!Array.isArray(s.values)) throw new Error(`step ${i}: select requires values array`);
       step.values = s.values.filter((v): v is string => typeof v === 'string');
+      if (step.values.length === 0) throw new Error(`step ${i}: select requires a non-empty values array`);
     }
     if (kind === 'wait' && typeof s.waitMs === 'number') {
       step.waitMs = s.waitMs;

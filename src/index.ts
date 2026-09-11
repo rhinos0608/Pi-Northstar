@@ -60,6 +60,7 @@ const kgEnhanceTypeEnum = ['Person', 'Organization'] as const;
 // graph actions are fixed by the graph contract (query/probe/schema);
 // language is native DQL only, provider selection stays internal.
 const graphActionEnum = ['query', 'probe', 'schema'] as const;
+const graphLanguageEnum = ['dql'] as const;
 const graphSchemaViewEnum = ['types', 'fields', 'search', 'describe'] as const;
 
 export default function (pi: ExtensionAPI): void {
@@ -384,7 +385,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     ],
     parameters: Type.Object({
       action: Type.Optional(StringEnum(graphActionEnum, { description: 'Pick query (DQL execution), probe (cardinality), or schema (ontology discovery).' })),
-      language: Type.Optional(Type.String({ description: "Native query language, fixed to 'dql' in v1." })),
+      language: Type.Optional(StringEnum(graphLanguageEnum, { description: "Native query language, fixed to 'dql' in v1." })),
       query: Type.Optional(Type.String({ description: 'DQL query for query action; schema search text for view search.' })),
       queries: Type.Optional(Type.Array(Type.String(), { description: 'Probe batch: 1..32 countable DQL queries; order preserved with per-query errors.' })),
       pageSize: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Transport page size for query action, default 10. Never rewrites query text.' })),

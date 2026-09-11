@@ -95,7 +95,10 @@ function renderSchemaText(result: GraphSchemaResult, stale: boolean): string {
     const trunc = (result as { truncated?: boolean }).truncated === true ? `, truncated to ${GRAPH_SCHEMA_SEARCH_CAP}; narrow with view 'fields' + type name` : '';
     return `Graph schema fields (dql, diffbot): ${result.fields.length} field(s)${suffix}${trunc}.`;
   }
-  if (result.view === 'search') return `Graph schema search (dql, diffbot): ${result.matches.length} match(es)${suffix}.`;
+  if (result.view === 'search') {
+    const trunc = (result as { truncated?: boolean }).truncated === true ? `, truncated to ${GRAPH_SCHEMA_SEARCH_CAP}; narrow with view 'search' and a more specific query` : '';
+    return `Graph schema search (dql, diffbot): ${result.matches.length} match(es)${suffix}${trunc}.`;
+  }
   return `Graph schema describe (dql, diffbot): ${result.name}${suffix}.`;
 }
 
@@ -104,9 +107,12 @@ export async function callGraphTool(
   options: GraphToolOptions = {},
 ): Promise<BackendCallResult> {
   const env = options.env ?? process.env;
-  const validated = validateGraphRequest(args);
+  const normalized: Record<string, unknown> = { ...args };
+  if (normalized.action === undefined) normalized.action = 'search';
+  if (normalized.language === undefined) normalized.language = 'dql';
+  const validated = validateGraphRequest(normalized);
   if (!validated.ok) {
-    const data = args !== null && typeof args === 'object' && (args as Record<string, unknown>).action === 'probe'
+    const data = normalized.action === 'probe'
       ? ({ kind: 'probe', items: [] } as GraphData)
       : queryPlaceholder();
     const envelope = errorEnvelope(toGraphError(validated.code, validated.message, false, GRAPH_PROVIDER), data);
@@ -260,13 +266,15 @@ async function graphSchema(
         action: 'schema', language: 'dql', graph: envelope,
       });
     }
-    const truncatedStale = mapped.result.view === 'fields' && (mapped.result as { truncated?: boolean }).truncated === true;
+    const truncatedStale = (mapped.result.view === 'fields' || mapped.result.view === 'search') && (mapped.result as { truncated?: boolean }).truncated === true;
     const envelope = buildGraphResult({
       status: 'partial', language: 'dql', provider: GRAPH_PROVIDER,
       data: { kind: 'schema', result: mapped.result, meta: { fetchedAt: cached.payload.fetchedAt, stale: true } },
       errors: [fetched.error!],
       notes: truncatedStale
-        ? ['Serving stale cached ontology after retrieval failure.', `Unscoped fields truncated to ${GRAPH_SCHEMA_SEARCH_CAP} entries; re-query with view 'fields' and a type name for the remaining scoped fields.`]
+        ? ['Serving stale cached ontology after retrieval failure.', mapped.result.view === 'search'
+          ? `Schema search truncated to ${GRAPH_SCHEMA_SEARCH_CAP} matches; narrow with a more specific query.`
+          : `Unscoped fields truncated to ${GRAPH_SCHEMA_SEARCH_CAP} entries; re-query with view 'fields' and a type name for the remaining scoped fields.`]
         : ['Serving stale cached ontology after retrieval failure.'],
     });
     return textResult(wrapUntrustedText(renderSchemaText(mapped.result, true), { source: 'graph' }), {
@@ -295,9 +303,11 @@ function schemaSuccess(
       action: 'schema', language: 'dql', graph: envelope,
     });
   }
-  const truncated = mapped.result.view === 'fields' && mapped.result.truncated === true;
+  const truncated = (mapped.result.view === 'fields' || mapped.result.view === 'search') && mapped.result.truncated === true;
   const notes = truncated
-    ? [`Unscoped fields truncated to ${GRAPH_SCHEMA_SEARCH_CAP} entries; re-query with view 'fields' and a type name for the remaining scoped fields.`]
+    ? [mapped.result.view === 'search'
+      ? `Schema search truncated to ${GRAPH_SCHEMA_SEARCH_CAP} matches; narrow with a more specific query.`
+      : `Unscoped fields truncated to ${GRAPH_SCHEMA_SEARCH_CAP} entries; re-query with view 'fields' and a type name for the remaining scoped fields.`]
     : [];
   const envelope = buildGraphResult({
     status: truncated ? 'partial' : 'ok', language: 'dql', provider: GRAPH_PROVIDER,
@@ -339,7 +349,8 @@ function mapOntologyView(
     if (name !== undefined) {
       const entry = typeEntry(name);
       if (!entry) return { ok: false, error: toGraphError('invalid_input', `Unknown schema type: ${name}`, false, GRAPH_PROVIDER) };
-      return { ok: true, result: { view: 'fields', type: entry.name as string ?? name, fields: fieldList(entry, keepDeprecated) } };
+      const typeName = typeof entry.name === 'string' && entry.name.trim().length > 0 ? entry.name : name;
+      return { ok: true, result: { view: 'fields', type: typeName, fields: fieldList(entry, keepDeprecated) } };
     }
     // Unscoped: aggregate actual field names across entity types (qualified as
     // Type.field); type names are not fields and must not pose as entries.
@@ -349,8 +360,9 @@ function mapOntologyView(
     const fields: Array<{ name: string; type?: string; description?: string }> = [];
     let truncated = false;
     for (const key of Object.keys(types).sort()) {
-      const entry = types[key] as Record<string, unknown>;
-      if (entry?.isDeprecated === true && !keepDeprecated) continue;
+      const entry = types[key];
+      if (!isRecord(entry)) continue;
+      if (entry.isDeprecated === true && !keepDeprecated) continue;
       for (const field of fieldList(entry, keepDeprecated)) {
         if (fields.length >= GRAPH_SCHEMA_SEARCH_CAP) { truncated = true; break; }
         fields.push({ ...field, name: `${key}.${field.name}` });
@@ -363,10 +375,11 @@ function mapOntologyView(
     const needle = (query ?? '').toLowerCase();
     const matches: Array<{ name: string; kind?: string; description?: string }> = [];
     for (const key of Object.keys(types).sort()) {
-      const entry = types[key] as Record<string, unknown>;
-      if (entry?.isDeprecated === true && !keepDeprecated) continue;
+      const entry = types[key];
+      if (!isRecord(entry)) continue;
+      if (entry.isDeprecated === true && !keepDeprecated) continue;
       if (key.toLowerCase().includes(needle)) matches.push({ name: key, kind: 'type' });
-      const fields = isRecord(entry?.fields) ? (entry.fields as Record<string, unknown>) : {};
+      const fields = isRecord(entry.fields) ? (entry.fields as Record<string, unknown>) : {};
       for (const fieldName of Object.keys(fields).sort()) {
         const field = fields[fieldName] as Record<string, unknown>;
         if (field?.isDeprecated === true && !keepDeprecated) continue;
@@ -376,14 +389,18 @@ function mapOntologyView(
           if (description) match.description = description.slice(0, 500);
           matches.push(match);
         }
-        if (matches.length >= GRAPH_SCHEMA_SEARCH_CAP) break;
+        if (matches.length > GRAPH_SCHEMA_SEARCH_CAP) break;
       }
-      if (matches.length >= GRAPH_SCHEMA_SEARCH_CAP) break;
+      if (matches.length > GRAPH_SCHEMA_SEARCH_CAP) break;
     }
-    return { ok: true, result: { view: 'search', query: query ?? '', matches: matches.slice(0, GRAPH_SCHEMA_SEARCH_CAP) } };
+    const truncated = matches.length > GRAPH_SCHEMA_SEARCH_CAP;
+    return { ok: true, result: { view: 'search', query: query ?? '', matches: matches.slice(0, GRAPH_SCHEMA_SEARCH_CAP), ...(truncated ? { truncated: true as const } : {}) } };
   }
   const entry = typeEntry(name!);
-  if (entry) return { ok: true, result: { view: 'describe', name: (entry.name as string) ?? name!, detail: entry as unknown as JsonValue } };
+  if (entry) {
+    const entryName = typeof entry.name === 'string' && entry.name.trim().length > 0 ? entry.name : name!;
+    return { ok: true, result: { view: 'describe', name: entryName, detail: entry as unknown as JsonValue } };
+  }
   for (const key of Object.keys(types)) {
     const fields = (types[key] as Record<string, unknown>)?.fields;
     if (isRecord(fields) && isRecord(fields[name!])) {

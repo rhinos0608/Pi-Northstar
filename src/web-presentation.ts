@@ -109,19 +109,27 @@ function parseBlocks(input: string): Block[] {
   };
 
   let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     if (inFence) {
       current.push(line);
-      if (FENCE_RE.test(line)) {
+      const close = FENCE_RE.exec(line);
+      if (close && close[1]![0] === fenceChar && close[1]!.length >= fenceLen) {
         inFence = false;
+        fenceChar = '';
+        fenceLen = 0;
         flush();
       }
       continue;
     }
-    if (FENCE_RE.test(line)) {
+    const open = FENCE_RE.exec(line);
+    if (open) {
       if (current.length > 0) flush();
       inFence = true;
+      fenceChar = open[1]![0]!;
+      fenceLen = open[1]!.length;
       currentKind = 'code';
       current.push(line);
       continue;

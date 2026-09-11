@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -28,6 +28,10 @@ test('fresh cache reads back with fetchedAt', async () => {
     const read = await readOntologyCacheFile(path);
     assert.equal(read.ok, true);
     assert.equal(ontologyCacheFresh(read.payload?.fetchedAt, Date.now()), true);
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(join(dir, 'nested')).mode & 0o777, 0o700);
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

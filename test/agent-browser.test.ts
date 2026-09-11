@@ -334,6 +334,38 @@ test('snapshot returns error when no browser session exists', async () => {
 
 // ── click stale ref ──
 
+test('wait with selector scopes text match to the element', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-atlas-wait-scope-test-'));
+  const runtimeRoot = join(root, 'runtime');
+  const executablePath = join(root, 'agent-browser.cjs');
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(executablePath, `#!/usr/bin/env node
+if (process.argv[2] === '--version') { process.stdout.write('agent-browser 0.37.1\\n'); process.exit(0); }
+if (process.argv[2] === 'wait') { process.stdout.write(JSON.stringify({ success: true }) + '\\n'); process.exit(0); }
+if (process.argv[2] === 'get' && process.argv[3] === 'text') {
+  const sel = process.argv[4] ?? '';
+  const text = sel === '#target' ? 'hello inside target' : 'unrelated page body';
+  process.stdout.write(JSON.stringify({ success: true, data: text }) + '\\n');
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({ success: true }) + '\\n');
+`);
+  await chmod(executablePath, 0o700);
+
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot });
+  try {
+    const env = { PATH: process.env.PATH };
+    const hit = await adapter.execute({ action: 'wait', selector: '#target', text: 'inside' }, { env });
+    assert.equal((hit.details as Record<string, unknown>).ok, true);
+    // Text exists page-wide but not in #target: page-wide matching would pass.
+    const miss = await adapter.execute({ action: 'wait', selector: '#target', text: 'unrelated page body' }, { env });
+    assert.equal((miss.details as Record<string, unknown>).ok, false);
+  } finally {
+    await adapter.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('click with stale @e ref returns staleRef true', async () => {
   const adapter = new AgentBrowserAdapter();
   const result = await adapter.execute({ action: 'click', selector: '@e5' }, { env: {} });

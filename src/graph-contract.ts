@@ -107,7 +107,7 @@ export interface GraphProbeData {
 export type GraphSchemaResult =
   | { view: 'types'; types: string[] }
   | { view: 'fields'; type?: string; fields: Array<{ name: string; type?: string; description?: string }>; truncated?: boolean }
-  | { view: 'search'; query: string; matches: Array<{ name: string; kind?: string; description?: string }> }
+  | { view: 'search'; query: string; matches: Array<{ name: string; kind?: string; description?: string }>; truncated?: boolean }
   | { view: 'describe'; name: string; detail: JsonValue };
 
 export interface GraphSchemaData {
@@ -351,7 +351,7 @@ export function decodeGraphCursor(cursor: string): DecodedGraphCursor {
     throw new GraphContractError('cursor_invalid', 'cursor action is invalid');
   }
   if (payload.language !== 'dql') throw new GraphContractError('cursor_invalid', 'cursor language is invalid');
-  if (typeof payload.pageSize !== 'number' || !Number.isInteger(payload.pageSize)) {
+  if (!Number.isInteger(payload.pageSize) || (payload.pageSize as number) < GRAPH_PAGE_SIZE_MIN || (payload.pageSize as number) > GRAPH_PAGE_SIZE_MAX) {
     throw new GraphContractError('cursor_invalid', 'cursor pageSize is invalid');
   }
   if (!isRecord(payload.state)) throw new GraphContractError('cursor_invalid', 'cursor state is invalid');

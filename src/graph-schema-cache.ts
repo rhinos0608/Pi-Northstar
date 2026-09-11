@@ -7,6 +7,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { validateGraphJsonValue } from './graph-contract.js';
 
 export const GRAPH_ONTOLOGY_CACHE_FILENAME = 'diffbot-ontology-v1.json';
 export const GRAPH_ONTOLOGY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -30,6 +32,7 @@ function isValidCachePayload(value: unknown): value is OntologyCachePayload {
   if (!isRecord(value)) return false;
   if (typeof value.fetchedAt !== 'string' || Number.isNaN(Date.parse(value.fetchedAt))) return false;
   if (!isRecord(value.ontology) || !isRecord(value.ontology.types)) return false;
+  if (!validateGraphJsonValue(value.ontology)) return false;
   return true;
 }
 
@@ -62,7 +65,7 @@ export async function readOntologyCacheFile(path: string): Promise<OntologyCache
 /** Atomic persist: temp-write + rename. Creates parent dirs 0700, file 0600. */
 export async function writeOntologyCacheFileAtomic(path: string, payload: OntologyCachePayload): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const staging = join(dirname(path), `.${GRAPH_ONTOLOGY_CACHE_FILENAME}.${process.pid}.tmp`);
+  const staging = join(dirname(path), `.${GRAPH_ONTOLOGY_CACHE_FILENAME}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
   await writeFile(staging, JSON.stringify(payload), { mode: 0o600 });
   await rename(staging, path);
 }
