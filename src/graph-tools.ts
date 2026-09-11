@@ -1,0 +1,411 @@
+// Public graph orchestration: capability-routed query/probe/schema execution.
+// Validates the full request before any adapter dispatch (invalid input costs
+// zero paid calls), binds opaque cursors to action/language/provider/query/
+// pageSize/adapter version, maps ontology snapshots to typed schema views,
+// and returns validated, framed Northstar tool results. No provider input:
+// v1 maps `dql` to the configured Diffbot adapter.
+
+import type { BackendCallResult } from './backend.js';
+import type { DiffbotFetchOptions } from './diffbot-transport.js';
+import {
+  GRAPH_PROVIDER,
+  GRAPH_ADAPTER_V,
+  GRAPH_LANGUAGES,
+  fetchDiffbotOntology,
+  probeDiffbotGraph,
+  queryDiffbotGraph,
+} from './diffbot-graph.js';
+import {
+  buildGraphResult,
+  decodeGraphCursor,
+  encodeGraphCursor,
+  fingerprintGraphRequest,
+  toGraphError,
+  validateGraphRequest,
+  type GraphData,
+  type GraphError,
+  type GraphProbeItem,
+  type GraphResult,
+  type GraphSchemaResult,
+  type GraphStatus,
+  type JsonValue,
+} from './graph-contract.js';
+import {
+  DEFAULT_GRAPH_ONTOLOGY_CACHE_PATH,
+  ontologyCacheFresh,
+  readOntologyCacheFile,
+  writeOntologyCacheFileAtomic,
+  type OntologyCachePayload,
+} from './graph-schema-cache.js';
+import { textResult } from './tool-output.js';
+import { wrapUntrustedText } from './untrusted-content.js';
+
+/** V1 language registry: native language to internal provider. No provider input. */
+const GRAPH_LANGUAGE_ADAPTERS: Readonly<Record<string, string>> = { dql: GRAPH_PROVIDER };
+
+const GRAPH_MAX_FROM = 10_000 as const;
+const GRAPH_SCHEMA_SEARCH_CAP = 100 as const;
+
+export interface GraphToolOptions {
+  env?: Record<string, string | undefined> | undefined;
+  signal?: AbortSignal | undefined;
+  timeoutMs?: number | undefined;
+  fetchFn?: ((options: DiffbotFetchOptions) => Promise<unknown>) | undefined;
+  cachePath?: string | undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function tokenFrom(env: Record<string, string | undefined>): string {
+  const raw = env.DIFFBOT_TOKEN;
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : '';
+}
+
+function queryPlaceholder(): GraphData {
+  return { kind: 'query', shape: 'object', result: null };
+}
+
+function errorEnvelope(error: GraphError, data: GraphData, language: 'dql' = 'dql'): GraphResult {
+  return buildGraphResult({ status: 'error', language, provider: GRAPH_PROVIDER, data, errors: [error], notes: [] });
+}
+
+function rowCount(result: JsonValue): number | undefined {
+  if (Array.isArray(result)) return result.length;
+  if (isRecord(result) && Array.isArray(result.data)) return result.data.length;
+  return undefined;
+}
+
+function renderQueryText(shape: string, result: JsonValue, hasMore: boolean): string {
+  const count = rowCount(result);
+  const rows = shape === 'rows' && count !== undefined ? ` (${count} row(s))` : '';
+  return `Graph query (dql, diffbot, shape ${shape})${rows}${hasMore ? ', more pages available' : ''}.`;
+}
+
+function renderProbeText(items: GraphProbeItem[]): string {
+  const ok = items.filter((item) => item.status === 'ok').length;
+  return `Graph probe (dql, diffbot): ${ok}/${items.length} countable.`;
+}
+
+function renderSchemaText(result: GraphSchemaResult, stale: boolean): string {
+  const suffix = stale ? ' (stale cache)' : '';
+  if (result.view === 'types') return `Graph schema types (dql, diffbot): ${result.types.length} type(s)${suffix}.`;
+  if (result.view === 'fields') {
+    const trunc = (result as { truncated?: boolean }).truncated === true ? `, truncated to ${GRAPH_SCHEMA_SEARCH_CAP}; narrow with view 'fields' + type name` : '';
+    return `Graph schema fields (dql, diffbot): ${result.fields.length} field(s)${suffix}${trunc}.`;
+  }
+  if (result.view === 'search') return `Graph schema search (dql, diffbot): ${result.matches.length} match(es)${suffix}.`;
+  return `Graph schema describe (dql, diffbot): ${result.name}${suffix}.`;
+}
+
+export async function callGraphTool(
+  args: Record<string, unknown>,
+  options: GraphToolOptions = {},
+): Promise<BackendCallResult> {
+  const env = options.env ?? process.env;
+  const validated = validateGraphRequest(args);
+  if (!validated.ok) {
+    const data = args !== null && typeof args === 'object' && (args as Record<string, unknown>).action === 'probe'
+      ? ({ kind: 'probe', items: [] } as GraphData)
+      : queryPlaceholder();
+    const envelope = errorEnvelope(toGraphError(validated.code, validated.message, false, GRAPH_PROVIDER), data);
+    return textResult(wrapUntrustedText(`Graph ${validated.code}: ${validated.message}`, { source: 'graph' }), {
+      action: 'graph', language: 'dql', graph: envelope,
+    });
+  }
+  const input = validated.input;
+  if (GRAPH_LANGUAGE_ADAPTERS[input.language] !== GRAPH_PROVIDER || !GRAPH_LANGUAGES.includes(input.language)) {
+    const envelope = errorEnvelope(toGraphError('unsupported_option', `No configured adapter for language '${input.language}'.`, false, GRAPH_PROVIDER), queryPlaceholder());
+    return textResult(wrapUntrustedText('Graph unsupported_option: no configured adapter.', { source: 'graph' }), {
+      action: 'graph', language: input.language, graph: envelope,
+    });
+  }
+  const ctx = {
+    token: tokenFrom(env),
+    ...(options.fetchFn !== undefined ? { fetchFn: options.fetchFn } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+  };
+
+  if (input.action === 'query') {
+    return graphQuery(input.query, input.pageSize, input.cursor, ctx);
+  }
+  if (input.action === 'probe') {
+    return graphProbe(input.queries, ctx);
+  }
+  return graphSchema(input.view, input.name, input.query, input.includeDeprecated, ctx, options.cachePath ?? DEFAULT_GRAPH_ONTOLOGY_CACHE_PATH);
+}
+
+interface GraphQueryCtx {
+  token: string;
+  fetchFn?: (options: DiffbotFetchOptions) => Promise<unknown>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+async function graphQuery(
+  query: string, pageSize: number, cursor: string | undefined, ctx: GraphQueryCtx,
+): Promise<BackendCallResult> {
+  const fingerprint = fingerprintGraphRequest({ action: 'query', language: 'dql', query, pageSize });
+  let from = 0;
+  if (cursor !== undefined) {
+    let decoded;
+    try {
+      decoded = decodeGraphCursor(cursor);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid cursor.';
+      const envelope = errorEnvelope(toGraphError('cursor_invalid', message, false, GRAPH_PROVIDER), queryPlaceholder());
+      return textResult(wrapUntrustedText(`Graph cursor_invalid: ${message}`, { source: 'graph' }), {
+        action: 'query', language: 'dql', graph: envelope,
+      });
+    }
+    const stateFrom = decoded.state.from;
+    const bindingsOk = decoded.provider === GRAPH_PROVIDER
+      && decoded.action === 'query'
+      && decoded.language === 'dql'
+      && decoded.adapterCursorV === GRAPH_ADAPTER_V
+      && decoded.pageSize === pageSize
+      && decoded.fingerprint === fingerprint
+      && typeof stateFrom === 'number'
+      && Number.isInteger(stateFrom)
+      && stateFrom >= 0
+      && stateFrom <= GRAPH_MAX_FROM;
+    if (!bindingsOk) {
+      const envelope = errorEnvelope(toGraphError('cursor_invalid', 'Cursor does not match this query, page size, or provider request.', false, GRAPH_PROVIDER), queryPlaceholder());
+      return textResult(wrapUntrustedText('Graph cursor_invalid: cursor does not match this request.', { source: 'graph' }), {
+        action: 'query', language: 'dql', graph: envelope,
+      });
+    }
+    from = stateFrom as number;
+  }
+  const outcome = await queryDiffbotGraph({ query, pageSize, from }, ctx);
+  if (outcome.error) {
+    const envelope = errorEnvelope(outcome.error, queryPlaceholder());
+    return textResult(wrapUntrustedText(`Graph ${outcome.error.code}: ${outcome.error.message}`, { source: 'graph' }), {
+      action: 'query', language: 'dql', graph: envelope,
+    });
+  }
+  const data: GraphData = { kind: 'query', shape: outcome.shape!, result: outcome.result! };
+  const hasMore = outcome.pagination?.hasMore ?? false;
+  const nextFrom = outcome.pagination?.nextFrom;
+  // Depth guard: a cursor past GRAPH_MAX_FROM would be rejected on redisplay,
+  // so never emit it — report the page as terminal with a note instead.
+  const canContinue = hasMore && nextFrom !== undefined && nextFrom <= GRAPH_MAX_FROM;
+  const pagination = canContinue
+    ? {
+      hasMore: true,
+      nextCursor: encodeGraphCursor({
+        provider: GRAPH_PROVIDER, fingerprint, adapterCursorV: GRAPH_ADAPTER_V,
+        action: 'query', language: 'dql', pageSize, state: { from: nextFrom },
+      }),
+    }
+    : { hasMore: false };
+  const notes = hasMore && !canContinue ? ['Pagination depth limit reached.'] : [];
+  const count = rowCount(outcome.result!);
+  const status: GraphStatus = data.shape === 'rows' && count === 0 ? 'empty' : 'ok';
+  const envelope = buildGraphResult({ status, language: 'dql', provider: GRAPH_PROVIDER, data, pagination, errors: [], notes });
+  return textResult(wrapUntrustedText(renderQueryText(data.shape, outcome.result!, canContinue), { source: 'graph' }), {
+    action: 'query', language: 'dql', graph: envelope,
+  });
+}
+
+async function graphProbe(queries: string[], ctx: GraphQueryCtx): Promise<BackendCallResult> {
+  const outcome = await probeDiffbotGraph({ queries }, ctx);
+  const items: GraphProbeItem[] = outcome.items.map((item) =>
+    item.status === 'ok' ? { query: item.query, status: 'ok' as const, hits: item.hits } : { query: item.query, status: 'error' as const, error: item.error },
+  );
+  const errors: GraphError[] = items.flatMap((item) => (item.status === 'error' ? [item.error] : []));
+  const status: GraphStatus = errors.length === 0 ? 'ok' : errors.length === items.length ? 'error' : 'partial';
+  const envelope = buildGraphResult({
+    status, language: 'dql', provider: GRAPH_PROVIDER,
+    data: { kind: 'probe', items }, errors, notes: [],
+  });
+  return textResult(wrapUntrustedText(renderProbeText(items), { source: 'graph' }), {
+    action: 'probe', language: 'dql', graph: envelope,
+  });
+}
+
+function emptySchemaData(view: string, name?: string, query?: string): GraphData {
+  if (view === 'fields') return { kind: 'schema', result: { view: 'fields', ...(name !== undefined ? { type: name } : {}), fields: [] } };
+  if (view === 'search') return { kind: 'schema', result: { view: 'search', query: query ?? '', matches: [] } };
+  if (view === 'describe') return { kind: 'schema', result: { view: 'describe', name: name ?? '', detail: null } };
+  return { kind: 'schema', result: { view: 'types', types: [] } };
+}
+
+async function graphSchema(
+  view: 'types' | 'fields' | 'search' | 'describe',
+  name: string | undefined,
+  query: string | undefined,
+  includeDeprecated: boolean | undefined,
+  ctx: GraphQueryCtx,
+  cachePath: string,
+): Promise<BackendCallResult> {
+  const cached = await readOntologyCacheFile(cachePath);
+  const now = Date.now();
+  if (cached.ok && ontologyCacheFresh(cached.payload.fetchedAt, now)) {
+    return schemaSuccess(view, name, query, includeDeprecated, cached.payload.ontology, cached.payload.fetchedAt, false);
+  }
+  const fetched = await fetchDiffbotOntology(ctx);
+  if (fetched.ontology !== undefined) {
+    const payload: OntologyCachePayload = { fetchedAt: new Date().toISOString(), ontology: fetched.ontology };
+    await writeOntologyCacheFileAtomic(cachePath, payload).catch(() => undefined);
+    return schemaSuccess(view, name, query, includeDeprecated, fetched.ontology, payload.fetchedAt, false);
+  }
+  if (cached.ok) {
+    const mapped = mapOntologyView(view, name, query, includeDeprecated, cached.payload.ontology);
+    if (!mapped.ok) {
+      const envelope = errorEnvelope(mapped.error, emptySchemaData(view, name, query));
+      return textResult(wrapUntrustedText(`Graph ${mapped.error.code}: ${mapped.error.message}`, { source: 'graph' }), {
+        action: 'schema', language: 'dql', graph: envelope,
+      });
+    }
+    const truncatedStale = mapped.result.view === 'fields' && (mapped.result as { truncated?: boolean }).truncated === true;
+    const envelope = buildGraphResult({
+      status: 'partial', language: 'dql', provider: GRAPH_PROVIDER,
+      data: { kind: 'schema', result: mapped.result, meta: { fetchedAt: cached.payload.fetchedAt, stale: true } },
+      errors: [fetched.error!],
+      notes: truncatedStale
+        ? ['Serving stale cached ontology after retrieval failure.', `Unscoped fields truncated to ${GRAPH_SCHEMA_SEARCH_CAP} entries; re-query with view 'fields' and a type name for the remaining scoped fields.`]
+        : ['Serving stale cached ontology after retrieval failure.'],
+    });
+    return textResult(wrapUntrustedText(renderSchemaText(mapped.result, true), { source: 'graph' }), {
+      action: 'schema', language: 'dql', graph: envelope,
+    });
+  }
+  const envelope = errorEnvelope(fetched.error!, emptySchemaData(view, name, query));
+  return textResult(wrapUntrustedText(`Graph ${fetched.error!.code}: ${fetched.error!.message}`, { source: 'graph' }), {
+    action: 'schema', language: 'dql', graph: envelope,
+  });
+}
+
+function schemaSuccess(
+  view: 'types' | 'fields' | 'search' | 'describe',
+  name: string | undefined,
+  query: string | undefined,
+  includeDeprecated: boolean | undefined,
+  ontology: unknown,
+  fetchedAt: string,
+  stale: boolean,
+): BackendCallResult {
+  const mapped = mapOntologyView(view, name, query, includeDeprecated, ontology);
+  if (!mapped.ok) {
+    const envelope = errorEnvelope(mapped.error, emptySchemaData(view, name, query));
+    return textResult(wrapUntrustedText(`Graph ${mapped.error.code}: ${mapped.error.message}`, { source: 'graph' }), {
+      action: 'schema', language: 'dql', graph: envelope,
+    });
+  }
+  const truncated = mapped.result.view === 'fields' && mapped.result.truncated === true;
+  const notes = truncated
+    ? [`Unscoped fields truncated to ${GRAPH_SCHEMA_SEARCH_CAP} entries; re-query with view 'fields' and a type name for the remaining scoped fields.`]
+    : [];
+  const envelope = buildGraphResult({
+    status: truncated ? 'partial' : 'ok', language: 'dql', provider: GRAPH_PROVIDER,
+    data: { kind: 'schema', result: mapped.result, meta: { fetchedAt, stale } },
+    errors: [], notes,
+  });
+  return textResult(wrapUntrustedText(renderSchemaText(mapped.result, stale), { source: 'graph' }), {
+    action: 'schema', language: 'dql', graph: envelope,
+  });
+}
+
+type OntologyViewResult = { ok: true; result: GraphSchemaResult } | { ok: false; error: GraphError };
+
+function mapOntologyView(
+  view: 'types' | 'fields' | 'search' | 'describe',
+  name: string | undefined,
+  query: string | undefined,
+  includeDeprecated: boolean | undefined,
+  ontology: unknown,
+): OntologyViewResult {
+  if (!isRecord(ontology) || !isRecord(ontology.types)) {
+    return { ok: false, error: toGraphError('contract_invalid_response', 'Cached ontology is missing typed type markers.', false, GRAPH_PROVIDER) };
+  }
+  const types = ontology.types as Record<string, unknown>;
+  const keepDeprecated = includeDeprecated === true;
+  const typeEntry = (typeName: string): Record<string, unknown> | undefined => {
+    if (isRecord(types[typeName])) return types[typeName] as Record<string, unknown>;
+    const lower = typeName.toLowerCase();
+    for (const key of Object.keys(types)) {
+      if (key.toLowerCase() === lower && isRecord(types[key])) return types[key] as Record<string, unknown>;
+    }
+    return undefined;
+  };
+  if (view === 'types') {
+    const names = Object.keys(types).filter((key) => keepDeprecated || (types[key] as Record<string, unknown>)?.isDeprecated !== true).sort();
+    return { ok: true, result: { view: 'types', types: names } };
+  }
+  if (view === 'fields') {
+    if (name !== undefined) {
+      const entry = typeEntry(name);
+      if (!entry) return { ok: false, error: toGraphError('invalid_input', `Unknown schema type: ${name}`, false, GRAPH_PROVIDER) };
+      return { ok: true, result: { view: 'fields', type: entry.name as string ?? name, fields: fieldList(entry, keepDeprecated) } };
+    }
+    // Unscoped: aggregate actual field names across entity types (qualified as
+    // Type.field); type names are not fields and must not pose as entries.
+    // Bounded by the established schema cap: stop collecting once full so a
+    // large ontology cannot force unbounded allocation. Scoped (name) views
+    // stay complete; unscoped callers page per type via view 'fields' + name.
+    const fields: Array<{ name: string; type?: string; description?: string }> = [];
+    let truncated = false;
+    for (const key of Object.keys(types).sort()) {
+      const entry = types[key] as Record<string, unknown>;
+      if (entry?.isDeprecated === true && !keepDeprecated) continue;
+      for (const field of fieldList(entry, keepDeprecated)) {
+        if (fields.length >= GRAPH_SCHEMA_SEARCH_CAP) { truncated = true; break; }
+        fields.push({ ...field, name: `${key}.${field.name}` });
+      }
+      if (truncated) break;
+    }
+    return { ok: true, result: { view: 'fields', fields, ...(truncated ? { truncated: true as const } : {}) } };
+  }
+  if (view === 'search') {
+    const needle = (query ?? '').toLowerCase();
+    const matches: Array<{ name: string; kind?: string; description?: string }> = [];
+    for (const key of Object.keys(types).sort()) {
+      const entry = types[key] as Record<string, unknown>;
+      if (entry?.isDeprecated === true && !keepDeprecated) continue;
+      if (key.toLowerCase().includes(needle)) matches.push({ name: key, kind: 'type' });
+      const fields = isRecord(entry?.fields) ? (entry.fields as Record<string, unknown>) : {};
+      for (const fieldName of Object.keys(fields).sort()) {
+        const field = fields[fieldName] as Record<string, unknown>;
+        if (field?.isDeprecated === true && !keepDeprecated) continue;
+        const description = typeof field?.description === 'string' ? field.description as string : '';
+        if (fieldName.toLowerCase().includes(needle) || description.toLowerCase().includes(needle)) {
+          const match: { name: string; kind?: string; description?: string } = { name: `${key}.${fieldName}`, kind: 'field' };
+          if (description) match.description = description.slice(0, 500);
+          matches.push(match);
+        }
+        if (matches.length >= GRAPH_SCHEMA_SEARCH_CAP) break;
+      }
+      if (matches.length >= GRAPH_SCHEMA_SEARCH_CAP) break;
+    }
+    return { ok: true, result: { view: 'search', query: query ?? '', matches: matches.slice(0, GRAPH_SCHEMA_SEARCH_CAP) } };
+  }
+  const entry = typeEntry(name!);
+  if (entry) return { ok: true, result: { view: 'describe', name: (entry.name as string) ?? name!, detail: entry as unknown as JsonValue } };
+  for (const key of Object.keys(types)) {
+    const fields = (types[key] as Record<string, unknown>)?.fields;
+    if (isRecord(fields) && isRecord(fields[name!])) {
+      return { ok: true, result: { view: 'describe', name: name!, detail: { type: key, field: fields[name!] } as unknown as JsonValue } };
+    }
+  }
+  return { ok: false, error: toGraphError('invalid_input', `Unknown schema name: ${name}`, false, GRAPH_PROVIDER) };
+}
+
+function fieldList(entry: Record<string, unknown>, keepDeprecated: boolean): Array<{ name: string; type?: string; description?: string }> {
+  const fields = isRecord(entry.fields) ? (entry.fields as Record<string, unknown>) : {};
+  const out: Array<{ name: string; type?: string; description?: string }> = [];
+  for (const key of Object.keys(fields).sort()) {
+    const field = fields[key] as Record<string, unknown>;
+    if (!isRecord(field)) continue;
+    if (field.isDeprecated === true && !keepDeprecated) continue;
+    const item: { name: string; type?: string; description?: string } = { name: key };
+    if (typeof field.type === 'string') item.type = (field.type as string).slice(0, 128);
+    if (typeof field.description === 'string' && (field.description as string).length > 0) {
+      item.description = (field.description as string).slice(0, 500);
+    }
+    out.push(item);
+  }
+  return out;
+}

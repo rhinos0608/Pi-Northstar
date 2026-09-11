@@ -41,6 +41,7 @@ import {
   runKgFanout,
   selectAutoProviders,
 } from './knowledge-domain.js';
+import { callGraphTool } from './graph-tools.js';
 import { guardResult, northstarTextResult, textResult } from './tool-output.js';
 import { wrapUntrustedText } from './untrusted-content.js';
 import { searchResearchPage } from './research-sources.js';
@@ -59,7 +60,7 @@ import {
   type WebToolOptions,
 } from './web.js';
 
-type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'github' | 'kg';
+type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'github' | 'kg' | 'graph';
 
 interface NativeToolOptions extends WebToolOptions {}
 
@@ -107,6 +108,8 @@ async function dispatchNativeTool(
       return github(args, options);
     case 'kg':
       return kg(args, options);
+    case 'graph':
+      return callGraphTool(args, { env: options.env, signal: options.signal });
     default:
       throw new Error(`Unsupported native tool: ${name}`);
   }

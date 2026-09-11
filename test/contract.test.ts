@@ -8,6 +8,7 @@ const ALWAYS_AVAILABLE_TOOL_NAMES = [
   'social',
   'media',
   'kg',
+  'graph',
 ] as const;
 
 const CONFIGURED_TOOL_NAMES = [

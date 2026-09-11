@@ -19,6 +19,7 @@ export const EXTERNAL_TOOL_NAMES = [
   'media',
   'browser',
   'kg',
+  'graph',
 ] as const;
 
 export type ExternalToolName = (typeof EXTERNAL_TOOL_NAMES)[number];

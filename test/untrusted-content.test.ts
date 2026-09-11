@@ -9,10 +9,11 @@ import {
 } from '../src/untrusted-content.js';
 
 test('external tool set matches the registered external-content tools', () => {
-  assert.deepEqual([...EXTERNAL_TOOL_NAMES].sort(), ['browser', 'fetch', 'github', 'kg', 'media', 'social', 'web_search']);
+  assert.deepEqual([...EXTERNAL_TOOL_NAMES].sort(), ['browser', 'fetch', 'github', 'graph', 'kg', 'media', 'social', 'web_search']);
   assert.ok(isExternalToolName('web_search'));
   assert.ok(isExternalToolName('browser'));
   assert.ok(isExternalToolName('kg'));
+  assert.ok(isExternalToolName('graph'));
   assert.ok(!isExternalToolName('read'));
   assert.ok(!isExternalToolName('bash'));
   assert.ok(!isExternalToolName('desktop'));

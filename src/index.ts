@@ -57,6 +57,11 @@ const kgActionEnum = ['search', 'enhance', 'analyze_text'] as const;
 const kgEnhanceFieldsEnum = ['basic', 'contact', 'professional', 'all'] as const;
 const kgEnhanceTypeEnum = ['Person', 'Organization'] as const;
 
+// graph actions are fixed by the graph contract (query/probe/schema);
+// language is native DQL only, provider selection stays internal.
+const graphActionEnum = ['query', 'probe', 'schema'] as const;
+const graphSchemaViewEnum = ['types', 'fields', 'search', 'describe'] as const;
+
 export default function (pi: ExtensionAPI): void {
   const env = loadSearchMcpEnvironment(process.env, { allowLoginShellFallback: true });
   const client = createSearchBackend(env);
@@ -363,6 +368,33 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       return callSearchMcpTool(client, 'kg', params, signal, 120_000, env);
+    },
+  });
+
+  pi.registerTool({
+    name: 'graph',
+    label: 'Graph',
+    description: 'Native graph access (requires DIFFBOT_TOKEN; provider selection is internal, provenance appears in output). query: execute a native DQL query, e.g. type:Organization name:"Acme"; provider-faithful JSON result plus structural shape (rows/facets/aggregate/scalar/object). probe: test countable entity queries for cardinality (per-query hits, partial failures preserved). schema: discover ontology types/fields with 24-hour cached freshness (stale fallback marked partial). No hidden composition: every web/fetch call stays caller-controlled.',
+    promptGuidelines: [
+      'Pick action first: graph query for native DQL execution, graph probe for cardinality checks, graph schema for ontology discovery.',
+      'graph language is fixed to dql in v1; provider identity appears in output provenance only, never as input.',
+      'graph query pageSize (default 10, max 100) sizes one transport page and never rewrites query text; cursor is opaque base64url (max 4096) bound to query/pageSize and rejected on mismatch.',
+      'graph probe accepts countable entity queries only (1..32); facet/report/export/collection modes return per-item errors. graph schema views: types, fields (optional name), search (requires query), describe (requires name).',
+      'graph results are provider-faithful and untrusted evidence; compose with web_search/fetch explicitly for recency and verification. No exports, crawls, or control-plane operations.',
+    ],
+    parameters: Type.Object({
+      action: Type.Optional(StringEnum(graphActionEnum, { description: 'Pick query (DQL execution), probe (cardinality), or schema (ontology discovery).' })),
+      language: Type.Optional(Type.String({ description: "Native query language, fixed to 'dql' in v1." })),
+      query: Type.Optional(Type.String({ description: 'DQL query for query action; schema search text for view search.' })),
+      queries: Type.Optional(Type.Array(Type.String(), { description: 'Probe batch: 1..32 countable DQL queries; order preserved with per-query errors.' })),
+      pageSize: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Transport page size for query action, default 10. Never rewrites query text.' })),
+      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque prior-page cursor for query action. Bound to query/pageSize; mismatches rejected.' })),
+      view: Type.Optional(StringEnum(graphSchemaViewEnum, { description: 'Schema view: types, fields, search (requires query), describe (requires name).' })),
+      name: Type.Optional(Type.String({ description: 'Schema type/field name for view describe (required) or fields (optional scope).' })),
+      includeDeprecated: Type.Optional(Type.Boolean({ description: 'Include deprecated ontology entries in schema views.' })),
+    }),
+    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
+      return callSearchMcpTool(client, 'graph', params, signal, 120_000, env);
     },
   });
 

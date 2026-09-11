@@ -138,7 +138,7 @@ test('diffbot descriptor is additive with legacy singular channel intact', () =>
   const desc = findProvider('diffbot');
   assert.ok(desc, 'diffbot descriptor must exist');
   assert.equal(desc.channel, 'diffbot');
-  assert.deepEqual([...providerChannels(desc)], ['diffbot', 'web', 'research']);
+  assert.deepEqual([...providerChannels(desc)], ['diffbot', 'web', 'research', 'graph']);
   assert.equal(providerChannels(desc)[0], desc.channel, 'legacy singular channel stays first');
   assert.equal(desc.family, 'research');
   assert.deepEqual([...desc.envKeys], ['DIFFBOT_TOKEN']);

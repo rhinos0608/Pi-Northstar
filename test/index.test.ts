@@ -853,3 +853,47 @@ test('buildSearchRoute default mode keeps 120s timeout and no mode arg', () => {
   assert.equal(route.timeout, 120_000);
   assert.ok(!('mode' in route.args));
 });
+
+// ── graph tool registration (native DQL, provider-faithful, no hidden composition) ──
+
+test('graph tool registered with action-discriminated schema and no excluded surfaces', async () => {
+  const defs = await captureAllTools();
+  assert.ok(defs.graph, 'graph tool must be registered');
+  const props = defs.graph.parameters.properties as Record<string, unknown>;
+  assert.deepEqual([...((props.action as { enum?: string[] }).enum ?? [])].sort(), ['probe', 'query', 'schema']);
+  for (const key of ['action', 'language', 'query', 'queries', 'pageSize', 'cursor', 'view', 'name', 'includeDeprecated']) {
+    assert.ok(key in props, `graph schema must expose field ${key}`);
+  }
+  for (const forbidden of ['provider', 'providers', 'workers', 'refresh', 'format', 'export', 'crawl', 'threshold', 'filter']) {
+    assert.ok(!(forbidden in props), `graph schema must not expose ${forbidden}`);
+  }
+});
+
+test('graph description states native language, provenance, probe countability, and no hidden composition', async () => {
+  const defs = await captureAllTools();
+  const description = defs.graph?.description ?? '';
+  assert.ok(/dql/i.test(description), 'graph description must name DQL');
+  assert.ok(/provider/i.test(description), 'graph description must mention provider provenance');
+  assert.ok(/probe/i.test(description), 'graph description must mention probe');
+  assert.ok(/schema/i.test(description), 'graph description must mention schema');
+});
+
+test('graph registration leaves kg, web_search, and fetch schemas unchanged', async () => {
+  const defs = await captureAllTools();
+  assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), ['action', 'confidenceThreshold', 'cursor', 'description', 'email', 'employer', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'fields', 'id', 'includeEvidence', 'includeRelationships', 'language', 'limit', 'location', 'maxEntities', 'maxProviders', 'name', 'phone', 'providers', 'query', 'school', 'text', 'title', 'type', 'url']);
+  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'knowledge', 'limit', 'mode', 'query', 'source', 'yearFrom']);
+  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['followLinks', 'maxChars', 'maxPages', 'query', 'searchQuery', 'siteMap', 'topK', 'url']);
+  const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
+  assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
+  assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');
+});
+
+test('tool_result hook fences graph output as external evidence', async () => {
+  const handlers = await captureHooks();
+  const result = handlers.tool_result!({
+    toolName: 'graph',
+    content: [{ type: 'text', text: 'graph data' }],
+    isError: false,
+  }) as { content: Array<{ text: string }> } | undefined;
+  assert.ok(result && result.content[0]!.text.includes('<<<EXTERNAL_EVIDENCE_'), 'graph must be fenced');
+});

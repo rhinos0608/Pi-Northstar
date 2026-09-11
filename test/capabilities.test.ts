@@ -473,3 +473,39 @@ test('diffbot registration leaves legacy channels untouched', () => {
     assert.ok(names.has(legacy), `missing legacy channel ${legacy}`);
   }
 });
+
+// ── Diffbot graph channel (additive; kg/web/research channels untouched) ──
+
+test('diffbot-graph channel advertises native graph actions with DIFFBOT_TOKEN backends', async () => {
+  const { channelCapability, backendCapability } = await import('../src/capabilities.js');
+  const channel = channelCapability('diffbot-graph');
+  assert.ok(channel, 'diffbot-graph channel must exist');
+  assert.equal(channel.family, 'research');
+  assert.equal(channel.publicTool, 'graph');
+  assert.equal(channel.availability, 'available');
+  assert.deepEqual(channel.actions.map((action) => action.action).sort(), ['probe', 'query', 'schema']);
+  for (const action of channel.actions) {
+    assert.equal(action.readOnly, true);
+    assert.ok(!('aliases' in action));
+  }
+  assert.deepEqual(channel.backends.map((backend) => backend.id).sort(), [
+    'diffbot-graph-probe',
+    'diffbot-graph-query',
+    'diffbot-graph-schema',
+  ]);
+  for (const backend of channel.backends) {
+    assert.equal(backend.mode, 'native');
+    assert.equal(backend.auth?.required, true);
+    assert.deepEqual([...(backend.auth?.anyOf ?? [])], ['DIFFBOT_TOKEN']);
+  }
+  assert.deepEqual([...(backendCapability('diffbot-graph', 'diffbot-graph-query')?.actions ?? [])], ['query']);
+  assert.deepEqual([...(backendCapability('diffbot-graph', 'diffbot-graph-probe')?.actions ?? [])], ['probe']);
+  assert.deepEqual([...(backendCapability('diffbot-graph', 'diffbot-graph-schema')?.actions ?? [])], ['schema']);
+});
+
+test('graph registration leaves kg and web_search participation untouched', async () => {
+  const { channelCapability, backendCapability } = await import('../src/capabilities.js');
+  assert.equal(channelCapability('diffbot')?.publicTool, 'kg');
+  assert.deepEqual(channelCapability('diffbot')?.actions.map((action) => action.action).sort(), ['analyze_text', 'enhance', 'search']);
+  assert.deepEqual([...(backendCapability('diffbot', 'diffbot-web-search')?.actions ?? [])], ['search']);
+});

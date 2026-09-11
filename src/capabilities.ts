@@ -14,7 +14,7 @@ import { SOCIAL_CANONICAL_ACTIONS as STAGE2_CANONICAL_ACTIONS } from './social-c
 
 export type ReachFamily = 'social' | 'media' | 'web' | 'dev' | 'research' | 'browser';
 
-export type PublicToolName = 'web_search' | 'github' | 'social' | 'media' | 'browser' | 'kg';
+export type PublicToolName = 'web_search' | 'github' | 'social' | 'media' | 'browser' | 'kg' | 'graph';
 
 export interface ActionCapability {
   action: string;
@@ -604,7 +604,49 @@ export const CHANNEL_CAPABILITIES: readonly ChannelCapability[] = [
       loginFlow: 'env_var',
       risk: 'low',
       consumesCookie: false,
-      setup: 'Set DIFFBOT_TOKEN to enable Diffbot knowledge search, enhance, text analysis, and web-search participation',
+      setup: 'Set DIFFBOT_TOKEN to enable Diffbot knowledge search, enhance, text analysis, web-search participation, and graph operations',
+    },
+  },
+  {
+    id: 'diffbot-graph',
+    family: 'research',
+    publicTool: 'graph',
+    availability: 'available',
+    description: 'Diffbot native graph access: DQL query execution, cardinality probes, and ontology schema discovery',
+    tier: 1,
+    domains: [],
+    actions: [act('query'), act('probe'), act('schema')],
+    backends: [
+      {
+        id: 'diffbot-graph-query',
+        mode: 'native',
+        quality: 'full',
+        actions: ['query'],
+        auth: { required: true, anyOf: ['DIFFBOT_TOKEN'] },
+      },
+      {
+        id: 'diffbot-graph-probe',
+        mode: 'native',
+        quality: 'full',
+        actions: ['probe'],
+        auth: { required: true, anyOf: ['DIFFBOT_TOKEN'] },
+      },
+      {
+        id: 'diffbot-graph-schema',
+        mode: 'native',
+        quality: 'full',
+        actions: ['schema'],
+        auth: { required: true, anyOf: ['DIFFBOT_TOKEN'] },
+      },
+    ],
+    provider: {
+      provider: 'diffbot',
+      envKeys: ['DIFFBOT_TOKEN'],
+      cookieDomains: [],
+      loginFlow: 'env_var',
+      risk: 'low',
+      consumesCookie: false,
+      setup: 'Set DIFFBOT_TOKEN to enable Diffbot knowledge search, enhance, text analysis, web-search participation, and graph operations',
     },
   },
   {

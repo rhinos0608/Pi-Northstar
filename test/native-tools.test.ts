@@ -1687,3 +1687,10 @@ test('kg search terminal page at exact bound reports hasMore false with no curso
     earlyRestore();
   }
 });
+
+test('callNativeTool graph delegates without token and reports auth_required', async () => {
+  const result = await callNativeTool('graph', { action: 'query', language: 'dql', query: 'type:Organization' }, { env: {} });
+  const details = result.details as { graph?: { status?: string; errors?: Array<{ code?: string }> } };
+  assert.equal(details.graph?.status, 'error');
+  assert.equal(details.graph?.errors?.[0]?.code, 'auth_required');
+});
