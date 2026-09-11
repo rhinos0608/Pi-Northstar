@@ -325,7 +325,6 @@ Setting `FIRECRAWL_API_KEY` / `JINA_API_KEY` sends queries and admitted public U
 - Research (`category: "research"`) never touches generic web providers or external fetch vendors, and external fetch never runs inside the research path.
 
 ```bash
-export PI_SEARCH_BROWSER_BACKEND="cdp"                     # Deprecated: CDP fallback (no reliability checks)
 export PI_SEARCH_BROWSER_ALLOW_SENSITIVE="1"              # Enable evaluate/set_cookies
 export PI_SEARCH_DESKTOP_AUTOMATION="1"                   # Enable desktop tool
 ```
@@ -369,7 +368,7 @@ export PI_SEARCH_MAX_TOOL_OUTPUT_CHARS="60000"   # Truncation limit
 export PI_SEARCH_STATE_DIR="$HOME/.pi-northstar"     # State directory
 export PI_SEARCH_COOKIE_BROWSER="chrome"         # chrome, brave, or edge
 export PI_SEARCH_COOKIE_STALE_MS="43200000"      # Cookie re-import window (12h)
-export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"  # CDP fallback endpoint
+export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"  # Cookie import via local CDP (explicit import_cookies only)
 ```
 
 ## Embedding & semantic search
@@ -605,13 +604,7 @@ browser({ action: "evaluate", expression: "document.title" })
 
 ### Backend selection
 
-agent-browser is the default and recommended backend. **CDP is deprecated** — it lacks reliability checks, snapshot refs, and session management. Only use it for legacy integrations that cannot install agent-browser.
-
-```bash
-# Deprecated — use agent-browser instead
-export PI_SEARCH_BROWSER_BACKEND="cdp"
-export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"
-```
+agent-browser is the browser backend. It provides reliability checks, snapshot refs, and session management.
 
 ### Security
 

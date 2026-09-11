@@ -49,8 +49,6 @@ async function captureRegistration(overrides: Record<string, string> = {}): Prom
     PI_SEARCH_BOOTSTRAP: 'off',
     PI_SEARCH_DESKTOP_AUTOMATION: '',
     PI_SEARCH_BROWSER_AUTOMATION: '',
-    PI_SEARCH_BROWSER_BACKEND: 'cdp',
-    BROWSER_CDP_ENDPOINT: '',
     BROWSER_EXECUTABLE_PATH: '',
     ...overrides,
   };
@@ -82,7 +80,9 @@ function assertToolContract(tools: string[], expected: readonly string[]): void 
 }
 
 test('extension hides browser and desktop without configuration', async () => {
-  const { tools, commands } = await captureRegistration();
+  const { tools, commands } = await captureRegistration({
+    BROWSER_EXECUTABLE_PATH: '/definitely/not/here/agent-browser',
+  });
   assertToolContract(tools, ALWAYS_AVAILABLE_TOOL_NAMES);
   assert.deepEqual([...commands].sort(), [...EXPECTED_COMMAND_NAMES].sort());
 });
@@ -90,7 +90,6 @@ test('extension hides browser and desktop without configuration', async () => {
 test('extension registers browser and desktop when configured', async () => {
   const { tools, commands } = await captureRegistration({
     PI_SEARCH_DESKTOP_AUTOMATION: '1',
-    BROWSER_CDP_ENDPOINT: 'http://127.0.0.1:9222',
   });
   assertToolContract(tools, CONFIGURED_TOOL_NAMES);
   assert.deepEqual([...commands].sort(), [...EXPECTED_COMMAND_NAMES].sort());

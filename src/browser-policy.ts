@@ -255,54 +255,6 @@ export function validateWaitMs(value: unknown): number {
   return value;
 }
 
-// ── Legacy endpoint validator (kept for rollback path) ──
-
-export interface LoopbackEndpointInfo {
-  host: string;
-  port: number;
-  protocol: 'ws' | 'http';
-  path: string;
-}
-
-export function validateLegacyLoopbackEndpoint(endpoint: string): LoopbackEndpointInfo {
-  const rawPort = /^[a-zA-Z]+:\/\/(?:\[[^\]]+\]|[^/:]+):(\d+)/.exec(endpoint)?.[1];
-  if (rawPort) {
-    const parsedPort = Number(rawPort);
-    if (!Number.isFinite(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
-      throw new Error(`CDP endpoint port must be 1024-65535, got ${rawPort}`);
-    }
-  }
-
-  let url: URL;
-  try {
-    url = new URL(endpoint);
-  } catch {
-    throw new Error(`Invalid CDP endpoint URL: ${endpoint}`);
-  }
-
-  if (url.protocol !== 'ws:' && url.protocol !== 'http:') {
-    throw new Error(`CDP endpoint must use ws:// or http:// scheme, got ${url.protocol}`);
-  }
-
-  const host = url.hostname.toLowerCase();
-  const normalized = host === '[::1]' ? '::1' : host;
-  if (normalized !== 'localhost' && normalized !== '127.0.0.1' && normalized !== '::1') {
-    throw new Error(`CDP endpoint must be loopback (localhost, 127.0.0.1, or [::1]), got ${url.hostname}`);
-  }
-
-  const port = rawPort ? Number(rawPort) : (url.port ? Number(url.port) : 9222);
-  if (!Number.isFinite(port) || port < 1024 || port > 65535) {
-    throw new Error(`CDP endpoint port must be 1024-65535, got ${url.port || port}`);
-  }
-
-  return {
-    host: normalized,
-    port,
-    protocol: url.protocol === 'http:' ? 'http' : 'ws',
-    path: `${url.pathname}${url.search}`,
-  };
-}
-
 // ── Semantic action types (Component 9) ──
 
 export type SemanticLocator = 'role' | 'text' | 'label' | 'placeholder' | 'alt' | 'title' | 'testid' | 'first' | 'last' | 'nth';

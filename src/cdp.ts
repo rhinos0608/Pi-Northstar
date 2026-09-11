@@ -5,7 +5,6 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { findProvider } from './providers.js';
-import { validatePublicHttpUrl } from './http.js';
 
 // ── Types ──
 
@@ -561,206 +560,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ── CdpSession ──
+// ── Cookie helpers ──
 
-export interface CdpEvent {
-  method: string
-  params: Record<string, unknown>
-}
-
-export class CdpSession {
-  pageSessionId?: string
-  targetId?: string
-  private ws: WebSocket
-  private nextId: number
-  private pending: Map<number, { resolve: (msg: CdpCommandResult) => void; reject: (err: Error) => void }>
-  private listeners: Map<string, Set<(params: Record<string, unknown>) => void>>
-  private _closed = false
-  private _ready: Promise<void>
-
-  constructor(wsEndpoint: string, signal?: AbortSignal) {
-    requireWebSocket()
-    this.nextId = Math.floor(Math.random() * 1_000_000)
-    this.pending = new Map()
-    this.listeners = new Map()
-
-    this.ws = new WebSocket(wsEndpoint)
-
-    this._ready = new Promise<void>((resolve, reject) => {
-      this.ws.onopen = () => resolve()
-      this.ws.onerror = () => reject(new Error('WebSocket connection failed'))
-    })
-
-    if (signal) {
-      signal.addEventListener('abort', () => this.close(), { once: true })
-    }
-
-    this.ws.onmessage = (event: MessageEvent) => {
-      if (this._closed) return
-      try {
-        const msg = JSON.parse(event.data as string) as CdpCommandResult & { method?: string; params?: Record<string, unknown> }
-        if (typeof msg.id === 'number') {
-          const entry = this.pending.get(msg.id)
-          if (entry) {
-            this.pending.delete(msg.id)
-            entry.resolve(msg)
-          }
-        } else if (msg.method && msg.params) {
-          const handlers = this.listeners.get(msg.method)
-          if (handlers) {
-            for (const handler of handlers) {
-              try { handler(msg.params) } catch { /* handler error */ }
-            }
-          }
-        }
-      } catch { /* malformed message */ }
-    }
-
-    this.ws.onclose = () => {
-      this._closed = true
-      const error = new Error('WebSocket closed')
-      for (const [, entry] of this.pending) {
-        entry.reject(error)
-      }
-      this.pending.clear()
-      this.listeners.clear()
-    }
-  }
-
-  async ready(): Promise<void> {
-    await this._ready
-  }
-
-  async send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<CdpCommandResult> {
-    if (this._closed) throw new Error('WebSocket closed')
-    const id = this.nextId++
-    const payload: Record<string, unknown> = { id, method, params: params ?? {} }
-    if (sessionId) payload.sessionId = sessionId
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-      this.ws.send(JSON.stringify(payload))
-    })
-  }
-
-  close(): void {
-    if (this._closed) return
-    this._closed = true
-    const error = new Error('Session closed')
-    for (const [, entry] of this.pending) {
-      entry.reject(error)
-    }
-    this.pending.clear()
-    this.listeners.clear()
-    this.ws.onmessage = null
-    this.ws.onclose = null
-    this.ws.onerror = null
-    this.ws.close()
-  }
-
-  addEventListener(method: string, handler: (params: Record<string, unknown>) => void): () => void {
-    if (!this.listeners.has(method)) {
-      this.listeners.set(method, new Set())
-    }
-    const handlers = this.listeners.get(method)!
-    handlers.add(handler)
-    return () => {
-      handlers.delete(handler)
-      if (handlers.size === 0) {
-        this.listeners.delete(method)
-      }
-    }
-  }
-}
-
-// ── Session Management ──
-
-export async function openCdpSession(endpoint: string, signal?: AbortSignal): Promise<CdpSession> {
-  requireWebSocket()
-  const validated = validateCdpEndpoint(endpoint)
-  const wsEndpoint = await resolveCdpEndpoint(validated)
-  const session = new CdpSession(wsEndpoint, signal)
-  try {
-    await session.ready()
-
-    if (wsEndpoint.includes('/devtools/browser/')) {
-      const target = await session.send('Target.createTarget', { url: 'about:blank' })
-      const targetId = typeof target.result?.targetId === 'string' ? target.result.targetId : undefined
-      if (!targetId) throw new Error('CDP did not return a target id.')
-      session.targetId = targetId
-      const attached = await session.send('Target.attachToTarget', { targetId, flatten: true })
-      const pageSessionId = typeof attached.result?.sessionId === 'string' ? attached.result.sessionId : undefined
-      if (!pageSessionId) throw new Error('CDP did not return a session id.')
-      session.pageSessionId = pageSessionId
-    }
-
-    return session
-  } catch (err) {
-    session.close()
-    throw err
-  }
-}
-
-// ── High-Level CDP Primitives ──
-
-export async function cdpListTargets(session: CdpSession): Promise<unknown[]> {
-  const result = await session.send('Target.getTargets')
-  return (result.result?.targetInfos as unknown[]) ?? []
-}
-
-export async function cdpNavigate(session: CdpSession, url: string): Promise<unknown> {
-  const validated = validatePublicHttpUrl(url)
-  const result = await session.send('Page.navigate', { url: validated }, session.pageSessionId)
-  return result.result
-}
-
-export async function cdpEvaluate(session: CdpSession, expression: string): Promise<unknown> {
-  const cdpRaw = await session.send('Runtime.evaluate', { expression }, session.pageSessionId)
-  const cdpResult = cdpRaw.result as Record<string, unknown> | undefined
-  if (cdpResult?.exceptionDetails) {
-    throw new Error(`Evaluation error: ${JSON.stringify(cdpResult.exceptionDetails)}`)
-  }
-  return (cdpResult?.result as Record<string, unknown>)?.value
-}
-
-export async function cdpGetText(session: CdpSession): Promise<string> {
-  const result = await cdpEvaluate(session, 'document.body.innerText')
-  return typeof result === 'string' ? result : String(result ?? '')
-}
-
-export async function cdpGetHtml(session: CdpSession): Promise<string> {
-  const result = await cdpEvaluate(session, 'document.documentElement.outerHTML')
-  return typeof result === 'string' ? result : String(result ?? '')
-}
-
-export async function cdpScreenshot(session: CdpSession): Promise<string> {
-  const result = await session.send('Page.captureScreenshot', { format: 'png', fromSurface: true }, session.pageSessionId)
-  if (result.error) throw new Error(`CDP error: ${result.error.message}`)
-  return (result.result?.data as string) ?? ''
-}
-
-export async function cdpClick(session: CdpSession, selector: string): Promise<unknown> {
-  return cdpEvaluate(session, `document.querySelector(${JSON.stringify(selector)})?.click()`)
-}
-
-export async function cdpType(session: CdpSession, selector: string, text: string): Promise<unknown> {
-  return cdpEvaluate(session, `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return; const proto = Object.getPrototypeOf(el); const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set; if (setter) { setter.call(el, ${JSON.stringify(text)}); } else { el.value = ${JSON.stringify(text)}; } el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`)
-}
-
-export async function cdpScroll(session: CdpSession, x: number, y: number): Promise<unknown> {
-  return cdpEvaluate(session, `window.scrollBy(${x}, ${y})`)
-}
-
-export async function cdpCloseTarget(session: CdpSession): Promise<unknown> {
-  if (session.targetId) {
-    return session.send('Target.closeTarget', { targetId: session.targetId })
-  }
-  const targets = await cdpListTargets(session)
-  const target = (targets as Array<Record<string, unknown>>).find((t) => typeof t.targetId === 'string')
-  if (target?.targetId) {
-    return session.send('Target.closeTarget', { targetId: target.targetId })
-  }
-  return null
-}
+// High-level CDP browser automation removed; agent-browser owns public automation.
+// Cookie import/login below keeps raw CDP access via connectAndGetCookies.
 
 function sanitizeCookieError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error)
@@ -769,25 +572,6 @@ function sanitizeCookieError(error: unknown): Error {
     .replace(/Bearer\s+\S+/gi, 'Bearer ***')
     .slice(0, 2000)
   return new Error(sanitized)
-}
-
-export async function cdpGetCookiesRaw(session: CdpSession, urls?: string[]): Promise<unknown[]> {
-  try {
-    const params = urls ? { urls } : {}
-    const result = await session.send('Network.getCookies', params, session.pageSessionId)
-    return (result.result?.cookies as unknown[]) ?? []
-  } catch (error) {
-    throw sanitizeCookieError(error)
-  }
-}
-
-export async function cdpSetCookies(session: CdpSession, cookies: unknown[]): Promise<unknown> {
-  try {
-    const result = await session.send('Network.setCookies', { cookies }, session.pageSessionId)
-    return result.result
-  } catch (error) {
-    throw sanitizeCookieError(error)
-  }
 }
 
 // Re-export for reuse

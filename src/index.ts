@@ -371,10 +371,10 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'browser',
     label: 'Browser',
-    description: 'Live page interaction (agent-browser; CDP deprecated rollback only). Use for clicks/typing/screenshots/snapshots cookie-metadata inspection when fetch cannot render. Public mode freezes first hostname (close to switch); loopback navigate enters origin-confined debug session. Stale-ref/click/overlay/scroll checks. Batch/job cannot target loopback; evaluate/set_cookies/batch sensitive-gated; cookies metadata only, values never exposed.',
-    promptSnippet: 'Interact with live pages via agent-browser (screenshots, snapshots, cookie metadata only). Set PI_SEARCH_BROWSER_BACKEND=cdp only for deprecated CDP rollback.',
+    description: 'Live page interaction (agent-browser). Use for clicks/typing/screenshots/snapshots cookie-metadata inspection when fetch cannot render. Public mode freezes first hostname (close to switch); loopback navigate enters origin-confined debug session. Stale-ref/click/overlay/scroll checks. Batch/job cannot target loopback; evaluate/set_cookies/batch sensitive-gated; cookies metadata only, values never exposed.',
+    promptSnippet: 'Interact with live pages via agent-browser (screenshots, snapshots, cookie metadata only).',
     promptGuidelines: [
-      'Browser uses agent-browser backend by default; set PI_SEARCH_BROWSER_BACKEND=cdp for explicit loopback CDP rollback.',
+      'Browser uses the agent-browser backend.',
       'Browser respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out.',
       'Public URLs: browser rejects private/reserved IPs, localhost, metadata, credentials. Domain allowlisting freezes first hostname — unrelated second hostnames fail until session close. Use `close` then `navigate` to switch targets.',
       'Loopback mode: navigate to localhost/127.x.x.x/[::1] to enter. Browser network confined to exact origin (scheme+host+port). All other traffic blocked. Same origin reuses session. Different origin rejected — close first. Batch/job commands cannot target loopback URLs.',
@@ -384,7 +384,6 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     ],
     parameters: Type.Object({
       action: Type.Optional(StringEnum(BROWSER_ACTIONS)),
-      endpoint: Type.Optional(Type.String({ description: 'CDP WebSocket endpoint URL. Falls back to BROWSER_CDP_ENDPOINT env.' })),
       url: Type.Optional(Type.String({ description: 'URL for navigate action.' })),
       expression: Type.Optional(Type.String({ description: 'JavaScript expression for evaluate action.' })),
       selector: Type.Optional(Type.String({ description: 'CSS selector for click/type/scroll actions.' })),

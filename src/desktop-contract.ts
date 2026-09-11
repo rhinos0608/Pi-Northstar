@@ -5,7 +5,15 @@ export const UPSTREAM_TOOLS = ['health_report','list_apps','list_windows','get_w
 export type UpstreamTool = typeof UPSTREAM_TOOLS[number];
 export type DesktopErrorCode = 'DESKTOP_DISABLED'|'ACTION_DENIED'|'CONFIRMATION_REQUIRED'|'STALE_OBSERVATION'|'TARGET_MISMATCH'|'OUTCOME_UNKNOWN'|'INVALID_REQUEST'|'DRIVER_UNAVAILABLE';
 export interface DesktopRequest { action: DesktopAction; pid?: number; windowId?: string; stateId?: string; includeScreenshot?: boolean; predicate?: { text?: string; role?: string }; text?: string; key?: string; x?: number; y?: number; deltaX?: number; deltaY?: number; timeoutMs?: number; }
-export interface Observation { stateId:string; pid:number; windowId:string; generation:number; expiresAt:number; data: unknown; }
+export interface Observation { stateId:string; pid:number; windowId:string; generation:number; issuedAt:number; expiresAt:number; fingerprint:string; data: unknown; }
+export const OBSERVATION_TTL_MS = 30_000;
+export const COORDINATE_MUTATION_FRESHNESS_MS = 15_000;
+export function fingerprintData(data: unknown): string {
+  const text = (() => { try { return JSON.stringify(data) ?? String(data); } catch { return String(data); } })();
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 0x01000193); }
+  return (hash >>> 0).toString(16).padStart(8, '0') + ':' + text.length.toString(16);
+}
 export interface DesktopResult { action: DesktopAction; stateId?: string; data?: unknown; details?: unknown; capability?: Capability; }
 export interface Capability { status: 'tested'|'upstream_reported'|'degraded'|'unsupported'|'unverified'; version?: string; platform?: string; }
 export const MAX_TEXT_LENGTH=10000; export const MAX_AX_NODES=1000; export const MAX_AX_DEPTH=32; export const MAX_SCREENSHOT_BYTES=10_000_000; export const MAX_DIMENSION=10_000;
@@ -32,7 +40,8 @@ export function resourceKey(pid:number, windowId:string):string { return `deskto
 export function timeoutFor(action:DesktopAction, requested?:number):number { const max=action==='observe_window'||action==='status'||action==='list_apps'||action==='list_windows'?15000:action==='wait'?30000:10000; return Math.min(max, Math.max(1, requested??max)); }
 export class ObservationStore {
  private readonly entries=new Map<string,Observation>(); private readonly latest=new Map<string,number>(); private generation=0;
- issue(pid:number,windowId:string,data:unknown,ttlMs=120000):Observation { const now=Date.now(); const resource=resourceKey(pid,windowId); const observation=Object.freeze({stateId:crypto.randomUUID(),pid,windowId,generation:++this.generation,expiresAt:now+ttlMs,data:Object.freeze(data)}); this.latest.set(resource,observation.generation); this.entries.set(observation.stateId,observation); while(this.entries.size>128) this.entries.delete(this.entries.keys().next().value!); return observation; }
- get(stateId:string,pid:number,windowId:string):Observation { const value=this.entries.get(stateId); if(!value||value.expiresAt<=Date.now()) throw new Error('STALE_OBSERVATION: observation expired or missing'); if(value.pid!==pid||value.windowId!==windowId) throw new Error('TARGET_MISMATCH: observation target differs'); if(this.latest.get(resourceKey(pid,windowId))!==value.generation) throw new Error('STALE_OBSERVATION: newer observation exists'); return value; }
+ issue(pid:number,windowId:string,data:unknown,ttlMs=OBSERVATION_TTL_MS):Observation { const now=Date.now(); const resource=resourceKey(pid,windowId); const observation=Object.freeze({stateId:crypto.randomUUID(),pid,windowId,generation:++this.generation,issuedAt:now,expiresAt:now+ttlMs,fingerprint:fingerprintData(data),data:Object.freeze(data)}); this.latest.set(resource,observation.generation); this.entries.set(observation.stateId,observation); while(this.entries.size>128) this.entries.delete(this.entries.keys().next().value!); return observation; }
+ get(stateId:string,pid:number,windowId:string,maxAgeMs?:number):Observation { const value=this.entries.get(stateId); const now=Date.now(); if(!value||value.expiresAt<=now) throw new Error('STALE_OBSERVATION: observation expired or missing'); if(value.pid!==pid||value.windowId!==windowId) throw new Error('TARGET_MISMATCH: observation target differs'); if(this.latest.get(resourceKey(pid,windowId))!==value.generation) throw new Error('STALE_OBSERVATION: newer observation exists'); if(maxAgeMs!==undefined&&now-value.issuedAt>maxAgeMs) throw new Error('STALE_OBSERVATION: observation too old for coordinate mutation, re-observe'); return value; }
+ remove(stateId:string):void { this.entries.delete(stateId); }
  clear():void { this.entries.clear(); }
 }

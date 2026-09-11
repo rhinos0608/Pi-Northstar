@@ -1103,7 +1103,7 @@ export async function fetchReadablePage(
   let plainHtml: string | undefined;
   let plainTitle = '';
   try {
-    const html = await fetchText(url, signal);
+    const html = await fetchText(url, signal ?? {}, signal, undefined, lookup);
     const title = cleanText((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').trim());
     plainHtml = html;
     plainTitle = title;

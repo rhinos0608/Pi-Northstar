@@ -162,7 +162,7 @@ async function setupStatus(env?: Record<string, string | undefined>): Promise<Ba
       'Explicit /reach-setup import_cookies <provider> [endpoint] is the per-provider consent path; planned providers never import cookies.',
       'macOS may show a Keychain prompt when default-browser cookies are imported.',
       'Use /reach-setup import_cookies <provider> [endpoint] with an endpoint to import via loopback CDP instead.',
-      'Use /reach-setup login <provider> [port] for isolated setup login; setup remains legacy CDP during migration and custom login port is deprecated on agent-browser path.',
+      'Use /reach-setup login <provider> [port] for isolated setup login; setup login remains CDP-based and is separate from public browser automation.',
       'Saved storageState files are session secrets and are forwarded as compatible env vars for known CLIs; browser-session backends may still need their own login state.',
     ],
   });

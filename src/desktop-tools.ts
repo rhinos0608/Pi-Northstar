@@ -1,5 +1,5 @@
 import { CuaClient } from './cua-client.js';
-import { ObservationStore, isMutation, resourceKey, timeoutFor, type DesktopRequest, type DesktopResult, MAX_AX_DEPTH, MAX_AX_NODES, MAX_SCREENSHOT_BYTES, MAX_DIMENSION } from './desktop-contract.js';
+import { ObservationStore, isMutation, resourceKey, timeoutFor, fingerprintData, OBSERVATION_TTL_MS, COORDINATE_MUTATION_FRESHNESS_MS, type DesktopRequest, type DesktopResult, MAX_AX_DEPTH, MAX_AX_NODES, MAX_SCREENSHOT_BYTES, MAX_DIMENSION } from './desktop-contract.js';
 import { guardText } from './tool-output.js';
 import { validatePolicy } from './desktop-policy.js';
 
@@ -35,7 +35,7 @@ export class DesktopService {
   async execute(raw: Record<string, unknown>, signal?: AbortSignal): Promise<DesktopResult & { content?: unknown[] }> {
     const request = validatePolicy(raw, this.env); this.used = true;
     const pid = request.pid ?? 0; const windowId = request.windowId ?? '';
-    if (isMutation(request.action)) { if (!request.pid || !request.windowId || !request.stateId) throw new Error('STALE_OBSERVATION: mutation requires target and state'); this.observations.get(request.stateId!, request.pid, request.windowId); }
+    if (isMutation(request.action)) { if (!request.pid || !request.windowId || !request.stateId) throw new Error('STALE_OBSERVATION: mutation requires target and state'); const coordinate = request.x !== undefined || request.y !== undefined || request.deltaX !== undefined || request.deltaY !== undefined; const stored = this.observations.get(request.stateId!, request.pid, request.windowId, coordinate ? COORDINATE_MUTATION_FRESHNESS_MS : OBSERVATION_TTL_MS); await this.assertWindowFresh(request.pid, request.windowId, stored.fingerprint, stored.stateId, signal); }
     if (request.action === 'wait') return this.wait(request, signal);
     let result: unknown; try { result = await this.client.callTool(MAP[request.action]!, this.args(request), { ...(signal ? { signal } : {}), timeout: timeoutFor(request.action, request.timeoutMs), ...(pid && windowId ? { resource: resourceKey(pid, windowId) } : {}), mutation: isMutation(request.action) }); } catch (error) { throw error instanceof Error ? new Error(sanitizeDesktopErrorMessage(error.message)) : error; }
     const includeImage = request.action === 'observe_window' && request.includeScreenshot === true;
@@ -47,6 +47,13 @@ export class DesktopService {
   }
   async close(): Promise<void> { this.observations.clear(); await this.client.close(); }
   wasUsed(): boolean { return this.used; }
+  private async assertWindowFresh(pid: number, windowId: string, fingerprint: string, stateId: string, signal?: AbortSignal): Promise<void> {
+    let current: unknown;
+    try { current = await this.client.callTool('get_window_state', { pid, window_id: windowId }, { ...(signal ? { signal } : {}), timeout: 5000, resource: resourceKey(pid, windowId) }); }
+    catch (error) { this.observations.remove(stateId); throw new Error(`STALE_OBSERVATION: pre-mutation re-observe failed for ${pid}:${windowId}, re-observe before retry`); }
+    const fresh = fingerprintData(boundAggregate(normalize(current, false)));
+    if (fresh !== fingerprint) { this.observations.remove(stateId); throw new Error('STALE_OBSERVATION: window changed since observation, re-observe before retry'); }
+  }
   private args(r: DesktopRequest): Record<string, unknown> { const out: Record<string, unknown> = {}; if (r.pid !== undefined) out.pid = r.pid; if (r.windowId !== undefined) out.window_id = r.windowId; if (r.text !== undefined) out.text = r.text; if (r.key !== undefined) out.key = r.key; if (r.x !== undefined) out.x = r.x; if (r.y !== undefined) out.y = r.y; if (r.deltaX !== undefined) out.delta_x = r.deltaX; if (r.deltaY !== undefined) out.delta_y = r.deltaY; if (r.includeScreenshot === true) out.include_screenshot = true; return out; }
   private async wait(r: DesktopRequest, signal?: AbortSignal): Promise<DesktopResult> { const until = Date.now() + timeoutFor('wait', r.timeoutMs); while (Date.now() < until) { let value: unknown; try { value = await this.client.callTool('get_window_state', this.args(r), { ...(signal ? { signal } : {}), timeout: 15000 }); } catch (error) { throw error instanceof Error ? new Error(sanitizeDesktopErrorMessage(error.message)) : error; } const safe = boundAggregate(normalize(value, false)); const text = JSON.stringify(safe); if ((!r.predicate?.text || text.includes(r.predicate.text)) && (!r.predicate?.role || text.includes(r.predicate.role))) return { action: 'wait', data: safe }; await abortableSleep(100, signal); } throw new Error('wait timed out'); }
 }

@@ -1,7 +1,7 @@
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 
-import { assertPublicHostname } from './network-policy.js';
+import { assertPublicHostname, resolvePublicHostname, type DnsLookup } from './network-policy.js';
 
 /**
  * Validate a URL is HTTP or HTTPS with a public hostname.
@@ -23,31 +23,40 @@ export function validateHttpUrl(raw: string): string {
  */
 export const validatePublicHttpUrl = validateHttpUrl;
 
-export async function fetchJson(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<unknown> {
-  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs);
+export async function fetchJson(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, lookup?: DnsLookup): Promise<unknown> {
+  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs, 10, lookup);
   return safeResponseJson(response, url);
 }
 
-export async function fetchText(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<string> {
-  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs);
+export async function fetchText(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, lookup?: DnsLookup): Promise<string> {
+  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs, 10, lookup);
   return safeResponseText(response, url);
 }
 
 /**
- * Fetch without automatically following redirects so each hop's target can be
- * validated as a public HTTP(S) URL (prevents SSRF via redirect chains to
- * private/internal addresses). Max 10 hops; a missing/invalid Location rejects.
+ * Fetch with manual redirect handling so each hop's target gets static
+ * validation plus DNS preflight (prevents SSRF via redirect chains to
+ * hostnames resolving to private/internal addresses). Max 10 hops;
+ * a missing/invalid Location rejects.
  */
-async function fetchFollowingRedirects(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, maxRedirects = 10): Promise<Response> {
-  let currentUrl = validatePublicHttpUrl(url);
+async function fetchFollowingRedirects(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, maxRedirects = 10, lookup?: DnsLookup): Promise<Response> {
   const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
+  // Initial host: static literal check only. DNS preflight for the initial URL
+  // stays with callers (e.g. fetchReadablePage), which own the injectable lookup.
+  // Every redirect hop below gets static + DNS preflight.
+  let currentUrl = validatePublicHttpUrl(url);
   for (let hop = 0; ; hop++) {
     const response = await fetch(currentUrl, fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
     if (response.status < 300 || response.status >= 400) return response;
     if (hop >= maxRedirects) throw new Error(`Too many redirects for ${url}`);
     const location = response.headers.get('location');
     if (!location) throw new Error(`Redirect without Location header for ${currentUrl}`);
-    currentUrl = validatePublicHttpUrl(new URL(location, currentUrl).href);
+    const nextUrl = validatePublicHttpUrl(new URL(location, currentUrl).href);
+    // DNS preflight every hop: static literal check above is not enough —
+    // a redirect hostname can resolve to private/reserved space. Fail closed.
+    // Residual TOCTOU remains (fetch resolves independently); container egress stays outer boundary.
+    await resolvePublicHostname(new URL(nextUrl).hostname, effectiveSignal, lookup);
+    currentUrl = nextUrl;
   }
 }
 

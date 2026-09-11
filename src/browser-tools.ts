@@ -1,43 +1,16 @@
 import type { BackendCallResult } from './backend.js'
-import {
-  isBrowserAutomationDisabled,
-  openCdpSession,
-  cdpListTargets,
-  cdpNavigate,
-  cdpEvaluate,
-  cdpGetText,
-  cdpGetHtml,
-  cdpScreenshot,
-  cdpClick,
-  cdpType,
-  cdpScroll,
-  cdpCloseTarget,
-  cdpGetCookiesRaw,
-  cdpSetCookies,
-} from './cdp.js'
+import { isBrowserAutomationDisabled } from './cdp.js'
 
 import { textResult as guardedTextResult } from './tool-output.js'
 import { AgentBrowserAdapter } from './agent-browser.js'
 import { agentBrowserExecutableConfigured, resolveAgentBrowserExecutable } from './agent-browser-process.js'
-import { extractCookieMetadata, isSensitiveAction, validateLegacyLoopbackEndpoint } from './browser-policy.js'
 import { parseLoopbackDebugTarget, type LoopbackDebugPolicy } from './loopback-debug-policy.js'
 import { LoopbackProxy } from './loopback-proxy.js'
 
 export type BrowserAction = 'status' | 'tabs' | 'navigate' | 'evaluate' | 'text' | 'html' | 'screenshot' | 'click' | 'type' | 'scroll' | 'close' | 'cookies' | 'set_cookies'
 
-// ── Backend selection ──
-
-export type BrowserBackend = 'agent-browser' | 'cdp'
-
-export function resolveBrowserBackend(env?: Record<string, string | undefined>): BrowserBackend {
-  const raw = env?.PI_SEARCH_BROWSER_BACKEND?.trim().toLowerCase()
-  if (raw === 'cdp') return 'cdp'
-  return 'agent-browser'
-}
-
 export function browserToolConfigured(env: Record<string, string | undefined> = process.env): boolean {
   if (isBrowserAutomationDisabled(env)) return false
-  if (resolveBrowserBackend(env) === 'cdp') return Boolean(env.BROWSER_CDP_ENDPOINT?.trim())
   return agentBrowserExecutableConfigured(env.BROWSER_EXECUTABLE_PATH, env)
 }
 
@@ -87,15 +60,6 @@ export async function closeBrowserSession(): Promise<void> {
   await disposeCurrentAdapter()
 }
 
-// ── CDP endpoint ──
-
-function getCdpEndpoint(args: Record<string, unknown>, env: Record<string, string | undefined>): string | undefined {
-  const endpoint = (typeof args.endpoint === 'string' && args.endpoint.trim())
-    ? args.endpoint.trim()
-    : (env.BROWSER_CDP_ENDPOINT?.trim())
-  return endpoint || undefined
-}
-
 // ── Main entry point ──
 
 export async function browser(
@@ -106,12 +70,6 @@ export async function browser(
 
   if (isBrowserAutomationDisabled(env)) {
     return textResult({ ok: false, message: 'Browser automation disabled by PI_SEARCH_BROWSER_AUTOMATION. Set it to 1 or unset to enable.' })
-  }
-
-  const backend = resolveBrowserBackend(env)
-
-  if (backend === 'cdp') {
-    return legacyCdpBrowser(args, options)
   }
 
   return agentBrowserRoute(args, options)
@@ -229,116 +187,7 @@ function isAgentBrowserAdapter(value: AgentBrowserAdapter | BackendCallResult): 
   return typeof (value as AgentBrowserAdapter).execute === 'function'
 }
 
-// ── Legacy CDP route (rollback path) ──
-
-async function legacyCdpBrowser(
-  args: Record<string, unknown>,
-  options: { signal?: AbortSignal; env?: Record<string, string | undefined> },
-): Promise<BackendCallResult> {
-  const env = options.env ?? process.env
-  const endpoint = getCdpEndpoint(args, env)
-
-  if (!endpoint) {
-    throw new Error('CDP endpoint is required. Set BROWSER_CDP_ENDPOINT env or pass endpoint param.')
-  }
-
-  validateLegacyLoopbackEndpoint(endpoint)
-  const action = typeof args.action === 'string' ? args.action : 'status'
-
-  if (isSensitiveAction(action) && env.PI_SEARCH_BROWSER_ALLOW_SENSITIVE !== '1') {
-    return textResult({ error: `${action} disabled by policy. Set PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1 to enable.` })
-  }
-
-  if (action === 'status') {
-    return textResult({
-      endpoint,
-      browserAutomationEnabled: true,
-      backend: 'cdp',
-      websocketAvailable: typeof globalThis.WebSocket === 'function',
-    })
-  }
-
-  // CDP loopback fail-closed: loopback navigate under CDP backend is unsupported
-  const cdpUrl = typeof args.url === 'string' ? args.url.trim() : ''
-  if (action === 'navigate' && cdpUrl) {
-    const policy = parseLoopbackDebugTarget(cdpUrl)
-    if (policy) {
-      return textResult({
-        error: `Loopback navigate under CDP backend is unsupported. Use the default agent-browser backend for loopback confinement.`,
-        failureCategory: 'domain-blocked',
-      })
-    }
-  }
-
-
-
-  const signal = options.signal
-  const session = await openCdpSession(endpoint, signal)
-  try {
-    switch (action) {
-      case 'tabs':
-        return textResult(await cdpListTargets(session))
-      case 'navigate': {
-        const url = requireString(args.url, 'url')
-        return textResult(await cdpNavigate(session, url))
-      }
-      case 'evaluate': {
-        const expression = requireString(args.expression, 'expression')
-        return textResult(await cdpEvaluate(session, expression))
-      }
-      case 'text':
-        return textResult(await cdpGetText(session))
-      case 'html':
-        return textResult(await cdpGetHtml(session))
-      case 'screenshot':
-        return textResult(await cdpScreenshot(session))
-      case 'click': {
-        const selector = requireString(args.selector, 'selector')
-        return textResult(await cdpClick(session, selector))
-      }
-      case 'type': {
-        const selector = requireString(args.selector, 'selector')
-        const text = requireString(args.text, 'text')
-        return textResult(await cdpType(session, selector, text))
-      }
-      case 'scroll': {
-        const x = typeof args.x === 'number' ? args.x : 0
-        const y = typeof args.y === 'number' ? args.y : 0
-        return textResult(await cdpScroll(session, x, y))
-      }
-      case 'close':
-        return textResult(await cdpCloseTarget(session))
-      case 'cookies': {
-        const urls = Array.isArray(args.urls) ? args.urls.filter((u): u is string => typeof u === 'string') : undefined
-        const rawCookies = await cdpGetCookiesRaw(session, urls)
-        // Return metadata only (no values) — consistent with agent-browser path
-        const metadata = extractCookieMetadata(rawCookies as Array<{ name: string; value: string; domain: string; path: string; expires: number | undefined; httpOnly: boolean; secure: boolean; sameSite?: string }>)
-        return textResult(metadata)
-      }
-      case 'set_cookies': {
-        const cookies = args.cookies
-        if (!Array.isArray(cookies)) throw new Error('cookies is required and must be an array')
-        for (const c of cookies) {
-          if (typeof c !== 'object' || c === null || typeof (c as Record<string, unknown>).name !== 'string' || !(c as Record<string, unknown>).name) {
-            throw new Error('each cookie must be an object with a non-empty string name')
-          }
-        }
-        return textResult(await cdpSetCookies(session, cookies))
-      }
-      default:
-        throw new Error(`Unsupported browser action: ${action}`)
-    }
-  } finally {
-    session.close()
-  }
-}
-
 // ── Helpers ──
-
-function requireString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is required`)
-  return value.trim()
-}
 
 function textResult(data: unknown): BackendCallResult {
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2) ?? String(data)
