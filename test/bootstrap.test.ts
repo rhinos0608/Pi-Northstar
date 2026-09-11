@@ -164,6 +164,46 @@ test('callSetupTool status returns auth state without secrets', async () => {
   }
 });
 
+test('callSetupTool status reports firecrawl/jina configured state without values', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-firecrawl-jina-'));
+  try {
+    const result = await callSetupTool({ action: 'status' }, { env: { FIRECRAWL_API_KEY: 'firecrawl_live_secret', JINA_API_KEY: 'jina_live_secret', PI_SEARCH_STATE_DIR: dir } });
+    const text = textFromResult(result);
+    const data = JSON.parse(text) as Record<string, unknown>;
+    const live = data.liveProviders as Record<string, { configured: boolean; keyNames: string[] }>;
+    assert.ok(live, 'liveProviders must be present');
+    assert.equal(live.firecrawl?.configured, true);
+    assert.deepEqual(live.firecrawl?.keyNames, ['FIRECRAWL_API_KEY']);
+    assert.equal(live.jina?.configured, true);
+    assert.deepEqual(live.jina?.keyNames, ['JINA_API_KEY']);
+    assert.doesNotMatch(text, /firecrawl_live_secret/);
+    assert.doesNotMatch(text, /jina_live_secret/);
+
+    const unset = await callSetupTool({ action: 'status' }, { env: { PI_SEARCH_STATE_DIR: dir } });
+    const unsetData = JSON.parse(textFromResult(unset)) as Record<string, unknown>;
+    const unsetLive = unsetData.liveProviders as Record<string, { configured: boolean }>;
+    assert.equal(unsetLive.firecrawl?.configured, false);
+    assert.equal(unsetLive.jina?.configured, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('callSetupTool plan includes firecrawl/jina descriptors without values', async () => {
+  const result = await callSetupTool({ action: 'plan' }, { env: { FIRECRAWL_API_KEY: 'firecrawl_plan_secret' } });
+  const text = textFromResult(result);
+  const data = JSON.parse(text) as Record<string, unknown>;
+  const providers = data.providers as Array<Record<string, unknown>>;
+  const firecrawl = providers.find((p) => p.provider === 'firecrawl');
+  assert.ok(firecrawl, 'firecrawl provider must be present in plan');
+  assert.equal(firecrawl.configured, true);
+  assert.deepEqual(firecrawl.keyNames, ['FIRECRAWL_API_KEY']);
+  const jina = providers.find((p) => p.provider === 'jina');
+  assert.ok(jina, 'jina provider must be present in plan');
+  assert.equal(jina.configured, false);
+  assert.doesNotMatch(text, /firecrawl_plan_secret/);
+});
+
 test('writeAuthState can be called without crashing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-state-'));
   try {

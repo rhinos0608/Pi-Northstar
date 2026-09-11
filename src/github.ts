@@ -14,13 +14,13 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
     name: 'github',
     label: 'GitHub',
     description:
-      'Canonical repo/file/tree/search/search_repos/trending/issues/pulls/releases/commits via REST v3 only (no GraphQL). GITHUB_TOKEN/GH_TOKEN optional for public reads. list_dir/code_search legacy spellings rejected; normalized entities; out-of-range rejected, never clamped.',
+      'Code facts via REST v3 only (no GraphQL): repo/file/tree/search/search_repos/trending/issues/pulls/releases/commits. Use for repo metadata, file reads, trees, code search, trending, issues/pulls/releases/commits; use web_search for non-GitHub discovery. GITHUB_TOKEN/GH_TOKEN optional for public reads (harder limits keyless). list_dir/code_search legacy spellings rejected; normalized entities; out-of-range rejected, never clamped.',
     promptSnippet:
-      'Query or explore GitHub repositories, files, issues, pulls, releases, commits, and code with normalized results.',
+      'Query GitHub repos, files, trees, code search, trending, issues, pulls, releases, commits with normalized results. Prefer repository "owner/repo" or owner+repo; path xor paths (max 10, file only); branch must agree with ref.',
     parameters: Type.Object({
       action: StringEnum([...GITHUB_ACTIONS], {
         description:
-          'github action: repo, file, tree, search, trending, issues, pulls, releases, commits, search_repos',
+          'Pick repo (metadata), file (reads), tree (listing), search/search_repos (code/repos), trending, issues, pulls, releases, commits. Canonical only.',
       }),
 
       // -- repo / file / tree / issues / pulls / releases / commits selectors --
@@ -69,10 +69,10 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
         description: 'Filter by language (e.g. "typescript", "python").',
       })),
       limit: Type.Optional(Type.Number({
-        description: 'Maximum items (lists: max 50; trending: max 25).',
+        description: 'Max items (lists max 50; trending max 25). Out-of-range rejected.',
       })),
       perPage: Type.Optional(Type.Number({
-        description: 'Alias for limit on paginated actions (max 50). Wins when both are set.',
+        description: 'Alias for limit (max 50). Wins when both set.',
       })),
 
       // -- issues / pulls --
@@ -113,7 +113,7 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
       // -- pagination --
       cursor: Type.Optional(Type.String({
         maxLength: 4096,
-        description: 'Opaque continuation cursor from a previous list result. Pins action+owner/repo+limit.',
+        description: 'Opaque prior-list cursor. Pins action+owner/repo+limit; changing them invalidates.',
       })),
     }),
 

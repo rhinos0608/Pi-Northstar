@@ -36,6 +36,8 @@ const mappings: Array<[string, string]> = [
   ['deepResearch.apiToken', 'DEEP_RESEARCH_API_TOKEN'],
   ['deepResearch.model', 'DEEP_RESEARCH_MODEL'],
   ['deepResearch.workerModel', 'DEEP_RESEARCH_WORKER_MODEL'],
+  ['firecrawl.apiKey', 'FIRECRAWL_API_KEY'],
+  ['jina.apiKey', 'JINA_API_KEY'],
   ['diffbot.token', 'DIFFBOT_TOKEN'],
   ['diffbot.searchSize', 'DIFFBOT_SEARCH_SIZE'],
   ['diffbot.enhanceSize', 'DIFFBOT_ENHANCE_SIZE'],

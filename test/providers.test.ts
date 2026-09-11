@@ -149,6 +149,27 @@ test('diffbot descriptor is additive with legacy singular channel intact', () =>
   assert.match(desc.setup, /DIFFBOT_TOKEN/);
 });
 
+test('firecrawl/jina descriptors are additive with legacy singular channel intact', () => {
+  for (const [name, key, members] of [
+    ['firecrawl', 'FIRECRAWL_API_KEY', ['firecrawl', 'web']],
+    ['jina', 'JINA_API_KEY', ['jina', 'web']],
+  ] as const) {
+    const desc = findProvider(name);
+    assert.ok(desc, `${name} descriptor must exist`);
+    assert.equal(desc.channel, name);
+    assert.deepEqual([...providerChannels(desc)], members);
+    assert.equal(providerChannels(desc)[0], desc.channel, 'legacy singular channel stays first');
+    assert.equal(desc.family, 'research');
+    assert.deepEqual([...desc.envKeys], [key]);
+    assert.deepEqual([...desc.cookieDomains], []);
+    assert.equal(desc.loginFlow, 'env_var');
+    assert.equal(desc.risk, 'low');
+    assert.equal(desc.availability, 'available');
+    assert.match(desc.setup, new RegExp(key));
+    assert.doesNotMatch(desc.setup, /planned/i);
+  }
+});
+
 test('providerChannels preserves legacy singular behavior', () => {
   for (const name of ['github', 'web', 'youtube'] as const) {
     const desc = findProvider(name);

@@ -394,7 +394,8 @@ test('diffbot channel advertises knowledge actions with DIFFBOT_TOKEN backends',
   const webSearch = backendCapability('diffbot', 'diffbot-web-search');
   assert.ok(webSearch);
   assert.deepEqual([...webSearch.actions], ['search']);
-  assert.match(String(webSearch.note), /never primary/);
+  assert.match(String(webSearch.note), /Ordinary RRF participant/);
+  assert.match(String(webSearch.note), /no primary exception/);
 });
 
 test('diffbot provider claims DIFFBOT_TOKEN only with no cookie import', () => {
@@ -409,6 +410,56 @@ test('diffbot provider claims DIFFBOT_TOKEN only with no cookie import', () => {
   assert.match(provider.setup, /DIFFBOT_TOKEN/);
   assert.ok(!cookieImportProviders().includes('diffbot'), 'diffbot must not import unused cookies');
   assert.deepEqual([...cookieImportProviders()].sort(), ['bilibili', 'reddit', 'youtube']);
+});
+
+test('firecrawl channel advertises search/read with vendor-key backends', () => {
+  const channel = channelCapability('firecrawl');
+  assert.ok(channel, 'firecrawl channel must exist');
+  assert.equal(channel.family, 'research');
+  assert.equal(channel.publicTool, 'web_search');
+  assert.equal(channel.availability, 'available');
+  assert.deepEqual(channel.actions.map((action) => action.action).sort(), ['read', 'search']);
+  assert.deepEqual(channel.backends.map((backend) => backend.id).sort(), ['firecrawl-scrape', 'firecrawl-search']);
+  assert.deepEqual([...(backendCapability('firecrawl', 'firecrawl-search')?.actions ?? [])], ['search']);
+  assert.deepEqual([...(backendCapability('firecrawl', 'firecrawl-scrape')?.actions ?? [])], ['read']);
+  for (const backend of channel.backends) {
+    assert.deepEqual([...(backend.auth?.anyOf ?? [])], ['FIRECRAWL_API_KEY']);
+    assert.equal(backend.auth?.required, true);
+  }
+  const provider = channel.provider;
+  assert.ok(provider);
+  assert.equal(provider.provider, 'firecrawl');
+  assert.deepEqual([...provider.envKeys], ['FIRECRAWL_API_KEY']);
+  assert.deepEqual([...provider.cookieDomains], []);
+  assert.equal(provider.consumesCookie, false);
+  assert.match(provider.setup, /FIRECRAWL_API_KEY/);
+  assert.match(provider.setup, /external processing/i);
+  assert.ok(!cookieImportProviders().includes('firecrawl'), 'firecrawl must not import unused cookies');
+});
+
+test('jina channel advertises search/read with vendor-key backends', () => {
+  const channel = channelCapability('jina');
+  assert.ok(channel, 'jina channel must exist');
+  assert.equal(channel.family, 'research');
+  assert.equal(channel.publicTool, 'web_search');
+  assert.equal(channel.availability, 'available');
+  assert.deepEqual(channel.actions.map((action) => action.action).sort(), ['read', 'search']);
+  assert.deepEqual(channel.backends.map((backend) => backend.id).sort(), ['jina-reader', 'jina-search']);
+  assert.deepEqual([...(backendCapability('jina', 'jina-search')?.actions ?? [])], ['search']);
+  assert.deepEqual([...(backendCapability('jina', 'jina-reader')?.actions ?? [])], ['read']);
+  for (const backend of channel.backends) {
+    assert.deepEqual([...(backend.auth?.anyOf ?? [])], ['JINA_API_KEY']);
+    assert.equal(backend.auth?.required, true);
+  }
+  const provider = channel.provider;
+  assert.ok(provider);
+  assert.equal(provider.provider, 'jina');
+  assert.deepEqual([...provider.envKeys], ['JINA_API_KEY']);
+  assert.deepEqual([...provider.cookieDomains], []);
+  assert.equal(provider.consumesCookie, false);
+  assert.match(provider.setup, /JINA_API_KEY/);
+  assert.match(provider.setup, /external processing/i);
+  assert.ok(!cookieImportProviders().includes('jina'), 'jina must not import unused cookies');
 });
 
 test('diffbot registration leaves legacy channels untouched', () => {

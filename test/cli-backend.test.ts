@@ -31,6 +31,48 @@ test('buildCliEnvironment forwards DIFFBOT_* core-path keys when set', () => {
   assert.equal(env.DIFFBOT_FALLBACK_BUDGET, '3');
 });
 
+test('buildCliEnvironment forwards FIRECRAWL/JINA keys and web selection config when set', () => {
+  const env = buildCliEnvironment({
+    FIRECRAWL_API_KEY: 'SENTINEL_FIRECRAWL_abc123xyz',
+    JINA_API_KEY: 'SENTINEL_JINA_abc123xyz',
+    PI_SEARCH_WEB_BACKENDS: 'exa,tavily',
+    PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS: '12000',
+    PI_SEARCH_NATIVE_SUMMARIES: '1',
+    PI_SEARCH_NATIVE_ANSWERS: '0',
+    PI_SEARCH_KG_ENRICHMENT: '1',
+    PI_SEARCH_EXTERNAL_FETCH: '1',
+    PI_SEARCH_FETCH_BACKENDS: 'firecrawl,jina',
+    PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS: '15000',
+  });
+  assert.equal(env.FIRECRAWL_API_KEY, 'SENTINEL_FIRECRAWL_abc123xyz');
+  assert.equal(env.JINA_API_KEY, 'SENTINEL_JINA_abc123xyz');
+  assert.equal(env.PI_SEARCH_WEB_BACKENDS, 'exa,tavily');
+  assert.equal(env.PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS, '12000');
+  assert.equal(env.PI_SEARCH_NATIVE_SUMMARIES, '1');
+  assert.equal(env.PI_SEARCH_NATIVE_ANSWERS, '0');
+  assert.equal(env.PI_SEARCH_KG_ENRICHMENT, '1');
+  assert.equal(env.PI_SEARCH_EXTERNAL_FETCH, '1');
+  assert.equal(env.PI_SEARCH_FETCH_BACKENDS, 'firecrawl,jina');
+  assert.equal(env.PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS, '15000');
+});
+
+test('buildCliEnvironment omits FIRECRAWL/JINA keys when unset', () => {
+  const env = buildCliEnvironment({ PATH: '/usr/bin' });
+  assert.equal(env.FIRECRAWL_API_KEY, undefined, 'FIRECRAWL_API_KEY must be absent when unset');
+  assert.equal(env.JINA_API_KEY, undefined, 'JINA_API_KEY must be absent when unset');
+});
+
+test('sentinel: FIRECRAWL/JINA keys never leak to the python child env', () => {
+  const parent = {
+    PATH: '/usr/bin',
+    FIRECRAWL_API_KEY: 'SENTINEL_FIRECRAWL_abc123xyz',
+    JINA_API_KEY: 'SENTINEL_JINA_abc123xyz',
+  };
+  const pythonEnv = buildPythonChildEnvironment(parent);
+  assert.equal(pythonEnv.FIRECRAWL_API_KEY, undefined, 'python child env must not carry FIRECRAWL_API_KEY');
+  assert.equal(pythonEnv.JINA_API_KEY, undefined, 'python child env must not carry JINA_API_KEY');
+});
+
 test('buildCliEnvironment omits DIFFBOT_* keys when unset', () => {
   const env = buildCliEnvironment({ PATH: '/usr/bin' });
   for (const key of DIFFBOT_KEYS) {

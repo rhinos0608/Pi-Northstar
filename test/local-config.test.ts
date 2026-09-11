@@ -128,6 +128,41 @@ test('diffbot keys map from config without overriding env', async () => {
   }
 });
 
+test('firecrawl/jina keys map from config without overriding env', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-search-firecrawl-jina-keys-'));
+  const path = join(dir, 'config.json');
+  await writeFile(path, JSON.stringify({
+    firecrawl: { apiKey: 'firecrawl-key-from-config' },
+    jina: { apiKey: 'jina-key-from-config' },
+  }));
+
+  const base = { PI_SEARCH_ENV_PATH: join(dir, 'missing.env'), SEARCH_MCP_CONFIG_PATH: path };
+  const env = loadSearchMcpEnvironment(base);
+  assert.equal(env.FIRECRAWL_API_KEY, 'firecrawl-key-from-config');
+  assert.equal(env.JINA_API_KEY, 'jina-key-from-config');
+
+  const override = loadSearchMcpEnvironment({ ...base, FIRECRAWL_API_KEY: 'from-env' });
+  assert.equal(override.FIRECRAWL_API_KEY, 'from-env');
+  assert.equal(override.JINA_API_KEY, 'jina-key-from-config');
+
+  const summary = loadedConfigSummary(base);
+  assert.ok(summary.mappedKeys.includes('FIRECRAWL_API_KEY'), 'summary must list FIRECRAWL_API_KEY');
+  assert.ok(summary.mappedKeys.includes('JINA_API_KEY'), 'summary must list JINA_API_KEY');
+});
+
+test('no JSON mapping exists for environment-only selection/AI policy keys', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-search-no-policy-mapping-'));
+  const path = join(dir, 'config.json');
+  await writeFile(path, JSON.stringify({
+    web: { backends: 'exa', providerTimeoutMs: 5000, nativeSummaries: true, nativeAnswers: true, kgEnrichment: true, externalFetch: true, fetchBackends: 'jina', fetchProviderTimeoutMs: 5000 },
+  }));
+
+  const env = loadSearchMcpEnvironment({ PI_SEARCH_ENV_PATH: join(dir, 'missing.env'), SEARCH_MCP_CONFIG_PATH: path });
+  for (const key of ['PI_SEARCH_WEB_BACKENDS', 'PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS', 'PI_SEARCH_NATIVE_SUMMARIES', 'PI_SEARCH_NATIVE_ANSWERS', 'PI_SEARCH_KG_ENRICHMENT', 'PI_SEARCH_EXTERNAL_FETCH', 'PI_SEARCH_FETCH_BACKENDS', 'PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS']) {
+    assert.equal(env[key], undefined, `${key} must stay env-only with no JSON mapping`);
+  }
+});
+
 test('DIFFBOT_TOKEN login-shell fallback fills only when configured sources are blank', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-search-diffbot-shell-'));
   const base = { PI_SEARCH_ENV_PATH: join(dir, 'missing.env'), SEARCH_MCP_CONFIG_PATH: join(dir, 'missing.json') };

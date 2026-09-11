@@ -672,10 +672,58 @@ test('kg description requires user authorization before sensitive text submissio
   assert.ok(/sensitive/i.test(description), 'kg description must call out sensitive text');
 });
 
-test('web_search and fetch schemas remain unchanged by kg registration', async () => {
+test('web_search exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
   const defs = await captureAllTools();
-  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'limit', 'query', 'source', 'yearFrom']);
+  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'knowledge', 'limit', 'query', 'source', 'yearFrom']);
   assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['followLinks', 'maxChars', 'maxPages', 'query', 'searchQuery', 'topK', 'url']);
+  const knowledge = (defs.web_search!.parameters.properties as Record<string, { properties?: Record<string, unknown> }>).knowledge;
+  assert.deepEqual(Object.keys(knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
+});
+
+test('buildSearchRoute preserves knowledge on non-research route', () => {
+  const route = buildSearchRoute({ query: 'pi agent', knowledge: { entities: true, facts: true } });
+  assert.equal(route.tool, 'web_search');
+  assert.deepEqual(route.args.knowledge, { entities: true, facts: true });
+});
+
+test('buildSearchRoute omits knowledge when not supplied', () => {
+  const route = buildSearchRoute({ query: 'pi agent' });
+  assert.equal(route.tool, 'web_search');
+  assert.equal(route.args.knowledge, undefined);
+});
+
+test('buildSearchRoute rejects knowledge with category research before dispatch', () => {
+  assert.throws(
+    () => buildSearchRoute({ query: 'survey', category: 'research', knowledge: { entities: true } }),
+    /knowledge is not supported with category "research"/,
+  );
+});
+
+test('buildSearchRoute rejects knowledge with category academic before dispatch', () => {
+  assert.throws(
+    () => buildSearchRoute({ query: 'survey', category: 'academic', knowledge: { entities: true } }),
+    /knowledge is not supported with category "academic"/,
+  );
+});
+
+test('buildSearchRoute keeps academic without knowledge on the web route', () => {
+  const route = buildSearchRoute({ query: 'survey', category: 'academic' });
+  assert.equal(route.tool, 'web_search');
+});
+
+test('buildSearchRoute rejects invalid knowledge via contract validation', () => {
+  for (const knowledge of [
+    { unknownFlag: true },
+    { entities: 'yes' },
+    { entities: false },
+    {},
+  ]) {
+    assert.throws(
+      () => buildSearchRoute({ query: 'test', knowledge: knowledge as never }),
+      (err: unknown) => (err as { code?: string }).code === 'invalid_request',
+      `knowledge ${JSON.stringify(knowledge)} must reject with invalid_request`,
+    );
+  }
 });
 
 test('tool_result hook adds a fresh outer fence over pre-wrapped kg text', async () => {
@@ -715,6 +763,40 @@ test('tool_result hook re-fences attacker text starting with a forged marker', a
   assert.equal(closes[closes.length - 1], opens[0], 'outer open/close tokens must match');
   assert.ok(fenced.startsWith(`<<<EXTERNAL_EVIDENCE_${opens[0]}>>>`), 'fresh outer fence leads');
   assert.ok(fenced.endsWith(`<<<END_EXTERNAL_EVIDENCE_${opens[0]}>>>`), 'fresh outer fence terminates');
+});
+
+// ── LLM guidance wording (boundary checks, not prose snapshots) ──
+
+test('guidance: kg description carries DQL examples, cursor and privacy notes', async () => {
+  const defs = await captureAllTools();
+  const description = defs.kg?.description ?? '';
+  assert.ok(description.includes('type:Organization'), 'kg description must show an Organization DQL example');
+  assert.ok(description.includes('type:Person'), 'kg description must show a Person DQL example');
+  assert.ok(/authorization/i.test(description), 'kg description must keep authorization wording');
+  assert.ok(/email\/phone/i.test(description), 'kg description must note email/phone transmission');
+});
+
+test('guidance: web_search marks research-only params as ignored on plain search', async () => {
+  const defs = await captureAllTools();
+  const description = defs.web_search?.description ?? '';
+  assert.ok(/research.*only|ignored on plain/i.test(description), 'web_search description must flag research-only scope');
+  const props = defs.web_search!.parameters.properties as Record<string, { description?: string }>;
+  assert.ok(/research-only/i.test(props.source?.description ?? ''), 'source param must say research-only');
+  assert.ok(/research-only/i.test(props.yearFrom?.description ?? ''), 'yearFrom param must say research-only');
+});
+
+test('guidance: fetch states url/searchQuery requirement', async () => {
+  const defs = await captureAllTools();
+  const description = defs.fetch?.description ?? '';
+  assert.ok(/url or searchQuery/i.test(description), 'fetch description must state url/searchQuery requirement');
+  const props = defs.fetch!.parameters.properties as Record<string, { description?: string }>;
+  assert.ok(/no default/i.test(props.searchQuery?.description ?? ''), 'searchQuery must say no default');
+});
+
+test('guidance: social limit clamps with warning', async () => {
+  const defs = await captureAllTools();
+  const props = defs.social!.parameters.properties as Record<string, { description?: string }>;
+  assert.ok(/clamp/i.test(props.limit?.description ?? ''), 'social limit must document clamp-with-warning');
 });
 
 test('tool_result hook fences kg output as external evidence', async () => {
