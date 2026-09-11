@@ -8,7 +8,7 @@ export function normalizeUrl(raw: string): string {
     const url = new URL(raw.trim());
     url.hash = '';
     for (const key of [...url.searchParams.keys()]) {
-      if (/^(utm_|fbclid$|gclid$|mc_cid$|mc_eid$)/i.test(key)) url.searchParams.delete(key);
+      if (/^(utm_|fbclid$|gclid$|gclsrc$|dclid$|msclkid$|mc_cid$|mc_eid$|_ga$|_gl$)/i.test(key)) url.searchParams.delete(key);
     }
     url.hostname = url.hostname.toLowerCase().replace(/^www\./, '');
     url.pathname = url.pathname.replace(/\/+$/, '') || '/';

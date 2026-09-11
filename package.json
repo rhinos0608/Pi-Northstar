@@ -13,6 +13,7 @@
   "files": [
     "bin/",
     "src/*.ts",
+    "sidecar/",
     "README.md",
     "SKILL.md"
   ],

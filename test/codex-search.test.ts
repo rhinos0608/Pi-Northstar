@@ -107,7 +107,7 @@ test('codex search posts fixed endpoint, bearer headers, query-only payload; out
   }
 });
 
-test('codex participates in uniform RRF: no primary, first-selected snippet wins', async () => {
+test('codex participates in uniform RRF: no primary, richest donor wins representation', async () => {
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request) => {
     const url = String(input);
@@ -135,14 +135,15 @@ test('codex participates in uniform RRF: no primary, first-selected snippet wins
       env: { PI_SEARCH_WEB_BACKENDS: 'codex,duckduckgo', CODEX_ACCESS_TOKEN: 'tk' },
     });
     const details = result.details as {
-      results: Array<{ url: string; snippet: string; contributors?: Array<{ backend: string; rank: number }> }>;
+      results: Array<{ url: string; snippet: string; source: string; contributors?: Array<{ backend: string; rank: number }> }>;
       fusion: { backends: string[]; primary?: string; failures: Array<{ backend: string; error: string }> };
     };
     assert.deepEqual(
       details.results.map((r) => r.url),
-      ['https://www.example.com/a?utm_source=codex', 'https://example.com/c', 'https://example.com/d'],
+      ['https://example.com/a', 'https://example.com/c', 'https://example.com/d'],
     );
-    assert.equal(details.results[0]?.snippet, 'ca', 'first provider in selected order keeps the snippet');
+    assert.equal(details.results[0]?.snippet, 'ddg a', 'richest donor snippet wins; RRF score/order anchors unchanged');
+    assert.equal(details.results[0]?.source, 'duckduckgo');
     assert.deepEqual(details.results[0]?.contributors, [{ backend: 'codex', rank: 1 }, { backend: 'duckduckgo', rank: 1 }]);
     assert.equal(details.fusion.primary, undefined, 'uniform RRF never assigns a primary');
     assert.deepEqual(details.fusion.backends.sort(), ['codex', 'duckduckgo']);

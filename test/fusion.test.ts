@@ -9,6 +9,21 @@ test('normalizeUrl canonicalizes URL variants for dedup', () => {
   );
 });
 
+test('normalizeUrl strips only unequivocal tracking params', () => {
+  assert.equal(
+    normalizeUrl('https://example.com/p?gclsrc=aw.ds&dclid=x&msclkid=y&_ga=1&_gl=2&a=1'),
+    'https://example.com/p?a=1',
+  );
+  assert.equal(normalizeUrl('https://example.com/p?utm_source=x&fbclid=y&gclid=z&mc_cid=c&mc_eid=e&a=1'), 'https://example.com/p?a=1');
+});
+
+test('normalizeUrl retains ambiguous identity-bearing params', () => {
+  for (const param of ['ref', 'source', 'src', 'pos']) {
+    const normalized = normalizeUrl(`https://example.com/p?${param}=x&a=1`);
+    assert.ok(normalized.includes(`${param}=x`), `${param} must survive normalization`);
+  }
+});
+
 test('rrfMerge dedupes within rankings and boosts cross-ranking agreement', () => {
   const fused = rrfMerge([
     [{ url: 'https://a.test', title: 'A1' }, { url: 'https://a.test/', title: 'A duplicate' }, { url: 'https://b.test', title: 'B' }],

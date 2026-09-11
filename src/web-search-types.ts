@@ -32,11 +32,18 @@ export interface WebProviderSearchInput {
   };
 }
 
+export type WebSearchContentKind = 'snippet' | 'summary' | 'full';
+
 export interface WebSearchHit {
   title: string;
   url: string;
   snippet: string;
   backend: WebSearchProviderId;
+  /** Representation richness; omission means 'snippet'. Internal only. */
+  contentKind?: WebSearchContentKind | undefined;
+  /** Optional publication metadata; backfilled across duplicate donors only. */
+  publishedDate?: string | undefined;
+  author?: string | undefined;
 }
 
 export interface WebSearchContributor {

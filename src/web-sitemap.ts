@@ -191,6 +191,7 @@ async function rankSitemapUrls(
       ranking: 'bm25',
     };
   }
+  let sidecar: SidecarManager | undefined;
   try {
     signal?.throwIfAborted();
     const externalSidecarUrl = env.EMBEDDING_SIDECAR_BASE_URL;
@@ -202,7 +203,7 @@ async function rankSitemapUrls(
       });
       await embeddingClient.health();
     } else {
-      const sidecar = new SidecarManager();
+      sidecar = new SidecarManager();
       await sidecar.ensureRunning();
       signal?.throwIfAborted();
       embeddingClient = new EmbeddingClient({
@@ -223,10 +224,12 @@ async function rankSitemapUrls(
       ],
       { keyFn: (item: { id: string }) => item.id },
     );
+    if (sidecar) await sidecar.stop().catch(() => undefined);
     return { urls: withUnmatched(fused.map((entry) => byId.get(entry.item.id)!)), ranking: 'bm25+embedding+rrf' };
   } catch (error) {
     // Caller abort always propagates; embedding failures fall back to BM25.
     // The ranking field exposes the fallback — no error text is logged.
+    if (sidecar) await sidecar.stop().catch(() => undefined);
     if ((error as { name?: unknown })?.name === 'AbortError' || signal?.aborted) throw error;
     return {
       urls: withUnmatched(index.search(query, urls.length).map((hit) => byId.get(hit.id)!)),

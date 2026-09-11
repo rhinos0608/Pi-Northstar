@@ -966,20 +966,47 @@ test('codex participates in uniform RRF with no primary weighting', async () => 
   });
 });
 
-test('uniform fusion keeps first-selected snippet and breaks ties deterministically', () => {
+test('uniform fusion surfaces richest donor without moving RRF score or order', () => {
   const fused = fuseWebSearchRankings([
-    { backend: 'exa', hits: [{ title: 'Exa shared', url: 'https://example.com/shared', snippet: 'from exa', backend: 'exa' }] },
-    { backend: 'brave', hits: [{ title: 'Brave shared', url: 'https://www.example.com/shared', snippet: 'from brave', backend: 'brave' }] },
+    { backend: 'exa', hits: [{ title: 'Exa shared', url: 'https://example.com/shared', snippet: 'short', backend: 'exa' }] },
+    { backend: 'brave', hits: [{ title: 'Brave shared', url: 'https://www.example.com/shared', snippet: 'a richer snippet body', backend: 'brave' }] },
   ], 8);
   assert.equal(fused.length, 1);
-  assert.equal(fused[0]?.snippet, 'from exa');
+  assert.equal(fused[0]?.snippet, 'a richer snippet body');
+  assert.equal(fused[0]?.backend, 'brave');
   assert.deepEqual(fused[0]?.contributors, [{ backend: 'exa', rank: 1 }, { backend: 'brave', rank: 1 }]);
+  const expectedScore = 1 / (60 + 1) + 1 / (60 + 1);
+  assert.equal(fused[0]?.rrfScore, expectedScore);
+
+  const kinded = fuseWebSearchRankings([
+    { backend: 'exa', hits: [{ title: 'Exa shared', url: 'https://example.com/shared', snippet: 'a much longer snippet body', backend: 'exa' }] },
+    { backend: 'brave', hits: [{ title: 'Brave shared', url: 'https://www.example.com/shared', snippet: 'x', contentKind: 'summary', backend: 'brave' }] },
+  ], 8);
+  assert.equal(kinded[0]?.backend, 'brave');
+  assert.equal(kinded[0]?.rrfScore, expectedScore);
 
   const tied = fuseWebSearchRankings([
+    { backend: 'exa', hits: [{ title: 'Exa shared', url: 'https://example.com/shared', snippet: 'same', backend: 'exa' }] },
+    { backend: 'brave', hits: [{ title: 'Brave shared', url: 'https://www.example.com/shared', snippet: 'same', backend: 'brave' }] },
+  ], 8);
+  assert.equal(tied[0]?.backend, 'exa', 'exact richness ties keep the earlier selected provider');
+  assert.deepEqual(tied[0]?.contributors, [{ backend: 'exa', rank: 1 }, { backend: 'brave', rank: 1 }]);
+
+  const orderTied = fuseWebSearchRankings([
     { backend: 'brave', hits: [{ title: 'B', url: 'https://example.com/b', snippet: 'b', backend: 'brave' }] },
     { backend: 'exa', hits: [{ title: 'A', url: 'https://example.com/a', snippet: 'a', backend: 'exa' }] },
   ], 8);
-  assert.deepEqual(tied.map((hit) => hit.backend), ['brave', 'exa'], 'equal RRF scores follow selected-provider order');
+  assert.deepEqual(orderTied.map((hit) => hit.backend), ['brave', 'exa'], 'equal RRF scores follow selected-provider order');
+});
+
+test('fusion preserves backfilled publication metadata on the richest donor', () => {
+  const fused = fuseWebSearchRankings([
+    { backend: 'exa', hits: [{ title: 'Exa shared', url: 'https://example.com/shared', snippet: 'a richer snippet body', backend: 'exa' }] },
+    { backend: 'brave', hits: [{ title: 'Brave shared', url: 'https://www.example.com/shared', snippet: 'x', backend: 'brave', publishedDate: '2026-01-01', author: 'Ada' }] },
+  ], 8);
+  assert.equal(fused[0]?.backend, 'exa');
+  assert.equal(fused[0]?.publishedDate, '2026-01-01');
+  assert.equal(fused[0]?.author, 'Ada');
 });
 
 test('failed providers are never retried: 429 and 5xx cost one call each', async () => {
@@ -1545,4 +1572,36 @@ test('crawl path truncation carries a visible marker with counts inside maxChars
   assert.equal(details.truncated, true);
   assert.equal(details.maxChars, 500);
   assert.ok((details.omittedChars ?? 0) > 0, 'omitted count must be positive');
+});
+
+test('read path truncation ends at a complete sentence', async () => {
+  const body = `<html><head><title>Sentences</title></head><body><p>${'First claim holds true. Second claim adds evidence. '.repeat(30)}</p></body></html>`;
+  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/sentences', maxChars: 500 }, {
+    fetchPageText: async () => body,
+  });
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
+  assert.ok(text.length <= 500, `truncated text must fit maxChars, got ${text.length}`);
+  assert.match(text, /\[truncated: showing \d+ of \d+ chars; raise maxChars up to 50000 for more\]/);
+  assert.match(text.slice(0, text.indexOf('[truncated')).trimEnd().slice(-1), /[.!?…]/);
+});
+
+test('read path drops navigation chrome from the evidence budget', async () => {
+  const body = `<html><head><title>Nav page</title></head><body><nav>Home | About | Contact | Privacy</nav><p>${'Article substance words follow. '.repeat(40)}</p></body></html>`;
+  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/nav', maxChars: 500 }, {
+    fetchPageText: async () => body,
+  });
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
+  assert.ok(text.length <= 500, `truncated text must fit maxChars, got ${text.length}`);
+  assert.doesNotMatch(text, /Contact/);
+  assert.match(text, /Article substance/);
+});
+
+test('read path keeps unsafe link targets inert', async () => {
+  const body = '<html><head><title>Links</title></head><body><p>Read <a href="javascript:alert(1)">click here</a> for detail.</p></body></html>';
+  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/links' }, {
+    fetchPageText: async () => body,
+  });
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
+  assert.doesNotMatch(text, /javascript:/);
+  assert.match(text, /click here/);
 });

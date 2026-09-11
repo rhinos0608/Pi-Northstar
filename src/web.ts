@@ -32,6 +32,7 @@
 import type { BackendCallResult } from './backend.js';
 import { fetchInit, fetchJson, fetchText, safeResponseJson, unsafeFetchJson, validateHttpUrl } from './http.js';
 import { normalizeUrl } from './fusion.js';
+import { chooseRepresentation } from './web-representation.js';
 import { dedupeBy, northstarTextResult } from './tool-output.js';
 import { type DnsLookup, resolvePublicHostname } from './network-policy.js';
 import { codexConfigured, searchCodex } from './codex-search.js';
@@ -58,6 +59,7 @@ import { tavilySearchAdapter } from './web-tavily.js';
 import { runAgentReport } from './web-agent-report.js';
 import { runSitemap } from './web-sitemap.js';
 import { firecrawlFetchAdapter, firecrawlSearchAdapter } from './firecrawl.js';
+import { presentPageText } from './web-presentation.js';
 import { jinaFetchAdapter, jinaSearchAdapter } from './jina.js';
 import { providerSignal, resolveWebProviderPolicy } from './web-provider-policy.js';
 import { normalizeGeneratedText, resolveWebNativeAiPolicy } from './web-native-ai.js';
@@ -199,7 +201,8 @@ const WEB_RRF_K = 60;
 
 /**
  * Uniform deterministic fusion over selected-order rankings. Deduplicates by
- * normalizeUrl (first provider in selected order keeps title/snippet),
+ * normalizeUrl (richest donor keeps title/snippet via chooseRepresentation;
+ * RRF score, provider index, contributor order, and final sort unchanged),
  * records every {backend, rank} contributor, and orders by RRF score, then
  * selected-provider index, then provider-local rank, then normalized URL.
  */
@@ -229,6 +232,7 @@ export function fuseWebSearchRankings(
       }
       existing.score += score;
       existing.contributors.push({ backend: ranking.backend, rank });
+      existing.hit = chooseRepresentation(existing.hit, hit);
     });
   });
   return [...byKey.entries()]
@@ -246,6 +250,9 @@ export function fuseWebSearchRankings(
       url: entry.hit.url,
       snippet: entry.hit.snippet ?? '',
       backend: entry.hit.backend,
+      ...(entry.hit.contentKind !== undefined ? { contentKind: entry.hit.contentKind } : {}),
+      ...(entry.hit.publishedDate !== undefined ? { publishedDate: entry.hit.publishedDate } : {}),
+      ...(entry.hit.author !== undefined ? { author: entry.hit.author } : {}),
       rrfScore: entry.score,
       contributors: entry.contributors,
     }));
@@ -803,6 +810,9 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
   })();
   const externalSidecarUrl = embeddingEnv.EMBEDDING_SIDECAR_BASE_URL;
 
+  // Per-call sidecar stops in the finally below so the spawned Python child
+  // never outlives the CLI worker that started it (no orphan processes).
+  let sidecar: SidecarManager | undefined;
   if (embeddingEnabled) {
     try {
       if (externalSidecarUrl) {
@@ -811,7 +821,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
         await embeddingClient.health();
       } else {
         // Try spawning local sidecar
-        const sidecar = new SidecarManager();
+        sidecar = new SidecarManager();
         await sidecar.ensureRunning();
         embeddingClient = new EmbeddingClient({ baseUrl: sidecar.getBaseUrl() });
       }
@@ -877,6 +887,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
       .filter((x): x is NonNullable<typeof x> => x != null)
       .slice(0, topK);
   }
+  if (sidecar) await sidecar.stop().catch(() => undefined);
 
   const fullText = resultChunks.length
     ? resultChunks.map((chunk, index) => `## ${index + 1}. ${chunk.title || chunk.url}\n${chunk.url}\n\n${chunk.content}`).join('\n\n')
@@ -1413,31 +1424,10 @@ export interface BoundedPageText {
   omittedChars: number;
 }
 
-function wordBoundarySlice(value: string, budget: number): string {
-  if (budget >= value.length) return value;
-  if (budget <= 0) return '';
-  const cut = value.slice(0, budget);
-  const idx = cut.lastIndexOf(' ');
-  if (idx > budget * 0.25) return cut.slice(0, idx).trimEnd();
-  return cut.trimEnd();
-}
-
 /** Bound page text to maxChars with a visible truncation marker inside budget. */
 export function boundPageText(content: string, maxChars: number): BoundedPageText {
-  if (content.length <= maxChars) return { text: content, shown: content, truncated: false, omittedChars: 0 };
-  const total = content.length;
-  const markerFor = (shownLen: number): string =>
-    `\n\n[truncated: showing ${shownLen} of ${total} chars; raise maxChars up to 50000 for more]`;
-  let budget = maxChars - markerFor(maxChars).length;
-  if (budget <= 0) {
-    return { text: markerFor(0).slice(0, maxChars), shown: '', truncated: true, omittedChars: total };
-  }
-  let shown = wordBoundarySlice(content, budget);
-  let marker = markerFor(shown.length);
-  const overflow = shown.length + marker.length - maxChars;
-  if (overflow > 0) {
-    shown = wordBoundarySlice(content, shown.length - overflow);
-    marker = markerFor(shown.length);
-  }
-  return { text: `${shown}${marker}`, shown, truncated: true, omittedChars: total - shown.length };
+  // Fetch-only semantic presentation (block/sentence truncation, nav
+  // filtering, link neutralization) lives in src/web-presentation.ts.
+  const presented = presentPageText(content, maxChars);
+  return { text: presented.text, shown: presented.shown, truncated: presented.truncated, omittedChars: presented.omittedChars };
 }
