@@ -14,8 +14,7 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
     name: 'github',
     label: 'GitHub',
     description:
-      'Work with GitHub repositories, files, trees, issues, pull requests, releases, ' +
-      'commits, code/repository search, and trending repositories via REST v3.',
+      'Canonical repo/file/tree/search/search_repos/trending/issues/pulls/releases/commits via REST v3 only (no GraphQL). GITHUB_TOKEN/GH_TOKEN optional for public reads. list_dir/code_search legacy spellings rejected; normalized entities; out-of-range rejected, never clamped.',
     promptSnippet:
       'Query or explore GitHub repositories, files, issues, pulls, releases, commits, and code with normalized results.',
     parameters: Type.Object({

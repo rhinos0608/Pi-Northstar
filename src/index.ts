@@ -86,7 +86,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'web_search',
     label: 'Web Search',
-    description: 'Search the public web for current sources and citations, or academic/public-data/community sources via research category.',
+    description: 'Canonical action search. Plain web search (limit 1-20); category "research" (limit 1-30) fans out over exactly 12 sources with no generic-web substitution. Normalized article entities; out-of-range input rejected, never clamped.',
     promptGuidelines: [
       'Use web_search when broad source discovery is needed before deeper retrieval.',
       'Use category "research" for academic literature and public-data sources (arXiv, Semantic Scholar, PubMed, Wikipedia, Hacker News, Stack Overflow, ...); source/yearFrom apply only there.',
@@ -108,7 +108,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus.',
+    description: 'Canonical read without query (full readable text of one URL); canonical crawl with query (ranked relevant chunks). maxChars <= 50000 honored on both paths; crawl caps topK <= 20, maxPages <= 25. Out-of-range rejected, never clamped; followLinks requires url + query.',
     promptSnippet: 'Fetch URL content — compose with web_search first to get URLs, then call fetch with query for semantic chunks. Prefer query over full-page fetches. Use followLinks to crawl interlinked pages on the same domain.',
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: 'Retrieval query. Omit to get the readable text of url instead of semantic chunks.' })),
@@ -128,7 +128,7 @@ export default function (pi: ExtensionAPI): void {
   if (desktop) {
     pi.registerTool({
       name: 'desktop', label: 'Desktop',
-      description: 'Bounded native desktop observation and interaction through manually installed Cua Driver.',
+      description: 'Bounded native desktop observation and interaction via manually installed Cua Driver (opt-in PI_SEARCH_DESKTOP_AUTOMATION=1). Observe AX-only first; mutations need fresh stateId, never retried after dispatch. Closed actions; bounded AX/output; no confirmation gate.',
       promptGuidelines: ['AX trees and screenshots may expose PII or credentials.', 'Mutations require fresh stateId and are never retried after dispatch.'],
       parameters: Type.Object({
         action: Type.Optional(StringEnum(DESKTOP_ACTIONS, { description: 'Desktop action to perform.' })),
@@ -249,7 +249,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'social',
     label: 'Social',
-    description: 'Read and search social/community platforms using native public APIs or ordered external backends.',
+    description: 'Read-only lookup in practice over canonical actions only (unknown/legacy spellings rejected; no write capability available). Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram (no post-detail/download), LinkedIn via OpenCLI. Deny-by-default write boundary; cursors pin backend; normalized social_* entities.',
     promptGuidelines: [
       'Use social for platform-specific public discussion research.',
       'For login-backed platforms, tell users they can run /reach-status first; V2EX is zero-config native.',
@@ -280,7 +280,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'media',
     label: 'Media',
-    description: 'YouTube (official Data API) and Bilibili metadata, search, and details + RSS/Atom feed reading.',
+    description: 'YouTube official Data API for search/details/hot (never transcript) else keyless oEmbed details-only; search/hot fail closed without a key, no web fallback. Keyless unofficial transcript (degraded, never yt-dlp). Bilibili search/details/hot/transcript + RSS/Atom feed reading.',
     promptGuidelines: [
       'Use media to search YouTube (set YOUTUBE_API_KEY) or Bilibili, get video details, or read feeds.',
       'For Bilibili, do not use yt-dlp; it uses bili-cli or OpenCLI backends.',
@@ -305,7 +305,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'browser',
     label: 'Browser',
-    description: 'Closed browser automation via agent-browser. Supports public browsing and loopback-only debug mode for local dev servers.',
+    description: 'agent-browser automation (CDP deprecated). Public mode with frozen-domain allowlist; loopback navigate enters origin-confined debug session. Reliability checks (stale-ref, click verification, overlay/scroll detection). Batch/job cannot target loopback; evaluate/set_cookies/batch sensitive-gated; cookies metadata only.',
     promptSnippet: 'Control a browser via agent-browser for live page interaction, screenshots, and cookie metadata inspection; values are never exposed. Set PI_SEARCH_BROWSER_BACKEND=cdp for explicit deprecated CDP rollback.',
     promptGuidelines: [
       'Uses agent-browser backend by default; set PI_SEARCH_BROWSER_BACKEND=cdp for explicit loopback CDP rollback.',

@@ -721,7 +721,7 @@ test('reddit: abort during CLI command propagates AbortError without falling thr
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cli-abort-'));
   try {
     const opencliPath = join(dir, 'opencli');
-    await writeFile(opencliPath, '#!/bin/sh\nsleep 30\n');
+    await writeFile(opencliPath, '#!/bin/sh\nwhile :; do :; done\n');
     await chmod(opencliPath, 0o700);
 
     const controller = new AbortController();
