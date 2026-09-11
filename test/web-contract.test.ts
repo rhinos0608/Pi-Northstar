@@ -236,6 +236,18 @@ test('web pagination unsupported: cursors rejected with cursor_invalid', () => {
   );
 });
 
+test('knowledge request validates flags: unknown keys, non-booleans, and empty reject', () => {
+  webError('invalid_request', () => validateWebRequest({ action: 'search', query: 'q', knowledge: { entities: true, provider: 'diffbot' } }));
+  webError('invalid_request', () => validateWebRequest({ action: 'search', query: 'q', knowledge: { entities: 'yes' } }));
+  webError('invalid_request', () => validateWebRequest({ action: 'search', query: 'q', knowledge: {} }));
+  webError('invalid_request', () => validateWebRequest({ action: 'search', query: 'q', knowledge: { entities: false, facts: false } }));
+  webError('invalid_request', () => validateWebRequest({ action: 'search', query: 'q', knowledge: 'entities' }));
+  const { request } = validateWebRequest({ action: 'search', query: 'q', knowledge: { entities: true, enhance: false } });
+  assert.deepEqual(request.knowledge, { entities: true, enhance: false });
+  const omitted = validateWebRequest({ action: 'search', query: 'q' });
+  assert.equal(omitted.request.knowledge, undefined);
+});
+
 test('search preference order places diffbot after keyed providers, before keyless', async () => {
   const { WEB_BACKEND_PREFERENCE } = await import('../src/web-contract.js');
   assert.deepEqual([...WEB_BACKEND_PREFERENCE.search], [

@@ -23,6 +23,7 @@
 
 import { createHash } from 'node:crypto';
 import { SocialError } from './social-contract.js';
+import type { WebKnowledgeRequest } from './web-search-types.js';
 
 // ── Core vocabulary ──
 
@@ -117,6 +118,14 @@ export interface WebRequestInput {
   /** 'research'/'academic' selects the research-category search cap (30). */
   category?: string;
   cursor?: string;
+  /**
+   * Optional model-facing knowledge request. Validated object with known
+   * boolean flags only (entities/facts/topics/sentiment/enhance); at least
+   * one true flag required when supplied. Unknown keys, non-boolean values,
+   * and all-false objects reject with invalid_request. Environment gate
+   * (PI_SEARCH_KG_ENRICHMENT) enforced at runtime, not here.
+   */
+  knowledge?: unknown;
 }
 
 export interface WebRequest {
@@ -128,6 +137,7 @@ export interface WebRequest {
   maxPages: number;
   maxChars: number;
   researchCategory: boolean;
+  knowledge?: WebKnowledgeRequest;
 }
 
 function cleanField(value: unknown): string | undefined {
@@ -138,6 +148,45 @@ function cleanField(value: unknown): string | undefined {
 
 function isResearchCategory(category: unknown): boolean {
   return category === 'research' || category === 'academic';
+}
+
+const WEB_KNOWLEDGE_KEYS: ReadonlySet<string> = new Set([
+  'entities',
+  'facts',
+  'topics',
+  'sentiment',
+  'enhance',
+]);
+
+/**
+ * Validate the optional model-facing knowledge request. Unknown keys and
+ * non-boolean values reject with invalid_request; a supplied object needs at
+ * least one true flag. Returns undefined when omitted.
+ */
+function parseWebKnowledge(input: unknown): WebKnowledgeRequest | undefined {
+  if (input === undefined) return undefined;
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw webError('invalid_request', 'knowledge must be an object with boolean flags');
+  }
+  const record = input as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!WEB_KNOWLEDGE_KEYS.has(key)) {
+      throw webError('invalid_request', `unknown knowledge option: ${key.slice(0, 32)}`);
+    }
+  }
+  const out: WebKnowledgeRequest = {};
+  for (const key of WEB_KNOWLEDGE_KEYS) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'boolean') {
+      throw webError('invalid_request', `knowledge.${key} must be a boolean`);
+    }
+    (out as Record<string, boolean>)[key] = value;
+  }
+  if (!Object.values(out).some((value) => value === true)) {
+    throw webError('invalid_request', 'knowledge requires at least one true flag');
+  }
+  return out;
 }
 
 function resolveBoundedInt(
@@ -201,9 +250,15 @@ export function validateWebRequest(input: WebRequestInput): { request: WebReques
   const searchCap = researchCategory ? RESEARCH_SEARCH_LIMIT_MAX : WEB_SEARCH_LIMIT_MAX;
   const limit = resolveBoundedInt(input.limit, 'limit', 1, searchCap, DEFAULT_WEB_SEARCH_LIMIT);
 
+  const rawKnowledge = (input as { knowledge?: unknown }).knowledge;
+  if (rawKnowledge !== undefined && action !== 'search') {
+    throw webError('invalid_request', 'knowledge is only supported on web search');
+  }
+  const knowledge = parseWebKnowledge(rawKnowledge);
   const request: WebRequest = { action, limit, topK, maxPages, maxChars, researchCategory };
   if (query !== undefined) request.query = query;
   if (url !== undefined) request.url = url;
+  if (knowledge !== undefined) request.knowledge = knowledge;
   return { request, warnings };
 }
 

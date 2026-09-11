@@ -113,13 +113,12 @@ test('native web_search thin delegation still serves the mocked duckduckgo backe
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request) => {
     const url = String(input);
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({
-        Heading: 'Example',
-        AbstractURL: 'https://example.com/delegated',
-        AbstractText: 'Delegated result',
-        RelatedTopics: [],
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return new Response(
+        '<html><body><div><a class="result__a" href="https://example.com/delegated">Example</a>' +
+        '<a class="result__snippet" href="https://example.com/delegated">Delegated result</a></div></body></html>',
+        { status: 200, headers: { 'content-type': 'text/html' } },
+      );
     }
     throw new Error(`unexpected fetch ${url}`);
   };
@@ -129,6 +128,107 @@ test('native web_search thin delegation still serves the mocked duckduckgo backe
     const details = result.details as { results: Array<{ url: string }>; northstar: { data: { kind: string } } };
     assert.equal(details.results.length, 1);
     assert.equal(details.northstar.data.kind, 'entities');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('query-less read surfaces gated external summary and metadata outside source content', async () => {
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      return new Response('analyze down', { status: 500 });
+    }
+    if (url.startsWith('https://api.firecrawl.dev/v2/scrape')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          markdown: 'query-less external page words',
+          summary: 'QUERYLESS VENDOR SUMMARY',
+          metadata: { title: 'Queryless Title' },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('native fetch failed');
+  };
+  try {
+    const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/article' }, {
+      env: {
+        DIFFBOT_TOKEN: 'test-token',
+        PI_SEARCH_EXTERNAL_FETCH: '1',
+        PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
+        FIRECRAWL_API_KEY: 'firecrawl-key',
+      },
+      lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+    });
+    const details = result.details as {
+      content: string;
+      externalFetch: { backend: string; externalProcessing: boolean; qualityImpact: string };
+      generatedText: Array<{ kind: string; text: string; provenance: { kind: string } }>;
+      fallback?: unknown;
+      northstar: { status: string };
+    };
+    assert.match(details.content, /query-less external page words/);
+    assert.doesNotMatch(details.content, /QUERYLESS VENDOR SUMMARY/);
+    assert.equal(details.externalFetch.backend, 'firecrawl');
+    assert.equal(details.externalFetch.externalProcessing, true);
+    assert.equal(details.externalFetch.qualityImpact, 'not_assessed');
+    assert.equal(details.generatedText.length, 1);
+    assert.equal(details.generatedText[0]?.kind, 'summary');
+    assert.match(details.generatedText[0]?.text ?? '', /QUERYLESS VENDOR SUMMARY/);
+    assert.equal(details.generatedText[0]?.provenance.kind, 'result_url');
+    assert.equal(details.fallback, undefined);
+    assert.equal(details.northstar.status, 'degraded');
+    assert.doesNotMatch(JSON.stringify(result), /firecrawl-key/);
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('query-less read surfaces gated external fetch without DIFFBOT_TOKEN', async () => {
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      throw new Error('Analyze must not be called without a token');
+    }
+    if (url.startsWith('https://api.firecrawl.dev/v2/scrape')) {
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          markdown: 'no-token query-less external page words',
+          summary: 'NO-TOKEN QUERYLESS VENDOR SUMMARY',
+          metadata: { title: 'No-Token Queryless Title' },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('native fetch failed');
+  };
+  try {
+    const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/article' }, {
+      env: {
+        PI_SEARCH_EXTERNAL_FETCH: '1',
+        PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
+        FIRECRAWL_API_KEY: 'firecrawl-key',
+      },
+      lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+    });
+    const details = result.details as {
+      content: string;
+      externalFetch: { backend: string; externalProcessing: boolean; qualityImpact: string };
+      generatedText: Array<{ kind: string; text: string; provenance: { kind: string } }>;
+      fallback?: unknown;
+      northstar: { status: string };
+    };
+    assert.match(details.content, /no-token query-less external page words/);
+    assert.doesNotMatch(details.content, /NO-TOKEN QUERYLESS VENDOR SUMMARY/);
+    assert.equal(details.externalFetch.backend, 'firecrawl');
+    assert.equal(details.externalFetch.externalProcessing, true);
+    assert.equal(details.fallback, undefined);
+    assert.equal(details.generatedText.length, 1);
+    assert.match(details.generatedText[0]?.text ?? '', /NO-TOKEN QUERYLESS VENDOR SUMMARY/);
+    assert.doesNotMatch(JSON.stringify(result), /firecrawl-key/);
   } finally {
     globalThis.fetch = savedFetch;
   }

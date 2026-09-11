@@ -107,42 +107,44 @@ test('codex search posts fixed endpoint, bearer headers, query-only payload; out
   }
 });
 
-test('codex is primary when credentials available: provider order first, normalized-URL dedup, DDG appended', async () => {
+test('codex participates in uniform RRF: no primary, first-selected snippet wins', async () => {
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request) => {
     const url = String(input);
     if (url.startsWith(CHATGPT_URL)) {
       return new Response(JSON.stringify({ results: [
         { url: 'https://www.example.com/a?utm_source=codex', title: 'C-A', snippet: 'ca' },
-        { url: 'https://example.com/a', title: 'C-A-dup', snippet: 'dup' },
-        { url: 'https://example.com/b', title: 'C-B', snippet: 'cb' },
         { url: 'https://example.com/c', title: 'C-C', snippet: 'cc' },
       ] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({
-        Heading: 'DDG',
-        AbstractURL: 'https://example.com/b',
-        AbstractText: 'ddg b',
-        RelatedTopics: [
-          { Text: 'DDG D', FirstURL: 'https://example.com/d' },
-          { Text: 'DDG A', FirstURL: 'https://www.example.com/a' },
-        ],
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return new Response(
+        '<html><body>' +
+        '<div><a class="result__a" href="https://example.com/a">DDG A</a>' +
+        '<a class="result__snippet" href="https://example.com/a">ddg a</a></div>' +
+        '<div><a class="result__a" href="https://example.com/d">DDG D</a>' +
+        '<a class="result__snippet" href="https://example.com/d">ddg d</a></div>' +
+        '</body></html>',
+        { status: 200, headers: { 'content-type': 'text/html' } },
+      );
     }
     throw new Error(`unexpected fetch ${url}`);
   };
   try {
-    const result = await callNativeTool('web_search', { query: 'x', limit: 20 }, { env: { CODEX_ACCESS_TOKEN: 'tk' } });
+    const result = await callNativeTool('web_search', { query: 'x', limit: 20 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'codex,duckduckgo', CODEX_ACCESS_TOKEN: 'tk' },
+    });
     const details = result.details as {
-      results: Array<{ url: string }>;
+      results: Array<{ url: string; snippet: string; contributors?: Array<{ backend: string; rank: number }> }>;
       fusion: { backends: string[]; primary?: string; failures: Array<{ backend: string; error: string }> };
     };
     assert.deepEqual(
       details.results.map((r) => r.url),
-      ['https://www.example.com/a?utm_source=codex', 'https://example.com/b', 'https://example.com/c', 'https://example.com/d'],
+      ['https://www.example.com/a?utm_source=codex', 'https://example.com/c', 'https://example.com/d'],
     );
-    assert.equal(details.fusion.primary, 'codex');
+    assert.equal(details.results[0]?.snippet, 'ca', 'first provider in selected order keeps the snippet');
+    assert.deepEqual(details.results[0]?.contributors, [{ backend: 'codex', rank: 1 }, { backend: 'duckduckgo', rank: 1 }]);
+    assert.equal(details.fusion.primary, undefined, 'uniform RRF never assigns a primary');
     assert.deepEqual(details.fusion.backends.sort(), ['codex', 'duckduckgo']);
     assert.equal(details.fusion.failures.length, 0);
   } finally {
@@ -150,7 +152,7 @@ test('codex is primary when credentials available: provider order first, normali
   }
 });
 
-test('codex failure falls back to remaining providers; 5xx retried, body never in output', async () => {
+test('codex 5xx fails once without retry; survivors retained, body never in output', async () => {
   let chatgptCalls = 0;
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request) => {
@@ -159,13 +161,19 @@ test('codex failure falls back to remaining providers; 5xx retried, body never i
       chatgptCalls++;
       return new Response('{"error":"internal-secret-detail"}', { status: 500 });
     }
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({ Heading: 'D', AbstractURL: 'https://example.com/ddg', AbstractText: 'ddg only', RelatedTopics: [] }), { status: 200 });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return new Response(
+        '<html><body><div><a class="result__a" href="https://example.com/ddg">D</a>' +
+        '<a class="result__snippet" href="https://example.com/ddg">ddg only</a></div></body></html>',
+        { status: 200, headers: { 'content-type': 'text/html' } },
+      );
     }
     throw new Error(`unexpected fetch ${url}`);
   };
   try {
-    const result = await callNativeTool('web_search', { query: 'x' }, { env: { CODEX_ACCESS_TOKEN: 'tk' } });
+    const result = await callNativeTool('web_search', { query: 'x' }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'codex,duckduckgo', CODEX_ACCESS_TOKEN: 'tk' },
+    });
     const details = result.details as {
       results: Array<{ url: string }>;
       fusion: { backends: string[]; primary?: string; failures: Array<{ backend: string; error: string }> };
@@ -177,7 +185,7 @@ test('codex failure falls back to remaining providers; 5xx retried, body never i
     assert.equal(details.fusion.failures[0]?.backend, 'codex');
     assert.match(details.fusion.failures[0]?.error ?? '', /HTTP 500/);
     assert.doesNotMatch(JSON.stringify(details), /internal-secret-detail/);
-    assert.equal(chatgptCalls, 2, '5xx must be retried once (maxAttempts 2)');
+    assert.equal(chatgptCalls, 1, '5xx costs exactly one call: providers never retry');
   } finally {
     globalThis.fetch = savedFetch;
   }
@@ -214,8 +222,12 @@ test('explicit override excludes codex unless listed; listed-but-unconfigured co
       chatgptCalls++;
       throw new Error('codex must not be called');
     }
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({ Heading: 'D', AbstractURL: 'https://example.com/ddg', AbstractText: 'd', RelatedTopics: [] }), { status: 200 });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return new Response(
+        '<html><body><div><a class="result__a" href="https://example.com/ddg">D</a>' +
+        '<a class="result__snippet" href="https://example.com/ddg">d</a></div></body></html>',
+        { status: 200, headers: { 'content-type': 'text/html' } },
+      );
     }
     throw new Error(`unexpected ${url}`);
   };
@@ -237,7 +249,7 @@ test('explicit override excludes codex unless listed; listed-but-unconfigured co
   );
 });
 
-test('semantic source URL discovery uses codex-first ordering', async () => {
+test('semantic source URL discovery uses uniform RRF ordering', async () => {
   const requestedPaths: string[] = [];
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request) => {
@@ -248,8 +260,12 @@ test('semantic source URL discovery uses codex-first ordering', async () => {
         { url: 'https://example.com/a', title: 'A', snippet: 'a' },
       ] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.href.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({ Heading: 'B', AbstractURL: 'https://example.com/b', AbstractText: 'b', RelatedTopics: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.href.startsWith('https://duckduckgo.com/html/')) {
+      return new Response(
+        '<html><body><div><a class="result__a" href="https://example.com/b">B</a>' +
+        '<a class="result__snippet" href="https://example.com/b">b</a></div></body></html>',
+        { status: 200, headers: { 'content-type': 'text/html' } },
+      );
     }
     requestedPaths.push(url.pathname);
     return new Response(`<html><body><h1>Page ${url.pathname.slice(1).toUpperCase()}</h1><p>This page contains unique ${url.pathname === '/a' ? 'alpha' : 'beta'} material about ranking order.</p></body></html>`, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -262,10 +278,10 @@ test('semantic source URL discovery uses codex-first ordering', async () => {
       maxPages: 3,
       topK: 4,
     }, {
-      env: { CODEX_ACCESS_TOKEN: 'tk', PI_SEARCH_EMBEDDING_ENABLED: '0' },
+      env: { CODEX_ACCESS_TOKEN: 'tk', PI_SEARCH_EMBEDDING_ENABLED: '0', PI_SEARCH_WEB_BACKENDS: 'codex,duckduckgo' },
       lookup: async () => [{ address: '93.184.216.34', family: 4 }],
     });
-    assert.deepEqual(requestedPaths, ['/a', '/b'], 'private discovered URL skipped; codex public URL stays ahead of DDG');
+    assert.deepEqual(requestedPaths, ['/b', '/a'], 'uniform RRF orders by score; private discovered URL skipped');
   } finally {
     globalThis.fetch = savedFetch;
   }

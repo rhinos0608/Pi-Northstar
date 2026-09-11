@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { test } from 'node:test';
 import { callNativeTool } from '../src/native-tools.js';
-import { fetchReadablePage } from '../src/web.js';
+import { fetchReadablePage, fuseWebSearchRankings } from '../src/web.js';
 
 function invalidRequestCode(err: unknown): string | undefined {
   return (err as { code?: string })?.code;
@@ -51,18 +51,22 @@ async function closeServer(server: Server): Promise<void> {
 
 const NO_EMBEDDING = { PI_SEARCH_EMBEDDING_ENABLED: '0' };
 
+/** DuckDuckGo single-HTML-call fixture: result__a href + result__snippet pairs. */
+function ddgHtmlResponse(entries: Array<{ title: string; url: string; snippet: string }>): Response {
+  const body = entries.map((entry) =>
+    `<div><a class="result__a" href="${entry.url}">${entry.title}</a>` +
+    `<a class="result__snippet" href="${entry.url}">${entry.snippet}</a></div>`,
+  ).join('');
+  return new Response(`<html><body>${body}</body></html>`, { status: 200, headers: { 'content-type': 'text/html' } });
+}
+
 // ── web_search backend behavior (moved from native-tools.test.ts) ──
 
 test('native web_search fans out configured backends and fuses duplicate URLs with RRF', async () => {
   await withFetch(async (input) => {
     const url = String(input);
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({
-        Heading: 'Example',
-        AbstractURL: 'https://example.com/page?utm_source=ddg',
-        AbstractText: 'Duck result',
-        RelatedTopics: [],
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'Example', url: 'https://example.com/page?utm_source=ddg', snippet: 'Duck result' }]);
     }
     if (url.startsWith('https://api.search.brave.com/')) {
       return new Response(JSON.stringify({
@@ -170,8 +174,8 @@ test('native web_search rejects unknown backends before any network call', async
 test('legacy SEARCH_WEB_BACKENDS flag is ignored; PI_SEARCH_WEB_BACKENDS is the only override', async () => {
   await withFetch(async (input) => {
     const url = String(input);
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({ Heading: 'H', AbstractURL: 'https://example.com/x', AbstractText: 't', RelatedTopics: [] }), { status: 200 });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'H', url: 'https://example.com/x', snippet: 't' }]);
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
@@ -179,6 +183,7 @@ test('legacy SEARCH_WEB_BACKENDS flag is ignored; PI_SEARCH_WEB_BACKENDS is the 
     const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, { env: { SEARCH_WEB_BACKENDS: 'bogus' } });
     assert.match(JSON.stringify(result.details), /example\.com/);
   });
+
 });
 
 // ── Envelope normalization: article entities, no raw passthrough ──
@@ -186,16 +191,11 @@ test('legacy SEARCH_WEB_BACKENDS flag is ignored; PI_SEARCH_WEB_BACKENDS is the 
 test('web_search success builds normalized article entities with a northstar envelope', async () => {
   await withFetch(async (input) => {
     const url = String(input);
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({
-        Heading: '',
-        AbstractURL: '',
-        AbstractText: '',
-        RelatedTopics: [
-          { Text: 'First hit - more', FirstURL: 'https://example.com/a' },
-          { Text: 'Second hit', FirstURL: 'https://example.com/b' },
-        ],
-      }), { status: 200 });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([
+        { title: 'First hit', url: 'https://example.com/a', snippet: 'First snippet' },
+        { title: 'Second hit', url: 'https://example.com/b', snippet: 'Second snippet' },
+      ]);
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
@@ -488,13 +488,8 @@ test('web_search diffbot participates in RRF without primary weighting', async (
         ],
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({
-        Heading: 'Shared',
-        AbstractURL: 'https://www.example.com/shared',
-        AbstractText: 'duck snippet',
-        RelatedTopics: [],
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'Shared', url: 'https://www.example.com/shared', snippet: 'duck snippet' }]);
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
@@ -554,13 +549,8 @@ test('web_search returns other providers when Diffbot rejects above operator cap
       diffbotCalls++;
       return new Response(JSON.stringify({ search_results: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({
-        Heading: 'Example',
-        AbstractURL: 'https://example.com/capped',
-        AbstractText: 'duck result',
-        RelatedTopics: [],
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'Example', url: 'https://example.com/capped', snippet: 'duck result' }]);
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
@@ -702,17 +692,12 @@ test('fetch shares one Analyze budget across pages (budget 1 = single fallback c
       analyzeCalls++;
       return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/article', 'shared budget fallback words '.repeat(40))), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (url.startsWith('https://api.duckduckgo.com/')) {
-      return new Response(JSON.stringify({
-        Heading: '',
-        AbstractURL: '',
-        AbstractText: '',
-        RelatedTopics: [
-          { Text: 'one - more', FirstURL: 'https://example.com/one' },
-          { Text: 'two - more', FirstURL: 'https://example.com/two' },
-          { Text: 'three - more', FirstURL: 'https://example.com/three' },
-        ],
-      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([
+        { title: 'one', url: 'https://example.com/one', snippet: 'one snippet' },
+        { title: 'two', url: 'https://example.com/two', snippet: 'two snippet' },
+        { title: 'three', url: 'https://example.com/three', snippet: 'three snippet' },
+      ]);
     }
     throw new Error('fetch failed');
   }, async () => {
@@ -813,4 +798,597 @@ test('fetchReadablePage without token returns empty bridge result without a seco
     assert.equal(page.content, '');
   });
   assert.equal(plainFetches, 0, 'legacy no-token path must not issue a second fetch for empty bridge content');
+});
+
+// ── Bounded selection + uniform RRF (approved web-search runtime) ──
+
+test('default allowlist selects exactly the first three configured providers', async () => {
+  const calls: string[] = [];
+  await withFetch(async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.startsWith('https://api.tavily.com/search')) {
+      return new Response(JSON.stringify({ results: [{ title: 'T', url: 'https://example.com/t', content: 'tavily body' }] }), { status: 200 });
+    }
+    if (url.startsWith('https://api.exa.ai/search')) {
+      return new Response(JSON.stringify({ results: [{ title: 'E', url: 'https://example.com/e', text: 'exa body' }] }), { status: 200 });
+    }
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({ web: { results: [{ title: 'B', url: 'https://example.com/b', description: 'brave body' }] } }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { TAVILY_API_KEY: 't', EXA_API_KEY: 'e', BRAVE_API_KEY: 'b' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string }>;
+      fusion: { selected: string[]; runnable: string[]; unavailable: string[]; backends: string[] };
+    };
+    assert.deepEqual(details.fusion.selected, ['tavily', 'exa', 'brave']);
+    assert.deepEqual(details.fusion.runnable, ['tavily', 'exa', 'brave']);
+    assert.deepEqual(details.fusion.unavailable, []);
+    assert.deepEqual(details.fusion.backends.sort(), ['brave', 'exa', 'tavily']);
+    assert.equal(details.results.length, 3);
+    assert.ok(calls.every((url) => !url.includes('duckduckgo')), 'unselected duckduckgo must not be called');
+  });
+});
+
+test('explicit eight backends dispatch exactly eight calls concurrently', async () => {
+  let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    calls++;
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    inFlight--;
+    if (url.startsWith('https://api.tavily.com/search')) {
+      return new Response(JSON.stringify({ results: [{ title: 'T', url: 'https://example.com/t', content: 't' }] }), { status: 200 });
+    }
+    if (url.startsWith('https://api.exa.ai/search')) {
+      return new Response(JSON.stringify({ results: [{ title: 'E', url: 'https://example.com/e', text: 'e' }] }), { status: 200 });
+    }
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({ web: { results: [{ title: 'B', url: 'https://example.com/b', description: 'b' }] } }), { status: 200 });
+    }
+    if (url.startsWith('https://llm.diffbot.com/api/v1/web_search')) {
+      return new Response(JSON.stringify({ search_results: [{ pageUrl: 'https://example.com/d', title: 'D', content: 'd' }] }), { status: 200 });
+    }
+    if (url.startsWith('https://api.firecrawl.dev/v2/search')) {
+      return new Response(JSON.stringify({ success: true, data: { web: [{ url: 'https://example.com/f', title: 'F', description: 'f' }] } }), { status: 200 });
+    }
+    if (url.startsWith('https://s.jina.ai/')) {
+      return new Response(JSON.stringify({ data: [{ url: 'https://example.com/j', title: 'J', description: 'j' }] }), { status: 200 });
+    }
+    if (url.startsWith('https://searxng.example/search')) {
+      return new Response(JSON.stringify({ results: [{ title: 'S', url: 'https://example.com/s', content: 's' }] }), { status: 200 });
+    }
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'G', url: 'https://example.com/g', snippet: 'g' }]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const order = 'tavily,exa,brave,diffbot,firecrawl,jina,searxng,duckduckgo';
+    const result = await callNativeTool('web_search', { query: 'example', limit: 8 }, {
+      env: {
+        PI_SEARCH_WEB_BACKENDS: order,
+        TAVILY_API_KEY: 't', EXA_API_KEY: 'e', BRAVE_API_KEY: 'b', DIFFBOT_TOKEN: 'd',
+        FIRECRAWL_API_KEY: 'f', JINA_API_KEY: 'j', SEARXNG_BASE_URL: 'https://searxng.example',
+      },
+    });
+    const details = result.details as {
+      results: Array<{ url: string }>;
+      fusion: { selected: string[]; runnable: string[]; backends: string[] };
+    };
+    assert.equal(calls, 8, 'exactly eight provider calls, no more');
+    assert.ok(maxInFlight > 1, `providers run concurrently, got max in-flight ${maxInFlight}`);
+    assert.deepEqual(details.fusion.selected, order.split(','));
+    assert.equal(details.results.length, 8);
+    assert.deepEqual(details.fusion.backends.sort(), order.split(',').sort());
+  });
+});
+
+test('duplicate and ninth explicit backends reject before any provider call', async () => {
+  for (const backends of [
+    'brave,brave',
+    'tavily,exa,brave,diffbot,firecrawl,jina,searxng,duckduckgo,codex',
+  ]) {
+    let calls = 0;
+    await withFetch(async () => {
+      calls++;
+      return new Response('{}', { status: 200 });
+    }, async () => {
+      await assert.rejects(
+        () => callNativeTool('web_search', { query: 'example' }, { env: { PI_SEARCH_WEB_BACKENDS: backends, BRAVE_API_KEY: 'b' } }),
+        backends.includes('brave,brave') ? /duplicate/ : /at most 8/,
+      );
+    });
+    assert.equal(calls, 0, `${backends} must not spawn any provider call`);
+  }
+});
+
+test('explicit unavailable provider records unavailable without replenishment', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({ web: { results: [{ title: 'B', url: 'https://example.com/b', description: 'b' }] } }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'brave,exa', BRAVE_API_KEY: 'b' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string }>;
+      fusion: { selected: string[]; runnable: string[]; unavailable: string[]; backends: string[] };
+    };
+    assert.deepEqual(details.fusion.selected, ['brave', 'exa']);
+    assert.deepEqual(details.fusion.runnable, ['brave']);
+    assert.deepEqual(details.fusion.unavailable, ['exa']);
+    assert.deepEqual(details.fusion.backends, ['brave']);
+    assert.equal(details.results.length, 1);
+  });
+});
+
+test('codex participates in uniform RRF with no primary weighting', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://chatgpt.com/backend-api/codex/alpha/search')) {
+      return new Response(JSON.stringify({ results: [
+        { url: 'https://example.com/shared?utm_source=codex', title: 'Shared', snippet: 'codex snippet' },
+        { url: 'https://example.com/codex-only', title: 'Codex only', snippet: 'c' },
+      ] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([
+        { title: 'Shared', url: 'https://www.example.com/shared', snippet: 'duck snippet' },
+        { title: 'DDG only', url: 'https://example.com/ddg-only', snippet: 'd' },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'codex,duckduckgo', CODEX_ACCESS_TOKEN: 'tok' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string; rrfScore?: number; contributors?: Array<{ backend: string; rank: number }> }>;
+      fusion: { backends: string[]; primary?: string };
+    };
+    assert.equal(details.results.length, 3);
+    assert.equal(details.fusion.primary, undefined, 'no provider takes primary weighting');
+    assert.deepEqual(details.fusion.backends.sort(), ['codex', 'duckduckgo']);
+    const first = details.results[0]!;
+    assert.equal(first.contributors?.length, 2, 'shared URL records both contributors');
+    assert.ok((first.rrfScore ?? 0) > 0.03, 'shared URL outranks singletons by uniform RRF');
+  });
+});
+
+test('uniform fusion keeps first-selected snippet and breaks ties deterministically', () => {
+  const fused = fuseWebSearchRankings([
+    { backend: 'exa', hits: [{ title: 'Exa shared', url: 'https://example.com/shared', snippet: 'from exa', backend: 'exa' }] },
+    { backend: 'brave', hits: [{ title: 'Brave shared', url: 'https://www.example.com/shared', snippet: 'from brave', backend: 'brave' }] },
+  ], 8);
+  assert.equal(fused.length, 1);
+  assert.equal(fused[0]?.snippet, 'from exa');
+  assert.deepEqual(fused[0]?.contributors, [{ backend: 'exa', rank: 1 }, { backend: 'brave', rank: 1 }]);
+
+  const tied = fuseWebSearchRankings([
+    { backend: 'brave', hits: [{ title: 'B', url: 'https://example.com/b', snippet: 'b', backend: 'brave' }] },
+    { backend: 'exa', hits: [{ title: 'A', url: 'https://example.com/a', snippet: 'a', backend: 'exa' }] },
+  ], 8);
+  assert.deepEqual(tied.map((hit) => hit.backend), ['brave', 'exa'], 'equal RRF scores follow selected-provider order');
+});
+
+test('failed providers are never retried: 429 and 5xx cost one call each', async () => {
+  for (const status of [429, 500]) {
+    let calls = 0;
+    await withFetch(async (input) => {
+      const url = String(input);
+      if (url.startsWith('https://api.search.brave.com/')) {
+        calls++;
+        return new Response('error', { status });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }, async () => {
+      await assert.rejects(
+        () => callNativeTool('web_search', { query: 'example' }, { env: { PI_SEARCH_WEB_BACKENDS: 'brave', BRAVE_API_KEY: 'b' } }),
+        /All web search backends failed/,
+      );
+    });
+    assert.equal(calls, 1, `HTTP ${status} must not be retried`);
+  }
+});
+
+test('caller abort cancels every active request instead of a failure envelope', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  await withFetch(async (_input, init) => {
+    calls++;
+    if ((init?.signal as AbortSignal | undefined)?.aborted) {
+      throw new DOMException('aborted', 'AbortError');
+    }
+    return ddgHtmlResponse([{ title: 'X', url: 'https://example.com/x', snippet: 'x' }]);
+  }, async () => {
+    await assert.rejects(
+      () => callNativeTool('web_search', { query: 'example' }, {
+        env: { PI_SEARCH_WEB_BACKENDS: 'duckduckgo,brave', BRAVE_API_KEY: 'b' },
+        signal: controller.signal,
+      }),
+      (err: unknown) => (err as { name?: string }).name === 'AbortError',
+    );
+  });
+  assert.equal(calls, 2, 'both providers dispatch, then abort wins');
+});
+
+test('partial provider failure retains surviving results with failure detail', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.tavily.com/search')) {
+      return new Response('error', { status: 500 });
+    }
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({ web: { results: [{ title: 'B', url: 'https://example.com/b', description: 'b' }] } }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'tavily,brave', TAVILY_API_KEY: 't', BRAVE_API_KEY: 'b' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string }>;
+      fusion: { backends: string[]; failures: Array<{ backend: string; error: string }> };
+    };
+    assert.equal(details.results.length, 1);
+    assert.deepEqual(details.fusion.backends, ['brave']);
+    assert.equal(details.fusion.failures.length, 1);
+    assert.equal(details.fusion.failures[0]?.backend, 'tavily');
+  });
+});
+
+test('provider-native summaries and answers stay separate from retrieval snippets', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.exa.ai/search')) {
+      return new Response(JSON.stringify({ results: [{
+        title: 'E', url: 'https://example.com/e', text: 'original body', highlights: ['highlight excerpt'], summary: 'AI SUMMARY TEXT',
+      }] }), { status: 200 });
+    }
+    if (url.startsWith('https://api.tavily.com/search')) {
+      return new Response(JSON.stringify({
+        answer: 'TAVILY ANSWER TEXT',
+        results: [{ title: 'T', url: 'https://example.com/t', content: 'tavily body' }],
+      }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'exa,tavily', EXA_API_KEY: 'e', TAVILY_API_KEY: 't' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string; snippet: string }>;
+      nativeAi: Array<{ kind: string; backend: string; url?: string; text: string; provenance: { kind: string; urls: string[] }; claimCitations: boolean }>;
+    };
+    const exaHit = details.results.find((hit) => hit.url === 'https://example.com/e')!;
+    assert.match(exaHit.snippet, /highlight excerpt/);
+    assert.doesNotMatch(JSON.stringify(details.results), /AI SUMMARY TEXT/);
+    assert.doesNotMatch(JSON.stringify(details.results), /TAVILY ANSWER TEXT/);
+    const summary = details.nativeAi.find((item) => item.kind === 'summary')!;
+    assert.equal(summary.backend, 'exa');
+    assert.deepEqual(summary.provenance, { kind: 'result_url', urls: ['https://example.com/e'] });
+    assert.equal(summary.claimCitations, false);
+    const answer = details.nativeAi.find((item) => item.kind === 'answer')!;
+    assert.equal(answer.backend, 'tavily');
+    assert.equal(answer.provenance.kind, 'supporting_result_set');
+    assert.ok(answer.provenance.urls.includes('https://example.com/t'));
+    assert.equal(answer.claimCitations, false);
+    assert.doesNotMatch(JSON.stringify(result), /backend_text/);
+  });
+});
+
+test('semantic discovery uses identical selection rules', async () => {
+  let calls = 0;
+  await withFetch(async () => {
+    calls++;
+    return new Response('{}', { status: 200 });
+  }, async () => {
+    await assert.rejects(
+      () => callNativeTool('semantic_crawl', {
+        source: { type: 'search', query: 'discovery words' },
+        query: 'discovery words',
+      }, { env: { ...NO_EMBEDDING, PI_SEARCH_WEB_BACKENDS: 'bogus' } }),
+      /Unknown web search backends/,
+    );
+  });
+  assert.equal(calls, 0, 'unknown backend must not spawn discovery calls');
+
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'Seed', url: 'https://example.com/seed', snippet: 'seed snippet' }]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('semantic_crawl', {
+      source: { type: 'search', query: 'seed content words' },
+      query: 'seed content words',
+    }, {
+      fetchPageText: async () => '<html><head><title>Seed</title></head><body><p>seed content words for discovery testing. ' + 'Additional descriptive sentences about the seed page keep the chunk above the minimum size. '.repeat(10) + '</p></body></html>',
+      env: { ...NO_EMBEDDING, PI_SEARCH_WEB_BACKENDS: 'duckduckgo' },
+    });
+    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
+    assert.match(text, /seed content words for discovery testing/);
+  });
+});
+
+test('research-category web_search invokes zero generic providers', async () => {
+  let calls = 0;
+  await withFetch(async () => {
+    calls++;
+    return new Response('{}', { status: 200 });
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'attention', category: 'research', limit: 5 }, { env: {} });
+    const details = result.details as {
+      results: unknown[];
+      northstar: { data: { kind: string; entities: unknown[] } };
+    };
+    assert.equal(details.results.length, 0);
+    assert.equal(details.northstar.data.kind, 'entities');
+    assert.equal(details.northstar.data.entities.length, 0);
+  });
+  assert.equal(calls, 0, 'research category must not call generic providers');
+});
+
+// ── Optional knowledge composition (dual-gated, Diffbot-bound) ──
+
+test('knowledge request without enrichment gate makes zero Diffbot calls', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.includes('diffbot.com')) throw new Error(`unexpected diffbot call ${url}`);
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'K', url: 'https://example.com/k', snippet: 'knowledge snippet' }]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 3, knowledge: { entities: true } }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'duckduckgo', DIFFBOT_TOKEN: 'test-token' },
+    });
+    const details = result.details as { knowledge?: unknown };
+    assert.equal(details.knowledge, undefined);
+  });
+});
+
+test('knowledge composes safe excerpts and skips suspected sensitive text without echo', async () => {
+  const analyzedBodies: string[] = [];
+  await withFetch(async (input, init) => {
+    const url = String(input);
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([
+        { title: 'Clean', url: 'https://example.com/clean', snippet: 'public launch announcement details' },
+        { title: 'Contact', url: 'https://example.com/contact', snippet: 'reach us at bob@example.com today' },
+      ]);
+    }
+    if (url.includes('nl.diffbot.com')) {
+      analyzedBodies.push(String(init?.body ?? ''));
+      return new Response(JSON.stringify([{ entities: [], facts: [], topics: [] }]), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5, knowledge: { entities: true } }, {
+      env: {
+        PI_SEARCH_WEB_BACKENDS: 'duckduckgo',
+        DIFFBOT_TOKEN: 'test-token',
+        PI_SEARCH_KG_ENRICHMENT: '1',
+      },
+    });
+    const details = result.details as {
+      knowledge: { status: string; skipped: Array<{ url: string; reason: string }> };
+    };
+    assert.equal(analyzedBodies.length, 1, 'only the safe excerpt is analyzed');
+    assert.match(analyzedBodies[0]!, /public launch announcement/);
+    assert.doesNotMatch(analyzedBodies[0]!, /bob@example\.com/);
+    assert.equal(details.knowledge.status, 'empty');
+    assert.ok(details.knowledge.skipped.some((entry) =>
+      entry.url === 'https://example.com/contact' && entry.reason === 'suspected_sensitive_or_personal',
+    ));
+  });
+});
+
+test('knowledge without token reports unavailable without vendor calls', async () => {
+  let vendorCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.includes('diffbot.com')) {
+      vendorCalls++;
+      throw new Error(`unexpected diffbot call ${url}`);
+    }
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'K', url: 'https://example.com/k', snippet: 'knowledge snippet' }]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 3, knowledge: { enhance: true } }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'duckduckgo', PI_SEARCH_KG_ENRICHMENT: '1' },
+    });
+    const details = result.details as { knowledge: { status: string } };
+    assert.equal(details.knowledge.status, 'unavailable');
+  });
+  assert.equal(vendorCalls, 0);
+});
+
+// ── Ordered external fetch fallback (gated, after native/Diffbot) ──
+
+test('fetch falls through to gated Firecrawl with separate summary and metadata', async () => {
+  let scrapeBody: Record<string, unknown> | undefined;
+  let analyzeCalls = 0;
+  await withFetch(async (input, init) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response('analyze down', { status: 500 });
+    }
+    if (url.startsWith('https://api.firecrawl.dev/v2/scrape')) {
+      scrapeBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          markdown: 'external content words from vendor',
+          summary: 'VENDOR SUMMARY TEXT',
+          metadata: { title: 'External Title' },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('native fetch failed');
+  }, async () => {
+    const page = await fetchReadablePage('https://example.com/article', undefined, undefined, publicLookupStub(), {
+      env: {
+        DIFFBOT_TOKEN: 'test-token',
+        PI_SEARCH_EXTERNAL_FETCH: '1',
+        PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
+        FIRECRAWL_API_KEY: 'firecrawl-key',
+      },
+    });
+    assert.match(page.content, /external content words from vendor/);
+    assert.doesNotMatch(page.content, /VENDOR SUMMARY TEXT/);
+    assert.equal(page.externalFetch?.backend, 'firecrawl');
+    assert.equal(page.externalFetch?.externalProcessing, true);
+    assert.equal(page.title, 'External Title');
+    assert.equal(page.generatedText?.length, 1);
+    assert.match(page.generatedText?.[0]?.text ?? '', /VENDOR SUMMARY TEXT/);
+    assert.equal(page.generatedText?.[0]?.provenance.kind, 'result_url');
+    assert.equal(analyzeCalls, 1, 'Diffbot Analyze still precedes external fetch');
+    const formats = scrapeBody?.formats as unknown[];
+    assert.ok(formats.includes('markdown'));
+    assert.ok(formats.some((format) => typeof format === 'object' && (format as { type?: string }).type === 'summary'));
+    assert.doesNotMatch(JSON.stringify(scrapeBody), /question/);
+  });
+});
+
+test('Firecrawl fetch honors PI_SEARCH_NATIVE_SUMMARIES=0 with markdown only', async () => {
+  let scrapeBody: Record<string, unknown> | undefined;
+  await withFetch(async (input, init) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      return new Response('analyze down', { status: 500 });
+    }
+    if (url.startsWith('https://api.firecrawl.dev/v2/scrape')) {
+      scrapeBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        success: true,
+        data: { markdown: 'plain external words', metadata: { title: 'T' } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('native fetch failed');
+  }, async () => {
+    const page = await fetchReadablePage('https://example.com/article', undefined, undefined, publicLookupStub(), {
+      env: {
+        DIFFBOT_TOKEN: 'test-token',
+        PI_SEARCH_EXTERNAL_FETCH: '1',
+        PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
+        FIRECRAWL_API_KEY: 'firecrawl-key',
+        PI_SEARCH_NATIVE_SUMMARIES: '0',
+      },
+    });
+    assert.match(page.content, /plain external words/);
+    assert.deepEqual(scrapeBody?.formats, ['markdown']);
+    assert.equal(page.generatedText, undefined);
+  });
+});
+
+test('external fetch never triggers on ineligible 404 failure', async () => {
+  let firecrawlCalls = 0;
+  let analyzeCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response('analyze down', { status: 500 });
+    }
+    if (url.startsWith('https://api.firecrawl.dev/v2/scrape')) {
+      firecrawlCalls++;
+      return new Response('{}', { status: 200 });
+    }
+    throw new Error('HTTP 404 for https://example.com/missing');
+  }, async () => {
+    await assert.rejects(
+      () => fetchReadablePage('https://example.com/missing', undefined, undefined, publicLookupStub(), {
+        env: {
+          DIFFBOT_TOKEN: 'test-token',
+          PI_SEARCH_EXTERNAL_FETCH: '1',
+          PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
+          FIRECRAWL_API_KEY: 'firecrawl-key',
+        },
+      }),
+      /404/,
+    );
+  });
+  assert.equal(firecrawlCalls, 0, 'ineligible 404 must never reach remote vendors');
+  assert.equal(analyzeCalls, 1, 'diffbot Analyze fallback runs fail-open on 404; only gated external fetch is 404-ineligible');
+});
+
+test('external fetch runs without DIFFBOT_TOKEN on eligible native failure', async () => {
+  let firecrawlCalls = 0;
+  let analyzeCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody(url, 'should never be used')), { status: 200 });
+    }
+    if (url.startsWith('https://api.firecrawl.dev/v2/scrape')) {
+      firecrawlCalls++;
+      return new Response(JSON.stringify({
+        success: true,
+        data: {
+          markdown: 'no-token external content words',
+          summary: 'NO-TOKEN VENDOR SUMMARY',
+          metadata: { title: 'No-Token Title' },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('HTTP 500 for https://example.com/article');
+  }, async () => {
+    const page = await fetchReadablePage('https://example.com/article', undefined, undefined, publicLookupStub(), {
+      env: {
+        PI_SEARCH_EXTERNAL_FETCH: '1',
+        PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
+        FIRECRAWL_API_KEY: 'firecrawl-key',
+      },
+    });
+    assert.match(page.content, /no-token external content words/);
+    assert.doesNotMatch(page.content, /NO-TOKEN VENDOR SUMMARY/);
+    assert.equal(page.externalFetch?.backend, 'firecrawl');
+    assert.equal(page.externalFetch?.externalProcessing, true);
+    assert.equal(page.fallback, undefined, 'no Diffbot token means no diffbot fallback marker');
+    assert.equal(page.generatedText?.length, 1);
+  });
+  assert.equal(firecrawlCalls, 1, 'eligible no-token failure must reach the gated vendor');
+  assert.equal(analyzeCalls, 0, 'no token must mean no Analyze call');
+});
+
+test('external fetch without token never triggers on ineligible 404 failure', async () => {
+  let firecrawlCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.firecrawl.dev/v2/scrape')) {
+      firecrawlCalls++;
+      return new Response('{}', { status: 200 });
+    }
+    throw new Error('HTTP 404 for https://example.com/missing');
+  }, async () => {
+    await assert.rejects(
+      () => fetchReadablePage('https://example.com/missing', undefined, undefined, publicLookupStub(), {
+        env: {
+          PI_SEARCH_EXTERNAL_FETCH: '1',
+          PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
+          FIRECRAWL_API_KEY: 'firecrawl-key',
+        },
+      }),
+      /404/,
+    );
+  });
+  assert.equal(firecrawlCalls, 0, 'ineligible 404 must never reach remote vendors without a token either');
 });

@@ -153,15 +153,23 @@ async function agenticBrowse(args: Record<string, unknown>, options: NativeToolO
       { id: page.url, url: page.url, title: page.title, snippet: content.slice(0, 8000), source: 'web' },
       { source: 'web', kind: 'article' },
     );
-    // Execution-fallback marker (not a quality judgment): Diffbot Analyze
-    // text after native exhaustion degrades the envelope, matching the crawl path.
+    // Execution-fallback markers (not quality judgments): Diffbot Analyze
+    // text or gated external fetch (Firecrawl/Jina) after native exhaustion
+    // degrades the envelope, matching the crawl path. Vendor-generated
+    // summaries ride details.generatedText separately, never merged into
+    // content; external processing is always labeled.
     const fallbackUsed = page.fallback !== undefined;
+    const externalUsed = page.externalFetch !== undefined;
+    const degradedRead = fallbackUsed || externalUsed;
     const envelope = buildNorthstarResult({
       request: { tool: 'agentic_browse', channel: 'web', action: 'read' },
-      outcomes: [{ source: 'web', backend: 'native-fetch', ...(fallbackUsed ? { degraded: true } : {}), entities: parsed.ok ? [parsed.entity] : [] }],
+      outcomes: [{ source: 'web', backend: 'native-fetch', ...(degradedRead ? { degraded: true } : {}), entities: parsed.ok ? [parsed.entity] : [] }],
       pagination: { supported: false, limit: 1, hasMore: false },
       ...(fallbackUsed
         ? { notes: ['Diffbot Analyze fallback supplied page text after native fetch exhaustion; content quality not assessed.'] }
+        : {}),
+      ...(externalUsed
+        ? { notes: ['Ordered external fetch supplied page text after native fetch exhaustion; content quality not assessed; external processing applied.'] }
         : {}),
     });
     return northstarTextResult(content, {
@@ -172,6 +180,19 @@ async function agenticBrowse(args: Record<string, unknown>, options: NativeToolO
       truncated: page.content.length > maxChars,
       ...(fallbackUsed
         ? { fallback: { provider: 'diffbot', path: 'fallback', qualityImpact: 'not_assessed', ...(page.primaryError !== undefined ? { primaryFailure: page.primaryError } : {}) } }
+        : {}),
+      ...(externalUsed
+        ? {
+          externalFetch: {
+            backend: page.externalFetch!.backend,
+            externalProcessing: true as const,
+            qualityImpact: 'not_assessed' as const,
+            ...(page.primaryError !== undefined ? { primaryFailure: page.primaryError } : {}),
+          },
+        }
+        : {}),
+      ...(externalUsed && page.generatedText !== undefined && page.generatedText.length > 0
+        ? { generatedText: page.generatedText }
         : {}),
     }, envelope);
   } finally {

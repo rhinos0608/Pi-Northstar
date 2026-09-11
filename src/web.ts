@@ -10,6 +10,19 @@
 // the canonical northstar envelope (northstarTextResult, same pattern as the
 // research path). No raw backend_text passthrough.
 //
+// Selection: environment-only bounded policy (src/web-provider-policy.ts).
+// Absent/blank PI_SEARCH_WEB_BACKENDS dispatches the first three configured
+// preference entries; an explicit list dispatches every runnable entry
+// concurrently (max 8). Duplicates, unknown IDs, and lists over 8 reject
+// before any provider call. No retries — one request per selected adapter,
+// including DuckDuckGo (single HTML call) and Codex.
+//
+// Fusion: uniform deterministic RRF over every fulfilled nonempty ranking,
+// including Codex. First provider in selected order supplies the retained
+// title/snippet for duplicate URLs; every {backend, rank} contributor is
+// recorded. Provider-native AI (summaries/answers) never replaces retrieval
+// snippets; normalized generated text rides details.nativeAi separately.
+//
 // SSRF boundaries: user URLs go through validateHttpUrl +
 // resolvePublicHostname. unsafeFetchJson stays operator-owned only for the
 // configured SearXNG base. The fetchPageText seam exists so tests can serve
@@ -18,8 +31,7 @@
 
 import type { BackendCallResult } from './backend.js';
 import { fetchInit, fetchJson, fetchText, safeResponseJson, unsafeFetchJson, validateHttpUrl } from './http.js';
-import { normalizeUrl, rrfMerge } from './fusion.js';
-import { retryWithBackoff } from './retry.js';
+import { normalizeUrl } from './fusion.js';
 import { dedupeBy, northstarTextResult } from './tool-output.js';
 import { type DnsLookup, resolvePublicHostname } from './network-policy.js';
 import { codexConfigured, searchCodex } from './codex-search.js';
@@ -32,7 +44,7 @@ import { ScraplingBridge } from './scrapling-bridge.js';
 import { extractLinksFromHtml } from './link-extraction.js';
 import { diffbotConfigured, searchDiffbot } from './diffbot-search.js';
 import { analyzePage, createAnalyzeBudget, type AnalyzeBudget } from './diffbot-extract.js';
-import { DiffbotError } from './diffbot-transport.js';
+import { analyzeTextDiffbotKg, enhanceDiffbotKg } from './diffbot-kg.js';
 import { buildNorthstarResult, parseEntity, type NorthstarEntityV1 } from './result-contract.js';
 import {
   resolveWebActionForTool,
@@ -41,6 +53,28 @@ import {
   WEB_ENTITY_CONTENT_MAX,
   type WebArticleV1,
 } from './web-contract.js';
+import { exaSearchAdapter } from './web-exa.js';
+import { tavilySearchAdapter } from './web-tavily.js';
+import { firecrawlFetchAdapter, firecrawlSearchAdapter } from './firecrawl.js';
+import { jinaFetchAdapter, jinaSearchAdapter } from './jina.js';
+import { providerSignal, resolveWebProviderPolicy } from './web-provider-policy.js';
+import { normalizeGeneratedText, resolveWebNativeAiPolicy } from './web-native-ai.js';
+import { composeWebKnowledge, isKnowledgeEnrichmentEnabled, type WebKnowledgeBindings } from './web-knowledge-composition.js';
+import {
+  DEFAULT_WEB_FETCH_PROVIDER_TIMEOUT_MS,
+  fetchExternalReadablePage,
+  isExternalFetchEligible,
+} from './web-fetch-providers.js';
+import type {
+  WebFetchAdapter,
+  WebFusedSearchHit,
+  WebGeneratedText,
+  WebKnowledgeResult,
+  WebProviderFailure,
+  WebSearchAdapter,
+  WebSearchHit,
+  WebSearchProviderId,
+} from './web-search-types.js';
 
 export interface WebToolOptions {
   signal?: AbortSignal;
@@ -62,6 +96,7 @@ export interface WebResult {
   snippet?: string | undefined;
   source?: string | undefined;
   rrfScore?: number | undefined;
+  contributors?: Array<{ backend: string; rank: number }> | undefined;
 }
 
 export interface WebSearchBackend {
@@ -69,17 +104,6 @@ export interface WebSearchBackend {
   configured: (env: Record<string, string | undefined>) => boolean;
   search: (query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal) => Promise<WebResult[]>;
 }
-
-export const SEARCH_BACKENDS: WebSearchBackend[] = [
-  { name: 'codex', configured: (env) => codexConfigured(env), search: searchCodex },
-  { name: 'duckduckgo', configured: () => true, search: (query, limit, _env, signal) => searchDuckDuckGo(query, limit, signal) },
-  { name: 'searxng', configured: (env) => Boolean(env.SEARXNG_BASE_URL?.trim()), search: searchSearxng },
-  { name: 'brave', configured: (env) => Boolean(env.BRAVE_API_KEY?.trim()), search: searchBrave },
-  { name: 'exa', configured: (env) => Boolean(env.EXA_API_KEY?.trim()), search: searchExa },
-  { name: 'tavily', configured: (env) => Boolean(env.TAVILY_API_KEY?.trim()), search: searchTavily },
-  { name: 'ollama-search', configured: (env) => Boolean((env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim()), search: searchOllama },
-  { name: 'diffbot', configured: (env) => diffbotConfigured(env), search: (query, limit, env, signal) => searchDiffbot(query, limit, env, signal) },
-];
 
 const CATEGORY_HINTS: Record<string, string> = {
   company: 'official website leadership funding product pricing',
@@ -93,45 +117,308 @@ const CATEGORY_HINTS: Record<string, string> = {
   'financial report': 'annual report 10-k investor relations earnings',
 };
 
+/** Wrap a legacy WebResult-returning search in the shared adapter contract. */
+function legacyAdapter(
+  id: WebSearchProviderId,
+  configured: (env: Record<string, string | undefined>) => boolean,
+  search: (query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal) => Promise<WebResult[]>,
+): WebSearchAdapter {
+  return {
+    id,
+    configured,
+    search: async (input): Promise<{ backend: WebSearchProviderId; hits: WebSearchHit[]; generatedText: WebGeneratedText[] }> => {
+      const results = await search(input.query, input.limit, input.env, input.signal);
+      return {
+        backend: id,
+        hits: results
+          .filter((result) => typeof result.url === 'string' && result.url.length > 0)
+          .map((result) => ({ title: result.title, url: result.url, snippet: result.snippet ?? '', backend: id })),
+        generatedText: [],
+      };
+    },
+  };
+}
+
+const braveSearchAdapter: WebSearchAdapter = legacyAdapter(
+  'brave',
+  (env) => Boolean(env.BRAVE_API_KEY?.trim()),
+  searchBrave,
+);
+const diffbotSearchAdapter: WebSearchAdapter = legacyAdapter(
+  'diffbot',
+  (env) => diffbotConfigured(env),
+  async (query, limit, env, signal) => {
+    const rows = await searchDiffbot(query, limit, env, signal);
+    return rows.map((row) => ({ title: row.title, url: row.url, ...(row.snippet !== undefined ? { snippet: row.snippet } : {}), source: 'diffbot' }));
+  },
+);
+const searxngSearchAdapter: WebSearchAdapter = legacyAdapter(
+  'searxng',
+  (env) => Boolean(env.SEARXNG_BASE_URL?.trim()),
+  searchSearxng,
+);
+const ollamaSearchAdapter: WebSearchAdapter = legacyAdapter(
+  'ollama-search',
+  (env) => Boolean((env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim()),
+  searchOllama,
+);
+const duckduckgoSearchAdapter: WebSearchAdapter = legacyAdapter(
+  'duckduckgo',
+  () => true,
+  (query, limit, _env, signal) => searchDuckDuckGo(query, limit, signal),
+);
+const codexSearchAdapter: WebSearchAdapter = legacyAdapter(
+  'codex',
+  (env) => codexConfigured(env),
+  async (query, limit, env, signal) => {
+    const rows = await searchCodex(query, limit, env, signal);
+    return rows.map((row) => ({ title: row.title, url: row.url, ...(row.snippet !== undefined ? { snippet: row.snippet } : {}), source: 'codex' }));
+  },
+);
+
+/** Every search adapter the bounded selection policy may dispatch. */
+const ALL_SEARCH_ADAPTERS: readonly WebSearchAdapter[] = [
+  tavilySearchAdapter,
+  exaSearchAdapter,
+  braveSearchAdapter,
+  diffbotSearchAdapter,
+  firecrawlSearchAdapter,
+  jinaSearchAdapter,
+  searxngSearchAdapter,
+  ollamaSearchAdapter,
+  duckduckgoSearchAdapter,
+  codexSearchAdapter,
+];
+
+const ALL_FETCH_ADAPTERS: readonly WebFetchAdapter[] = [firecrawlFetchAdapter, jinaFetchAdapter];
+
+/** RRF K factor, matching the shared fusion helper. */
+const WEB_RRF_K = 60;
+
 /**
- * Backend search with paid-call guard: a non-retryable DiffbotError
- * (contract/size/policy/HTTP-200 error envelope) never retries — the
- * shared retry helper sniffs message text and would otherwise re-fire
- * a paid call when the envelope text contains e.g. "timeout".
- * Retryable DiffbotErrors keep one retry (maxAttempts 2 semantics);
- * other backends use the shared helper unchanged.
+ * Uniform deterministic fusion over selected-order rankings. Deduplicates by
+ * normalizeUrl (first provider in selected order keeps title/snippet),
+ * records every {backend, rank} contributor, and orders by RRF score, then
+ * selected-provider index, then provider-local rank, then normalized URL.
  */
-async function searchBackendWithRetry(
-  backend: WebSearchBackend,
+export function fuseWebSearchRankings(
+  rankings: Array<{ backend: WebSearchProviderId; hits: WebSearchHit[] }>,
+  limit: number,
+): WebFusedSearchHit[] {
+  interface Entry {
+    hit: WebSearchHit;
+    score: number;
+    providerIndex: number;
+    contributors: Array<{ backend: WebSearchProviderId; rank: number }>;
+  }
+  const byKey = new Map<string, Entry>();
+  rankings.forEach((ranking, providerIndex) => {
+    const seen = new Set<string>();
+    ranking.hits.forEach((hit, localIndex) => {
+      const key = normalizeUrl(hit.url);
+      if (seen.has(key)) return;
+      seen.add(key);
+      const rank = localIndex + 1;
+      const score = 1 / (WEB_RRF_K + rank);
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, { hit, score, providerIndex, contributors: [{ backend: ranking.backend, rank }] });
+        return;
+      }
+      existing.score += score;
+      existing.contributors.push({ backend: ranking.backend, rank });
+    });
+  });
+  return [...byKey.entries()]
+    .sort((a, b) => {
+      if (b[1].score !== a[1].score) return b[1].score - a[1].score;
+      if (a[1].providerIndex !== b[1].providerIndex) return a[1].providerIndex - b[1].providerIndex;
+      const aRank = a[1].contributors[0]?.rank ?? 0;
+      const bRank = b[1].contributors[0]?.rank ?? 0;
+      if (aRank !== bRank) return aRank - bRank;
+      return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+    })
+    .slice(0, limit)
+    .map(({ 1: entry }) => ({
+      title: entry.hit.title || entry.hit.url,
+      url: entry.hit.url,
+      snippet: entry.hit.snippet ?? '',
+      backend: entry.hit.backend,
+      rrfScore: entry.score,
+      contributors: entry.contributors,
+    }));
+}
+
+function toProviderFailure(backend: WebSearchProviderId, error: unknown, callerSignal?: AbortSignal): WebProviderFailure {
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  const name = (error as { name?: unknown })?.name;
+  if (callerSignal?.aborted || name === 'AbortError') return { backend, code: 'aborted', message, retryable: false };
+  if (name === 'TimeoutError' || /timed out|timedout|aborted due to timeout|request timeout|provider timeout/i.test(message)) {
+    return { backend, code: 'timeout', message, retryable: false };
+  }
+  if (/too large|exceeds maximum|exceeded size|response_too_large/i.test(message)) {
+    return { backend, code: 'response_too_large', message, retryable: false };
+  }
+  if (/invalid|contract/i.test(message)) return { backend, code: 'invalid_response', message, retryable: false };
+  return { backend, code: 'upstream_error', message, retryable: false };
+}
+
+/**
+ * Translate frozen policy/policy-config errors into the legacy
+ * caller-facing messages that predate the bounded-selection contract, so
+ * explicit-misconfiguration rejections keep their established wording.
+ * Selection-semantics errors (duplicate/count) pass through unchanged.
+ */
+function translateSelectionError(error: unknown): never {
+  const message = error instanceof Error ? error.message : String(error);
+  const unknownMatch = /unknown backend "([^"]+)"/.exec(message);
+  if (unknownMatch) {
+    throw new Error(`No known web search backends requested: ${unknownMatch[1]}`);
+  }
+  throw error;
+}
+
+interface DispatchedSearch {
+  selected: WebSearchProviderId[];
+  runnable: WebSearchProviderId[];
+  unavailable: WebSearchProviderId[];
+  timeoutMs: number;
+  rankings: Array<{ backend: WebSearchProviderId; hits: WebSearchHit[] }>;
+  generatedRaw: WebGeneratedText[];
+  failures: WebProviderFailure[];
+  servedBackends: string[];
+}
+
+/** Resolve policy + native-AI flags, then run every runnable adapter once. No retries. */
+async function dispatchBoundedSearch(
   query: string,
   limit: number,
   env: Record<string, string | undefined>,
-  signal?: AbortSignal,
-): Promise<WebResult[]> {
-  const maxAttempts = backend.name === 'duckduckgo' ? 1 : 2;
-  if (backend.name !== 'diffbot') {
-    return retryWithBackoff<WebResult[]>(
-      () => backend.search(query, limit, env, signal),
-      { maxAttempts, ...(signal ? { signal } : {}) },
-    );
-  }
+  callerSignal?: AbortSignal,
+): Promise<DispatchedSearch> {
+  const nativeAi = resolveWebNativeAiPolicy(env);
+  let policy: ReturnType<typeof resolveWebProviderPolicy>;
   try {
-    return await backend.search(query, limit, env, signal);
+    policy = resolveWebProviderPolicy(env, ALL_SEARCH_ADAPTERS);
   } catch (error) {
-    if (signal?.aborted) throw error;
-    if (error instanceof DiffbotError && !error.retryable) throw error;
-    if (maxAttempts <= 1) throw error;
-    return retryWithBackoff<WebResult[]>(
-      () => backend.search(query, limit, env, signal),
-      { maxAttempts: 1, ...(signal ? { signal } : {}) },
-    );
+    translateSelectionError(error);
   }
+  if (policy.runnable.length === 0) {
+    if (policy.explicit) {
+      throw new Error(`Requested web search backends are not configured: ${policy.selected.join(', ')}`);
+    }
+    return {
+      selected: policy.selected,
+      runnable: [],
+      unavailable: policy.unavailable,
+      timeoutMs: policy.timeoutMs,
+      rankings: [],
+      generatedRaw: [],
+      failures: [],
+      servedBackends: [],
+    };
+  }
+  const settled = await Promise.allSettled(
+    policy.runnable.map(async (adapter) => {
+      // One composed caller+timeout signal per provider. The timer is unref'd
+      // and self-clears on abort; nothing further to release after settle.
+      const signal = providerSignal(callerSignal, policy.timeoutMs);
+      return await adapter.search({
+        query,
+        limit,
+        env,
+        signal,
+        nativeAi: { summaries: nativeAi.summaries, answers: nativeAi.answers },
+      });
+    }),
+  );
+  const rankings: Array<{ backend: WebSearchProviderId; hits: WebSearchHit[] }> = [];
+  const generatedRaw: WebGeneratedText[] = [];
+  const failures: WebProviderFailure[] = [];
+  const servedBackends: string[] = [];
+  settled.forEach((item, index) => {
+    const adapter = policy.runnable[index]!;
+    if (item.status === 'fulfilled') {
+      servedBackends.push(adapter.id);
+      if (item.value.hits.length > 0) rankings.push({ backend: adapter.id, hits: item.value.hits });
+      generatedRaw.push(...item.value.generatedText);
+      return;
+    }
+    failures.push(toProviderFailure(adapter.id, item.reason, callerSignal));
+  });
+  return {
+    selected: policy.selected,
+    runnable: policy.runnable.map((adapter) => adapter.id),
+    unavailable: policy.unavailable,
+    timeoutMs: policy.timeoutMs,
+    rankings,
+    generatedRaw,
+    failures,
+    servedBackends,
+  };
 }
+
+/**
+ * Runtime Diffbot bindings for optional knowledge composition. No standalone
+ * kg behavior changes: analyze_text maps excerpt + flags onto
+ * analyzeTextDiffbotKg, enhance maps name/homepage selectors onto
+ * enhanceDiffbotKg. Null when DIFFBOT_TOKEN is absent.
+ */
+function buildKnowledgeBindings(
+  env: Record<string, string | undefined>,
+  signal?: AbortSignal,
+): WebKnowledgeBindings | null {
+  const token = env.DIFFBOT_TOKEN?.trim();
+  if (!token) return null;
+  const ctxFor = (ctx?: { signal?: AbortSignal }): { token: string; signal?: AbortSignal } =>
+    ({ token, ...(ctx?.signal !== undefined ? { signal: ctx.signal } : signal !== undefined ? { signal } : {}) });
+  return {
+    analyzeText: async (input, ctx) => {
+      const outcome = await analyzeTextDiffbotKg(
+        {
+          text: input.text,
+          extractEntities: input.extractEntities,
+          extractFacts: input.extractFacts,
+          extractTopics: input.extractTopics,
+          extractSentiment: input.extractSentiment,
+        },
+        ctxFor(ctx),
+      );
+      if (outcome.error) throw new Error(outcome.error.message);
+      return {
+        entities: outcome.entities,
+        mentions: outcome.mentions,
+        facts: outcome.facts,
+        topics: outcome.topics,
+        ...(outcome.sentiment !== undefined ? { sentiment: outcome.sentiment } : {}),
+      };
+    },
+    enhance: async (input, ctx) => {
+      const outcome = await enhanceDiffbotKg(
+        { type: input.type, ...input.selectors, maxEntities: input.maxEntities },
+        ctxFor(ctx),
+      );
+      if (outcome.error) throw new Error(outcome.error.message);
+      return { entities: outcome.entities, claims: outcome.claims ?? [] };
+    },
+  };
+}
+
+const UNAVAILABLE_KNOWLEDGE: WebKnowledgeResult = {
+  status: 'unavailable',
+  entities: [],
+  mentions: [],
+  facts: [],
+  topics: [],
+  partitions: [],
+  skipped: [],
+  salience: { status: 'unavailable', reason: 'provider_unsupported' },
+};
 
 export async function webSearch(args: Record<string, unknown>, options: WebToolOptions = {}): Promise<BackendCallResult> {
   const action = resolveWebActionForTool('web_search', args);
   const category = typeof args.category === 'string' ? args.category : undefined;
-  const searchInput: { action: string; query?: string; limit?: number; category?: string; cursor?: string; topK?: number; maxPages?: number; maxChars?: number } = { action };
+  const searchInput: { action: string; query?: string; limit?: number; category?: string; cursor?: string; topK?: number; maxPages?: number; maxChars?: number; knowledge?: unknown } = { action };
   if (typeof args.query === 'string') searchInput.query = args.query;
   if (typeof args.limit === 'number') searchInput.limit = args.limit;
   if (category !== undefined) searchInput.category = category;
@@ -139,50 +426,62 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   if (typeof args.topK === 'number') searchInput.topK = args.topK;
   if (typeof args.maxPages === 'number') searchInput.maxPages = args.maxPages;
   if (typeof args.maxChars === 'number') searchInput.maxChars = args.maxChars;
+  if (args.knowledge !== undefined) searchInput.knowledge = args.knowledge;
   const { request } = validateWebRequest(searchInput);
   const query = request.query!;
   const limit = request.limit;
   const effectiveQuery = category && CATEGORY_HINTS[category] ? `${query} ${CATEGORY_HINTS[category]}` : query;
   const env = options.env ?? process.env;
-  const requested = parseBackendOverride(env.PI_SEARCH_WEB_BACKENDS);
-  const unknownBackends = requested.filter((name) => !SEARCH_BACKENDS.some((backend) => backend.name === name));
-  if (unknownBackends.length > 0) {
-    throw new Error(`No known web search backends requested: ${unknownBackends.join(', ')}`);
-  }
-  const candidates = requested.length
-    ? SEARCH_BACKENDS.filter((backend) => requested.includes(backend.name))
-    : SEARCH_BACKENDS;
-  const backends = candidates.filter((backend) => backend.configured(env));
-  if (requested.length > 0 && backends.length === 0) {
-    throw new Error(`Requested web search backends are not configured: ${requested.join(', ')}`);
-  }
-  const failures: Array<{ backend: string; error: string }> = [];
 
-  const settled = await Promise.allSettled(backends.map(async (backend) => {
-    const results = await searchBackendWithRetry(backend, effectiveQuery, limit, env, options.signal);
-    return { backend: backend.name, results: results.map((result) => ({ ...result, source: result.source ?? backend.name })) };
-  }));
-
-  const outcome = collectBackendOutcome(settled, backends, failures);
-  const fused = composePrimaryFirst(outcome.primary, outcome.rankings, limit);
-
-  if (fused.length === 0 && failures.length > 0) {
-    throw new Error(`All web search backends failed: ${failures.map((failure) => `${failure.backend}: ${failure.error}`).join('; ')}`);
+  // Research isolation: category research/academic never touches generic web
+  // providers (buildSearchRoute already routes those to the research tool).
+  if (request.researchCategory) {
+    const envelope = buildNorthstarResult({
+      request: { tool: 'web_search', channel: 'web', action: 'search' },
+      outcomes: [],
+      pagination: { supported: false, limit, hasMore: false },
+    });
+    return northstarTextResult(formatWebResults(query, []), {
+      query,
+      effectiveQuery,
+      category,
+      results: [],
+      fusion: { method: 'rrf', backends: [], failures: [], configuredBackends: [], selected: [], runnable: [], unavailable: [] },
+    }, envelope);
   }
 
+  const dispatched = await dispatchBoundedSearch(effectiveQuery, limit, env, options.signal);
+  // Caller cancellation propagates instead of collapsing into a backend-failure envelope.
+  options.signal?.throwIfAborted();
+  const fused = fuseWebSearchRankings(dispatched.rankings, limit);
+  const generatedText = normalizeGeneratedText(dispatched.generatedRaw);
+
+  let knowledge: WebKnowledgeResult | null = null;
+  if (request.knowledge !== undefined && isKnowledgeEnrichmentEnabled(env)) {
+    const bindings = buildKnowledgeBindings(env, options.signal);
+    knowledge = bindings === null
+      ? { ...UNAVAILABLE_KNOWLEDGE, entities: [], mentions: [], facts: [], topics: [], partitions: [], skipped: [] }
+      : await composeWebKnowledge({ hits: fused, knowledge: request.knowledge, env, bindings, ...(options.signal !== undefined ? { signal: options.signal } : {}) });
+  }
+
+  if (fused.length === 0 && dispatched.servedBackends.length === 0 && dispatched.failures.length > 0) {
+    throw new Error(`All web search backends failed: ${dispatched.failures.map((failure) => `${failure.backend}: ${failure.message}`).join('; ')}`);
+  }
+
+  const legacyFailures = dispatched.failures.map((failure) => ({ backend: failure.backend, error: failure.message }));
   const { articles, invalid } = normalizeWebArticles(fused);
   const envelope = buildNorthstarResult({
     request: { tool: 'web_search', channel: 'web', action: 'search' },
     outcomes: [
-      ...outcome.servedBackends.map((backend) => ({
+      ...dispatched.servedBackends.map((backend) => ({
         source: 'web',
         backend,
         entities: northstarArticles(articles.filter((article) => article.backend === backend)),
       })),
-      ...failures.map((failure) => ({
+      ...legacyFailures.map((failure) => ({
         source: 'web',
         backend: failure.backend,
-        error: { code: 'backend_http_error' as const, message: failure.error.slice(0, 500), retryable: true },
+        error: { code: 'backend_http_error' as const, message: failure.error.slice(0, 500), retryable: false },
       })),
       ...(invalid > 0 ? [{ source: 'web', backend: 'native', invalid }] : []),
     ],
@@ -193,14 +492,25 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
     query,
     effectiveQuery,
     category,
-    results: fused,
+    results: fused.map((hit) => ({
+      title: hit.title,
+      url: hit.url,
+      snippet: hit.snippet,
+      source: hit.backend,
+      rrfScore: hit.rrfScore,
+      contributors: hit.contributors.map((contributor) => ({ backend: contributor.backend, rank: contributor.rank })),
+    })),
     fusion: {
       method: 'rrf',
-      backends: outcome.servedBackends,
-      failures,
-      configuredBackends: backends.map((backend) => backend.name),
-      ...(outcome.primary ? { primary: 'codex' } : {}),
+      backends: dispatched.servedBackends,
+      failures: legacyFailures,
+      configuredBackends: dispatched.runnable,
+      selected: dispatched.selected,
+      runnable: dispatched.runnable,
+      unavailable: dispatched.unavailable,
     },
+    nativeAi: generatedText,
+    ...(knowledge !== null ? { knowledge } : {}),
   }, envelope);
 }
 
@@ -245,11 +555,22 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
     ...(fallbackBudget ? { fallbackBudget } : {}),
   };
   let fallbackPages = 0;
+  let externalPages = 0;
+  const externalBackends = new Set<string>();
+  const externalGenerated: WebGeneratedText[] = [];
   const primaryFailures: string[] = [];
   const noteFallback = (page: ReadablePage): void => {
     if (page.fallback) {
       fallbackPages++;
       if (page.primaryError) primaryFailures.push(page.primaryError);
+    }
+  };
+  const noteExternal = (page: ReadablePage): void => {
+    if (page.externalFetch) {
+      externalPages++;
+      externalBackends.add(page.externalFetch.backend);
+      if (page.generatedText) externalGenerated.push(...page.generatedText);
+      if (page.primaryError && !primaryFailures.includes(page.primaryError)) primaryFailures.push(page.primaryError);
     }
   };
 
@@ -316,6 +637,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
         try {
           const page = await fetchReadablePage(entry.url, options.signal, bridge, options.lookup, runtime);
           noteFallback(page);
+          noteExternal(page);
 
           // Index page content
           for (const chunk of chunkTextSmart(page.content)) {
@@ -357,6 +679,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
         try {
           const page = await fetchReadablePage(url, options.signal, bridge, options.lookup, runtime);
           noteFallback(page);
+          noteExternal(page);
           for (const chunk of chunkTextSmart(page.content)) {
             const id = String(chunkCounter++);
             bm25Index.add(id, chunk.text);
@@ -426,6 +749,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
       const bm25Mapped = bm25Results.map(r => ({ id: r.id, score: r.score }));
       const vecMapped = vecResults.map(r => ({ id: r.id, score: r.score }));
 
+      const { rrfMerge } = await import('./fusion.js');
       const fused = rrfMerge([bm25Mapped, vecMapped], { keyFn: (item: { id: string }) => item.id });
 
       resultChunks = fused
@@ -464,16 +788,20 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
   // maxChars is honored on the crawl path too (same total-text bound as read).
   const truncated = fullText.length > maxChars;
   const text = truncated ? fullText.slice(0, maxChars) : fullText;
-  // Execution-fallback marker (not a quality judgment): when at least one
-  // page came from Diffbot Analyze, the envelope degrades and details carry
-  // path/provider/qualityImpact plus the safe primary failures.
+  // Execution-fallback markers (not quality judgments): Diffbot Analyze or
+  // gated external fetch supplied page(s) after native exhaustion. The
+  // envelope degrades; details carry path/provider/qualityImpact plus the
+  // safe primary failures.
   const fallbackUsed = fallbackPages > 0;
+  const externalUsed = externalPages > 0;
+  const degraded = fallbackUsed || externalUsed;
+  const generatedText = normalizeGeneratedText(externalGenerated);
   const envelope = buildNorthstarResult({
     request: { tool: 'semantic_crawl', channel: 'web', action: 'crawl' },
     outcomes: [{
       source: 'web',
       backend: 'native-fetch',
-      ...(fallbackUsed ? { degraded: true } : {}),
+      ...(degraded ? { degraded: true } : {}),
       entities: northstarArticles(resultChunks.map((chunk, index) => ({
         version: 1 as const,
         kind: 'article' as const,
@@ -486,8 +814,8 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
       }))),
     }],
     pagination: { supported: false, limit: topK, hasMore: false },
-    ...(fallbackUsed
-      ? { notes: [`Diffbot Analyze fallback supplied ${fallbackPages} page(s) after native fetch exhaustion; primary failures in details.fallback; content quality not assessed.`] }
+    ...(degraded
+      ? { notes: [`${fallbackPages + externalPages} page(s) supplied via execution fallback after native fetch exhaustion; primary failures in details; content quality not assessed.`] }
       : {}),
   });
 
@@ -500,6 +828,18 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
     ...(fallbackUsed
       ? { fallback: { provider: 'diffbot', path: 'fallback', qualityImpact: 'not_assessed', pages: fallbackPages, primaryFailures: primaryFailures.slice(0, 10) } }
       : {}),
+    ...(externalUsed
+      ? {
+        externalFetch: {
+          backends: [...externalBackends],
+          path: 'external-fetch',
+          qualityImpact: 'not_assessed',
+          pages: externalPages,
+          primaryFailures: primaryFailures.slice(0, 10),
+        },
+      }
+      : {}),
+    ...(generatedText.length > 0 ? { generatedText } : {}),
   }, envelope);
 }
 
@@ -516,6 +856,16 @@ export interface ReadablePage {
    * content-quality judgment.
    */
   fallback?: { provider: 'diffbot'; path: 'fallback'; qualityImpact: 'not_assessed' } | undefined;
+  /**
+   * Present when page text came from the gated ordered external fetch
+   * (Firecrawl/Jina) after native/Scrapling and Diffbot exhaustion.
+   * Execution-path marker only; content quality not assessed. Generated
+   * vendor summaries ride `generatedText` separately, never merged into
+   * content.
+   */
+  externalFetch?: { backend: 'firecrawl' | 'jina'; externalProcessing: true } | undefined;
+  /** Vendor-generated summary text kept separate from extracted content. */
+  generatedText?: WebGeneratedText[] | undefined;
   /** Safe (token-free, 500-char sliced) primary failure that triggered fallback. */
   primaryError?: string | undefined;
 }
@@ -534,7 +884,7 @@ export interface FetchPageRuntime {
  */
 export function isDiffbotFallbackEligible(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return false;
-  if (error instanceof DiffbotError) return false;
+  if ((error as { name?: unknown })?.name === 'DiffbotError') return false;
   const name = (error as { name?: unknown })?.name;
   if (name === 'AbortError') return signal?.aborted ? false : true;
   const message = error instanceof Error ? error.message : String(error);
@@ -542,6 +892,51 @@ export function isDiffbotFallbackEligible(error: unknown, signal?: AbortSignal):
     return false;
   }
   return true;
+}
+
+/**
+ * Ordered gated external fetch (Firecrawl/Jina) after native/Scrapling and
+ * Diffbot exhaustion. Returns undefined when the original native failure is
+ * ineligible, the gate is disabled/misconfigured, or no vendor yields a
+ * nonempty page — callers then follow the original error path unchanged.
+ */
+async function tryExternalFetch(
+  validatedUrl: string,
+  env: Record<string, string | undefined>,
+  signal?: AbortSignal,
+  lookup?: DnsLookup,
+  primaryError?: unknown,
+): Promise<ReadablePage | undefined> {
+  const failure = primaryError ?? new Error('native fetch returned no usable content');
+  if (!isExternalFetchEligible(failure, signal)) return undefined;
+  let result: { page?: { url: string; title: string; content: string; backend: 'firecrawl' | 'jina'; externalProcessing: true; generatedText: WebGeneratedText[] } };
+  try {
+    result = await fetchExternalReadablePage(
+      {
+        url: validatedUrl,
+        env,
+        ...(signal !== undefined ? { signal } : {}),
+        ...(lookup !== undefined ? { lookup } : {}),
+        timeoutMs: DEFAULT_WEB_FETCH_PROVIDER_TIMEOUT_MS,
+      },
+      ALL_FETCH_ADAPTERS,
+    );
+  } catch {
+    return undefined;
+  }
+  if (!result.page) return undefined;
+  const generatedText = normalizeGeneratedText(result.page.generatedText);
+  const safePrimary = primaryError
+    ? (primaryError instanceof Error ? primaryError.message : String(primaryError)).slice(0, 500)
+    : undefined;
+  return {
+    url: result.page.url,
+    title: result.page.title,
+    content: result.page.content,
+    externalFetch: { backend: result.page.backend, externalProcessing: true },
+    ...(generatedText.length > 0 ? { generatedText } : {}),
+    ...(safePrimary !== undefined ? { primaryError: safePrimary } : {}),
+  };
 }
 
 export async function fetchReadablePage(
@@ -585,6 +980,11 @@ export async function fetchReadablePage(
         return { url: result.url, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
       }
       if (!hasToken) {
+        // No Diffbot token: Analyze skipped, but gated external fetch
+        // still runs when the native failure is eligible.
+        const noTokenEnv = runtime?.env ?? process.env;
+        const external = await tryExternalFetch(url, noTokenEnv, signal, lookup, undefined);
+        if (external) return external;
         const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
         return { url: result.url, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
       }
@@ -612,7 +1012,14 @@ export async function fetchReadablePage(
     if (content.trim()) return { url, title, content, rawHtml: html };
     // Empty/unusable content: eligible for Analyze fallback (no primary error).
   } catch (error) {
-    if (!hasToken) throw error;
+    if (!hasToken) {
+      // No Diffbot token: Analyze skipped, but gated external fetch
+      // still runs when this failure is eligible (policy/size/404/410/abort fail closed inside).
+      const noTokenEnv = runtime?.env ?? process.env;
+      const external = await tryExternalFetch(url, noTokenEnv, signal, lookup, error);
+      if (external) return external;
+      throw error;
+    }
     primaryError ??= error;
     if (!isDiffbotFallbackEligible(error, signal)) analyzeBlockedError ??= error;
     if (analyzeBlockedError) throw analyzeBlockedError;
@@ -624,6 +1031,10 @@ export async function fetchReadablePage(
   const env = runtime?.env ?? process.env;
   const token = env.DIFFBOT_TOKEN?.trim();
   if (!token) {
+    // No Diffbot token: Analyze skipped, but gated external fetch still
+    // runs when the native failure is eligible.
+    const external = await tryExternalFetch(url, env, signal, lookup, primaryError);
+    if (external) return external;
     if (primaryError) throw primaryError;
     const html = plainHtml ?? '';
     const title = plainTitle;
@@ -631,6 +1042,8 @@ export async function fetchReadablePage(
   }
   const budget = runtime?.fallbackBudget ?? createAnalyzeBudget(undefined, env);
   if (budget.remaining <= 0) {
+    const external = await tryExternalFetch(url, env, signal, lookup, primaryError);
+    if (external) return external;
     if (primaryError) throw primaryError;
     return { url, title: '', content: '', rawHtml: '' };
   }
@@ -654,6 +1067,8 @@ export async function fetchReadablePage(
       ...(safePrimary !== undefined ? { primaryError: safePrimary } : {}),
     };
   } catch {
+    const external = await tryExternalFetch(url, env, signal, lookup, primaryError);
+    if (external) return external;
     if (primaryError) throw primaryError;
     throw new Error('Diffbot Analyze fallback failed and the native fetch returned no usable content');
   }
@@ -663,30 +1078,44 @@ async function semanticSourceUrls(source: Record<string, unknown>, query: string
   if (source.type === 'url' && typeof source.url === 'string') return [source.url];
   const searchQuery = typeof source.query === 'string' ? source.query : query;
 
-  // Use all configured backends (same logic as webSearch)
+  // Shared bounded selection: identical rules to direct web_search.
   const effectiveEnv = env ?? process.env;
-  const requested = parseBackendOverride(effectiveEnv.PI_SEARCH_WEB_BACKENDS);
-  const candidates = requested.length
-    ? SEARCH_BACKENDS.filter((backend) => requested.includes(backend.name))
-    : SEARCH_BACKENDS;
-  const backends = candidates.filter((backend) => backend.configured(effectiveEnv));
-
-  if (requested.length > 0 && backends.length === 0) {
-    const unknown = requested.filter(r => !SEARCH_BACKENDS.some(b => b.name === r));
-    if (unknown.length > 0) throw new Error(`Unknown web search backends: ${unknown.join(', ')}`);
-    throw new Error(`No known web search backends configured (requested: ${requested.join(', ')})`);
+  let policy: ReturnType<typeof resolveWebProviderPolicy>;
+  try {
+    policy = resolveWebProviderPolicy(effectiveEnv, ALL_SEARCH_ADAPTERS);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const unknownMatch = /unknown backend "([^"]+)"/.exec(message);
+    if (unknownMatch) throw new Error(`Unknown web search backends: ${unknownMatch[1]}`);
+    throw error;
   }
+  if (policy.runnable.length === 0) {
+    if (policy.explicit) {
+      throw new Error(`No known web search backends configured (requested: ${policy.selected.join(', ')})`);
+    }
+    return [];
+  }
+  const nativeAi = resolveWebNativeAiPolicy(effectiveEnv);
 
-  // Query all configured backends in parallel
-  const settled = await Promise.allSettled(backends.map(async (backend) => {
-    const results = await backend.search(searchQuery, maxPages, effectiveEnv, signal);
-    return { backend: backend.name, results };
-  }));
+  // Every runnable adapter dispatches once concurrently; no retries.
+  const settled = await Promise.allSettled(
+    policy.runnable.map(async (adapter) => adapter.search({
+      query: searchQuery,
+      limit: maxPages,
+      env: effectiveEnv,
+      signal: providerSignal(signal, policy.timeoutMs),
+      nativeAi: { summaries: nativeAi.summaries, answers: nativeAi.answers },
+    })),
+  );
+  const rankings: Array<{ backend: WebSearchProviderId; hits: WebSearchHit[] }> = [];
+  settled.forEach((item, index) => {
+    const adapter = policy.runnable[index]!;
+    if (item.status === 'fulfilled' && item.value.hits.length > 0) {
+      rankings.push({ backend: adapter.id, hits: item.value.hits });
+    }
+  });
 
-  // Collect primary-first outcome (Codex first, RRF for the rest)
-  const outcome = collectBackendOutcome(settled, backends, []);
-
-  const composed = composePrimaryFirst(outcome.primary, outcome.rankings, maxPages);
+  const composed = fuseWebSearchRankings(rankings, maxPages);
 
   // No semantic-source substitution: an empty composition yields no seeds.
   // (DDG is already in the backend list when configured.)
@@ -696,21 +1125,8 @@ async function semanticSourceUrls(source: Record<string, unknown>, query: string
 }
 
 async function searchDuckDuckGo(query: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
-  const url = new URL('https://api.duckduckgo.com/');
-  url.searchParams.set('q', query);
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('no_html', '1');
-  url.searchParams.set('skip_disambig', '1');
-  const data = await fetchJson(url.href, signal) as Record<string, unknown>;
-  const related = flattenDuckDuckGoTopics(data.RelatedTopics).slice(0, limit);
-  const heading = typeof data.Heading === 'string' ? data.Heading : '';
-  const abstractUrl = typeof data.AbstractURL === 'string' ? data.AbstractURL : '';
-  const abstractText = typeof data.AbstractText === 'string' ? data.AbstractText : '';
-  const results = [
-    ...(abstractUrl ? [{ title: heading || query, url: abstractUrl, snippet: abstractText }] : []),
-    ...related,
-  ].slice(0, limit);
-  return results.length ? results : searchDuckDuckGoHtml(query, limit, signal);
+  // Single HTML request; no Instant Answer call, no retry.
+  return searchDuckDuckGoHtml(query, limit, signal);
 }
 
 async function searchDuckDuckGoHtml(query: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
@@ -758,42 +1174,6 @@ async function searchBrave(query: string, limit: number, env: Record<string, str
   })).filter((result) => result.url);
 }
 
-async function searchExa(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
-  const apiKey = env.EXA_API_KEY?.trim();
-  if (!apiKey) return [];
-  const response = await fetch('https://api.exa.ai/search', {
-    method: 'POST',
-    body: JSON.stringify({ query, numResults: limit, type: 'auto', useAutoprompt: true, contents: { text: true, highlights: true, summary: true } }),
-    ...fetchInit({ Accept: 'application/json', 'Content-Type': 'application/json', 'x-api-key': apiKey }, signal),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status} for Exa`);
-  const data = await safeResponseJson(response, 'https://api.exa.ai/search') as { results?: Array<Record<string, unknown>> };
-  return (data.results ?? []).slice(0, limit).map((result) => ({
-    title: stringField(result.title, 'Untitled'),
-    url: stringField(result.url, ''),
-    snippet: stringField(result.summary, stringField(result.text, '')),
-    source: 'exa',
-  })).filter((result) => result.url);
-}
-
-async function searchTavily(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
-  const apiKey = env.TAVILY_API_KEY?.trim();
-  if (!apiKey) return [];
-  const response = await fetch('https://api.tavily.com/search', {
-    method: 'POST',
-    body: JSON.stringify({ query, max_results: Math.min(limit, 20), search_depth: 'basic', include_answer: 'basic', include_raw_content: false, include_images: false }),
-    ...fetchInit({ Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, signal),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status} for Tavily`);
-  const data = await safeResponseJson(response, 'https://api.tavily.com/search') as { answer?: string; results?: Array<Record<string, unknown>> };
-  return (data.results ?? []).slice(0, limit).map((result, index) => ({
-    title: stringField(result.title, 'Untitled'),
-    url: stringField(result.url, ''),
-    snippet: index === 0 && data.answer ? `${data.answer}\n\n${stringField(result.content, '')}` : stringField(result.content, ''),
-    source: 'tavily',
-  })).filter((result) => result.url);
-}
-
 async function searchOllama(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
   const baseUrl = (env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim();
   if (!baseUrl) return [];
@@ -826,95 +1206,13 @@ function decodeDuckDuckGoUrl(raw: string): string {
   }
 }
 
-function flattenDuckDuckGoTopics(value: unknown): WebResult[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    const record = asRecord(item);
-    if (Array.isArray(record.Topics)) return flattenDuckDuckGoTopics(record.Topics);
-    const text = typeof record.Text === 'string' ? record.Text : '';
-    const url = typeof record.FirstURL === 'string' ? record.FirstURL : '';
-    return url ? [{ title: text.split(' - ')[0] ?? text, url, snippet: text }] : [];
-  });
-}
-
 export function formatWebResults(query: string, results: WebResult[]): string {
   if (results.length === 0) return `No web results for: ${query}`;
   return results.map((result, index) => `## ${index + 1}. ${result.title}\n${result.url}\n${result.snippet ?? ''}`).join('\n\n');
 }
 
-interface BackendOutcome {
-  /** Codex results when it succeeded with at least one result (primary). */
-  primary: WebResult[] | undefined;
-  /** Non-Codex fulfilled rankings for RRF fusion. */
-  rankings: WebResult[][];
-  servedBackends: string[];
-}
-
-export function collectBackendOutcome(
-  settled: PromiseSettledResult<{ backend: string; results: WebResult[] }>[],
-  backends: WebSearchBackend[],
-  failures: Array<{ backend: string; error: string }>,
-): BackendOutcome {
-  const outcome: BackendOutcome = { primary: undefined, rankings: [], servedBackends: [] };
-  settled.forEach((item, index) => {
-    const name = backends[index]?.name ?? 'unknown';
-    if (item.status === 'fulfilled') {
-      outcome.servedBackends.push(item.value.backend);
-      const results = item.value.results;
-      if (name === 'codex') {
-        if (results.length > 0) outcome.primary = results;
-      } else if (results.length > 0) {
-        outcome.rankings.push(results);
-      }
-      return;
-    }
-    failures.push({ backend: name, error: item.reason instanceof Error ? item.reason.message : String(item.reason) });
-  });
-  return outcome;
-}
-
-/**
- * Primary-first result composition: Codex results keep their provider order at
- * the front (deduped by normalized URL); remaining slots are filled by
- * RRF-fused non-Codex rankings, appending only URLs not already present, up to
- * the requested limit. Without Codex results, plain RRF fusion is used.
- */
-export function composePrimaryFirst(primary: WebResult[] | undefined, rankings: WebResult[][], limit: number): WebResult[] {
-  const finish = (item: WebResult, rrfScore?: number): WebResult => ({
-    ...item,
-    ...(rrfScore !== undefined ? { rrfScore } : {}),
-    title: item.title || item.url,
-    snippet: item.snippet ?? '',
-    source: item.source ?? 'unknown',
-  });
-
-  if (!primary || primary.length === 0) {
-    return rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) })
-      .slice(0, limit)
-      .map(({ item, rrfScore }) => finish(item, rrfScore));
-  }
-
-  const seen = new Set<string>();
-  const composed: WebResult[] = [];
-  for (const item of primary) {
-    const key = normalizeUrl(item.url);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    composed.push(finish(item));
-    if (composed.length >= limit) return composed;
-  }
-  for (const { item, rrfScore } of rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) })) {
-    const key = normalizeUrl(item.url);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    composed.push(finish(item, rrfScore));
-    if (composed.length >= limit) return composed;
-  }
-  return composed;
-}
-
 /** Normalize fused results to validated 'article' entities; invalid rows drop. */
-function normalizeWebArticles(fused: WebResult[]): { articles: WebArticleV1[]; invalid: number } {
+function normalizeWebArticles(fused: WebFusedSearchHit[]): { articles: WebArticleV1[]; invalid: number } {
   const articles: WebArticleV1[] = [];
   let invalid = 0;
   for (const item of fused) {
@@ -923,8 +1221,8 @@ function normalizeWebArticles(fused: WebResult[]): { articles: WebArticleV1[]; i
       kind: 'article',
       id: item.url,
       url: item.url,
-      source: item.source ?? 'unknown',
-      backend: item.source ?? 'unknown',
+      source: item.backend,
+      backend: item.backend,
       title: item.title || item.url,
       snippet: (item.snippet ?? '').slice(0, WEB_ENTITY_CONTENT_MAX),
     };
