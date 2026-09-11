@@ -14,6 +14,12 @@ const DIFFBOT_KEYS = [
   'DIFFBOT_FALLBACK_BUDGET',
 ] as const;
 
+test('buildCliEnvironment drops NODE_OPTIONS (CLI child sets --import tsx explicitly)', () => {
+  const env = buildCliEnvironment({ PATH: '/usr/bin', NODE_OPTIONS: '--import evil.mjs --require pwn' });
+  assert.equal(env.NODE_OPTIONS, undefined);
+  assert.equal(env.PATH, '/usr/bin');
+});
+
 test('buildCliEnvironment forwards DIFFBOT_* core-path keys when set', () => {
   const env = buildCliEnvironment({
     DIFFBOT_TOKEN: SENTINEL,

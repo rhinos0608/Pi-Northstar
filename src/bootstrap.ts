@@ -61,17 +61,34 @@ const platformPlan = [
 ];
 
 export async function ensureFirstStartBootstrap(env: Record<string, string | undefined> = process.env): Promise<void> {
-  const mode = env.PI_SEARCH_BOOTSTRAP ?? 'auto';
+  // Default is check-only: first start never installs software unattended.
+  // Explicit PI_SEARCH_BOOTSTRAP=auto (or the /reach-setup auto action)
+  // remains the opt-in install path.
+  const mode = (env.PI_SEARCH_BOOTSTRAP ?? 'check').trim().toLowerCase();
   if (isDisabled(mode)) return;
 
   const existing = await readState(env);
-  if (existing && existing.version >= BOOTSTRAP_STATE_VERSION && !isLegacyBootstrapState(existing)) return;
+  // A prior check-only run must not swallow a later explicit install request:
+  // only a prior install-mode run (or a matching check request) short-circuits.
+  if (existing && existing.version >= BOOTSTRAP_STATE_VERSION && !isLegacyBootstrapState(existing)
+    && (existing.mode !== 'check' || mode === 'check')) return;
 
   if (mode === 'check') {
     await safeWriteState({
       version: BOOTSTRAP_STATE_VERSION,
       ranAt: new Date().toISOString(),
       mode,
+      status: 'ok',
+      message: 'First-start check complete. Use /reach-setup to view available backends.',
+    }, env);
+    return;
+  }
+
+  if (mode !== 'auto') {
+    await safeWriteState({
+      version: BOOTSTRAP_STATE_VERSION,
+      ranAt: new Date().toISOString(),
+      mode: 'check',
       status: 'ok',
       message: 'First-start check complete. Use /reach-setup to view available backends.',
     }, env);
@@ -155,7 +172,7 @@ async function setupStatus(env?: Record<string, string | undefined>): Promise<Ba
     authDir: displayStateDir(effectiveEnv),
     cookieState: await savedCookieStatus(effectiveEnv),
     safety: [
-      'First start defaults to auto. Set PI_SEARCH_BOOTSTRAP=off to disable startup automation.',
+      'First start defaults to check-only (no installs). Set PI_SEARCH_BOOTSTRAP=auto to enable startup installs, off to disable startup automation.',
       'Install actions execute allowed in-house installer commands unless PI_SEARCH_ALLOW_INSTALL=0.',
       'Startup auto-install can be disabled with PI_SEARCH_AUTO_INSTALL=0.',
       'Startup and bare /reach-setup auto never import browser cookies. Kill switch PI_SEARCH_BROWSER_AUTOMATION=0 disables explicit import/login.',
@@ -273,6 +290,9 @@ function structuredInstallDescriptor(action: string, env?: Record<string, string
 
 async function handleImportAllCookies(options: SetupOptions): Promise<BackendCallResult> {
   const env = options.env ?? process.env;
+  if (isDisabled(env.PI_SEARCH_BROWSER_AUTOMATION)) {
+    return jsonTextResult({ status: 'error', ok: false, message: 'Browser cookie import disabled by PI_SEARCH_BROWSER_AUTOMATION.' });
+  }
   return jsonTextResult(await importCookiesFromDefaultBrowser(env, { providers: cookieImportProviders(), force: true }));
 }
 

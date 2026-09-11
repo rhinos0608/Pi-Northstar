@@ -33,6 +33,38 @@ test('callSetupTool defaults to local setup automation', async () => {
   assert.match(text, /Browser cookie import never runs/);
 });
 
+test('ensureFirstStartBootstrap defaults to check-only with no install', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-state-'));
+  const emptyBin = await mkdtemp(join(tmpdir(), 'pi-extension-search-empty-bin-'));
+  try {
+    // Neuter PATH so a regressed auto-default cannot execute real installers;
+    // installs stay allowed so the check-only default is what prevents them.
+    await ensureFirstStartBootstrap({ PI_SEARCH_STATE_DIR: dir, PATH: emptyBin });
+    const state = JSON.parse(await readFile(join(dir, 'bootstrap.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(state.status, 'ok');
+    assert.equal(state.mode, 'check');
+    assert.equal(state.install, undefined);
+  } finally {
+    await rm(emptyBin, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureFirstStartBootstrap auto runs after a prior check-only state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-state-'));
+  try {
+    await ensureFirstStartBootstrap({ PI_SEARCH_STATE_DIR: dir });
+    const afterCheck = JSON.parse(await readFile(join(dir, 'bootstrap.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(afterCheck.mode, 'check');
+    // A later explicit auto request must not be swallowed by the check state.
+    await ensureFirstStartBootstrap({ PI_SEARCH_BOOTSTRAP: 'auto', PI_SEARCH_ALLOW_INSTALL: '0', PI_SEARCH_STATE_DIR: dir });
+    const afterAuto = JSON.parse(await readFile(join(dir, 'bootstrap.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(afterAuto.mode, 'auto');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('ensureFirstStartBootstrap with off mode does nothing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-state-'));
   try {

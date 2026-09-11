@@ -131,7 +131,6 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'LANG',
     'LC_ALL',
     'PYTHONIOENCODING',
-    'NODE_OPTIONS',
     'GITHUB_TOKEN',
     'SEARCH_BACKEND',
     'PI_SEARCH_BOOTSTRAP',
