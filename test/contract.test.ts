@@ -7,6 +7,7 @@ const ALWAYS_AVAILABLE_TOOL_NAMES = [
   'github',
   'social',
   'media',
+  'kg',
 ] as const;
 
 const CONFIGURED_TOOL_NAMES = [

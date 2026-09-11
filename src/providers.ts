@@ -4,6 +4,10 @@ import { channelCapability } from './capabilities.js';
 export interface ProviderDescriptor {
   provider: string;
   channel: string;
+  /** Additive multi-channel surfaces; legacy singular `channel` stays first and
+   *  remains the availability/routing source of truth. Descriptors without
+   *  `channels` behave exactly as before (singular channel only). */
+  channels?: readonly string[];
   family: string;
   envKeys: string[];
   cookieDomains: string[];
@@ -40,6 +44,7 @@ export const PROVIDER_DESCRIPTOR_SOURCE: Array<Omit<ProviderDescriptor, 'availab
 
   // ── Environment variable token/secret ─────────────────────
   { provider: 'github', channel: 'github', family: 'dev', envKeys: ['GITHUB_TOKEN', 'GH_TOKEN'], cookieDomains: [], loginFlow: 'env_var', risk: 'low', setup: 'Set GITHUB_TOKEN or GH_TOKEN for authenticated API access; optional for public data', description: 'GitHub repositories, files, trees, search, search_repos, trending, issues, pulls, releases, commits', loginUrl: 'https://github.com/login' },
+  { provider: 'diffbot', channel: 'diffbot', channels: ['diffbot', 'web', 'research'], family: 'research', envKeys: ['DIFFBOT_TOKEN'], cookieDomains: [], loginFlow: 'env_var', risk: 'low', setup: 'Set DIFFBOT_TOKEN to enable Diffbot knowledge search, enhance, text analysis, and web-search participation', description: 'Diffbot knowledge graph: DQL search, entity enhance, and text analysis (kg tool) plus web_search participation' },
   { provider: 'twitter', channel: 'twitter', family: 'social', envKeys: [], cookieDomains: [], loginFlow: 'cli_login', risk: 'medium', setup: 'Install twitter-cli and login via its own authenticated session', description: 'Twitter/X tweets, search, users, and timelines', loginUrl: 'https://x.com/login' },
   { provider: 'reddit', channel: 'reddit', family: 'social', envKeys: ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT'], cookieDomains: ['reddit.com'], loginFlow: 'env_var', risk: 'medium', setup: 'Set Reddit API credentials or install OpenCLI/rdt-cli', description: 'Reddit posts, comments, subreddits, and search', loginUrl: 'https://www.reddit.com/login' },
 
@@ -71,7 +76,7 @@ function redditOAuthConfigured(env: Record<string, string | undefined>): boolean
 export function liveAuthSnapshot(env: Record<string, string | undefined>): Record<string, { configured: boolean; keyNames: string[] }> {
   const result: Record<string, { configured: boolean; keyNames: string[] }> = {};
   for (const desc of PROVIDER_DESCRIPTORS) {
-    const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.length > 0);
+    const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
     let configured = present.length > 0 || desc.loginFlow === 'none';
     if (desc.provider === 'reddit') configured = redditOAuthConfigured(env);
     if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
@@ -80,14 +85,21 @@ export function liveAuthSnapshot(env: Record<string, string | undefined>): Recor
   return result;
 }
 
+/** All registry channels a provider serves. Legacy singular `channel` first;
+ *  descriptors without `channels` return exactly `[channel]`. */
+export function providerChannels(descriptor: ProviderDescriptor): readonly string[] {
+  return descriptor.channels ?? [descriptor.channel];
+}
+
 export function findProvider(providerKey: string): ProviderDescriptor | undefined {
   return PROVIDER_DESCRIPTORS.find(d => d.provider === providerKey);
 }
 
 export function authForChannel(channelName: string, env: Record<string, string | undefined>): { configured: boolean; keyNames: string[]; loginFlow: string; cookieDomains: string[]; risk: string } | undefined {
-  const desc = PROVIDER_DESCRIPTORS.find(d => d.channel === channelName);
+  const desc = PROVIDER_DESCRIPTORS.find(d => d.channel === channelName)
+    ?? PROVIDER_DESCRIPTORS.find(d => d.channels?.includes(channelName));
   if (!desc) return undefined;
-  const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.length > 0);
+  const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
   let configured = present.length > 0 || desc.loginFlow === 'none';
   if (desc.provider === 'reddit') configured = redditOAuthConfigured(env);
   if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);

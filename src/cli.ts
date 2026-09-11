@@ -19,7 +19,7 @@ interface CliResult {
 
 if (isMainModule()) {
   try {
-    const result = await runCommand(process.argv.slice(2), loadSearchMcpEnvironment(process.env));
+    const result = await runCommand(process.argv.slice(2), loadSearchMcpEnvironment(process.env, { allowLoginShellFallback: true }));
     writeResult(result);
     process.exitCode = result.ok ? 0 : 1;
   } catch (error) {

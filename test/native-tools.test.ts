@@ -860,3 +860,730 @@ test('youtube details: keyless oEmbed rejects arbitrary and lookalike URLs befor
     assert.equal(oEmbedCalled, false, `no oEmbed call for non-canonical URL: ${url}`);
   }
 });
+
+test('callNativeTool kg rejects unknown actions before dispatch', async () => {
+  await assert.rejects(
+    () => callNativeTool('kg', { action: 'crawl' }, { env: {} }),
+    /Native kg only supports search, enhance and analyze_text/,
+  );
+});
+
+test('callNativeTool kg search without token reports no capable provider', async () => {
+  await assert.rejects(
+    () => callNativeTool('kg', { action: 'search', query: 'type:Person' }, { env: {} }),
+    /No capable configured kg provider/,
+  );
+});
+
+test('callNativeTool kg enhance without selector rejects as invalid input', async () => {
+  await assert.rejects(
+    () => callNativeTool('kg', { action: 'enhance', type: 'Person' }, { env: {} }),
+    /at least one selector/,
+  );
+});
+
+test('callNativeTool kg analyze_text with empty text rejects as invalid input', async () => {
+  await assert.rejects(
+    () => callNativeTool('kg', { action: 'analyze_text', text: '' }, { env: {} }),
+    /text must be 1\.\.100000 chars/,
+  );
+});
+
+test('callNativeTool kg explicit unknown provider partitions unsupported_option without fetch', async () => {
+  const result = await callNativeTool(
+    'kg',
+    { action: 'search', query: 'type:Person', providers: ['nope'] },
+    { env: {} },
+  );
+  const details = result.details as { knowledge: { status: string; errors: Array<{ code: string; provider?: string }> } };
+  assert.equal(details.knowledge.status, 'error');
+  assert.equal(details.knowledge.errors[0]?.code, 'unsupported_option');
+  assert.equal(details.knowledge.errors[0]?.provider, 'nope');
+  assert.ok(Array.isArray(result.content), 'kg result must carry content');
+  const first = (result.content as Array<{ text?: string }>)[0];
+  assert.ok(first?.text?.includes('<<<EXTERNAL_EVIDENCE_'), 'kg text must be fenced as untrusted evidence');
+});
+
+test('callNativeTool kg rejects cursor with explicit providers', async () => {
+  await assert.rejects(
+    () => callNativeTool('kg', { action: 'search', query: 'type:Person', providers: ['diffbot'], cursor: 'abc' }, { env: {} }),
+    /not supported for explicit multi-provider/,
+  );
+});
+
+function mockKgFetch(payload: unknown) {
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch;
+  return () => {
+    globalThis.fetch = savedFetch;
+  };
+}
+
+test('callNativeTool kg enhance empty result redacts email selector from text', async () => {
+  const restore = mockKgFetch({ data: [] });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', email: 'jane.doe@example.com' },
+      { env: { DIFFBOT_TOKEN: 'test-token' } },
+    );
+    const first = (result.content as Array<{ text?: string }>)[0];
+    assert.ok(first?.text?.includes('[REDACTED_EMAIL]'), 'email selector must be redacted in tool text');
+    assert.ok(!first?.text?.includes('jane.doe@example.com'), 'raw email must not appear in tool text');
+  } finally {
+    restore();
+  }
+});
+
+test('callNativeTool kg enhance empty result redacts phone selector from text', async () => {
+  const restore = mockKgFetch({ data: [] });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', phone: '+1-555-123-4567' },
+      { env: { DIFFBOT_TOKEN: 'test-token' } },
+    );
+    const first = (result.content as Array<{ text?: string }>)[0];
+    assert.ok(first?.text?.includes('[REDACTED_PHONE]'), 'phone selector must be redacted in tool text');
+    assert.ok(!first?.text?.includes('555-123-4567'), 'raw phone must not appear in tool text');
+  } finally {
+    restore();
+  }
+});
+
+test('callNativeTool kg search dedupes duplicate entity rows first-wins', async () => {
+  const restore = mockKgFetch({
+    data: [
+      { diffbotUri: 'https://diffbot.com/entity/dup1', type: 'Person', name: 'Jane Doe', pageUrl: 'https://example.com/jane' },
+      { diffbotUri: 'https://diffbot.com/entity/dup1', type: 'Person', name: 'Jane Duplicate', pageUrl: 'https://example.com/jane' },
+    ],
+  });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'search', query: 'type:Person' },
+      { env: { DIFFBOT_TOKEN: 'test-token' } },
+    );
+    const details = result.details as {
+      knowledge: { data: { kind: string; entities: Array<{ id: string; name?: string }> } };
+    };
+    assert.equal(details.knowledge.data.entities.length, 1);
+    assert.equal(details.knowledge.data.entities[0]?.name, 'Jane Doe');
+    const first = (result.content as Array<{ text?: string }>)[0];
+    assert.equal((first?.text?.match(/## 2\./g) ?? []).length, 0, 'duplicate row must not render twice');
+  } finally {
+    restore();
+  }
+});
+
+test('callNativeTool kg enhance dedupes duplicate entity rows first-wins', async () => {
+  const restore = mockKgFetch({
+    data: [
+      { diffbotUri: 'https://diffbot.com/entity/dup2', type: 'Person', name: 'Jane Doe', pageUrl: 'https://example.com/jane' },
+      { diffbotUri: 'https://diffbot.com/entity/dup2', type: 'Person', name: 'Jane Duplicate', pageUrl: 'https://example.com/jane' },
+    ],
+  });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe' },
+      { env: { DIFFBOT_TOKEN: 'test-token' } },
+    );
+    const details = result.details as {
+      knowledge: { data: { kind: string; entities: Array<{ id: string; name?: string }> } };
+    };
+    assert.equal(details.knowledge.data.entities.length, 1);
+    assert.equal(details.knowledge.data.entities[0]?.name, 'Jane Doe');
+  } finally {
+    restore();
+  }
+});
+
+test('callNativeTool kg enhance partition is partial when rows are dropped but entities survive', async () => {
+  const restore = mockKgFetch({
+    data: [
+      { diffbotUri: 'https://diffbot.com/entity/abc123', type: 'Person', name: 'Jane Doe' },
+      { error: 'not found', errorCode: 404 },
+    ],
+  });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe' },
+      { env: { DIFFBOT_TOKEN: 'test-token' } },
+    );
+    const details = result.details as {
+      knowledge: {
+        status: string;
+        data: { partitions: Array<{ provider: string; status: string }> };
+        sources: Array<{ provider: string; status: string }>;
+      };
+    };
+    assert.equal(details.knowledge.data.partitions[0]?.status, 'partial');
+    assert.equal(details.knowledge.sources[0]?.status, 'partial');
+    assert.equal(details.knowledge.status, 'partial');
+  } finally {
+    restore();
+  }
+});
+
+// ── kg native-path core integration (spend caps, RRF, enhance assembly) ──
+
+const KG_TOKEN_ENV = { DIFFBOT_TOKEN: 'test-token' };
+
+interface KgTestFetchCounter {
+  calls: string[];
+}
+
+function mockKgFetchRouter(
+  routes: { dql?: unknown; enhance?: unknown; nl?: unknown },
+  counter?: KgTestFetchCounter,
+): () => void {
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    counter?.calls.push(url);
+    const payload = url.includes('/kg/v3/enhance')
+      ? routes.enhance
+      : url.includes('/kg/v3/dql')
+        ? routes.dql
+        : routes.nl;
+    return new Response(JSON.stringify(payload ?? { data: [] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = savedFetch;
+  };
+}
+
+const KG_ENHANCE_CONFLICT_ROWS = [
+  {
+    diffbotUri: 'https://diffbot.com/entity/jane',
+    type: 'Person',
+    name: 'Jane Doe',
+    pageUrl: 'https://example.com/jane',
+    emailAddresses: [{ contactString: 'jane@example.com' }],
+    employments: [
+      { employer: { name: 'Acme' }, title: 'Engineer' },
+      { employer: { name: 'Globex' }, title: 'Manager' },
+    ],
+  },
+];
+
+interface KgEnhanceTestData {
+  kind: string;
+  entities: Array<{ id: string; name?: string }>;
+  claims: Array<{ subjectId: string; predicate: string; object?: string; provider?: string }>;
+  conflicts: Array<{ subjectId: string; predicate: string; object?: string }>;
+  partitions: Array<{ provider: string; status: string }>;
+  groups?: Array<{ id: string; basis: string; strength: string; members: Array<{ provider: string }> }>;
+  evidence?: Array<{ entityId: string; evidence: { status: string } }>;
+}
+
+function kgEnhanceData(result: Awaited<ReturnType<typeof callNativeTool>>): KgEnhanceTestData {
+  const details = result.details as { knowledge: { data: KgEnhanceTestData } };
+  return details.knowledge.data;
+}
+
+test('kg enhance surfaces real claims, conflicts, and alignment groups with partitions', async () => {
+  const restore = mockKgFetchRouter({ enhance: { data: KG_ENHANCE_CONFLICT_ROWS } });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe' },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    const data = kgEnhanceData(result);
+    assert.equal(data.kind, 'enhance');
+    assert.ok(data.claims.length > 0, 'enhance must surface provider-normalized claims');
+    assert.ok(
+      data.claims.some((claim) => claim.predicate === 'employer' && claim.provider === 'diffbot'),
+      'claims keep provider trace tags',
+    );
+    const employers = data.conflicts.filter((claim) => claim.predicate === 'employer');
+    assert.equal(employers.length, 2, 'Acme vs Globex employer rows must surface as conflicts');
+    assert.ok(data.groups && data.groups.length === 1, 'enhance must produce one alignment group');
+    assert.equal(data.groups?.[0]?.basis, 'canonical_url');
+    assert.equal(data.groups?.[0]?.strength, 'exact');
+    assert.equal(data.groups?.[0]?.members[0]?.provider, 'diffbot');
+    assert.equal(data.partitions.length, 1);
+    assert.equal(data.partitions[0]?.status, 'ok');
+    assert.equal(data.partitions[0]?.provider, 'diffbot');
+    assert.ok(data.evidence && data.evidence.length === 1, 'enhance must carry per-entity evidence');
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance fields option projects claims by Atlas-owned family', async () => {
+  const restore = mockKgFetchRouter({ enhance: { data: KG_ENHANCE_CONFLICT_ROWS } });
+  try {
+    const basic = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe', fields: 'basic' },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    const basicPredicates = kgEnhanceData(basic).claims.map((claim) => claim.predicate);
+    assert.ok(basicPredicates.includes('name'), 'basic keeps name claims');
+    assert.ok(!basicPredicates.includes('employer'), 'basic drops professional employer claims');
+    const full = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe' },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    assert.ok(
+      kgEnhanceData(full).claims.some((claim) => claim.predicate === 'employer'),
+      'omitted fields preserves relationship claims',
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance includeRelationships false suppresses relationship predicates', async () => {
+  const restore = mockKgFetchRouter({ enhance: { data: KG_ENHANCE_CONFLICT_ROWS } });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe', includeRelationships: false },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    const predicates = kgEnhanceData(result).claims.map((claim) => claim.predicate);
+    assert.ok(!predicates.includes('employer'), 'relationship predicates suppressed');
+    assert.ok(predicates.includes('name'), 'non-relationship claims survive');
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance includeEvidence controls evidence status', async () => {
+  const restore = mockKgFetchRouter({ enhance: { data: KG_ENHANCE_CONFLICT_ROWS } });
+  try {
+    const requested = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe', includeEvidence: true },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    assert.equal(kgEnhanceData(requested).evidence?.[0]?.evidence.status, 'provided');
+    const unrequested = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe' },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    assert.equal(kgEnhanceData(unrequested).evidence?.[0]?.evidence.status, 'not_requested');
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance confidenceThreshold drops low-confidence entities', async () => {
+  const rows = [{ ...KG_ENHANCE_CONFLICT_ROWS[0], confidence: 0.1 }];
+  const restore = mockKgFetchRouter({ enhance: { data: rows } });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe', confidenceThreshold: 0.9 },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    assert.equal(kgEnhanceData(result).entities.length, 0, 'low-confidence entity must be filtered');
+  } finally {
+    restore();
+  }
+});
+
+test('kg search over operator spend cap rejects without fetch', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({ dql: { data: [] } }, counter);
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'search', query: 'type:Person', limit: 9 },
+      { env: { ...KG_TOKEN_ENV, DIFFBOT_SEARCH_SIZE: '5' } },
+    );
+    const details = result.details as { knowledge: { errors: Array<{ code: string }> } };
+    assert.equal(details.knowledge.errors[0]?.code, 'invalid_input');
+    assert.equal(counter.calls.length, 0, 'over-cap search must reject before any paid call');
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance over operator spend cap rejects without fetch', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({ enhance: { data: [] } }, counter);
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe', maxEntities: 5 },
+      { env: { ...KG_TOKEN_ENV, DIFFBOT_ENHANCE_SIZE: '1' } },
+    );
+    const details = result.details as { knowledge: { errors: Array<{ code: string }> } };
+    assert.equal(details.knowledge.errors[0]?.code, 'invalid_input');
+    assert.equal(counter.calls.length, 0, 'over-cap enhance must reject before any paid call');
+  } finally {
+    restore();
+  }
+});
+
+test('kg analyze_text over operator NLP cap rejects without fetch', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({ nl: [] }, counter);
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'analyze_text', text: 'hello world, this is a test' },
+      { env: { ...KG_TOKEN_ENV, DIFFBOT_NLP_MAX_CHARS: '5' } },
+    );
+    const details = result.details as { knowledge: { errors: Array<{ code: string }> } };
+    assert.equal(details.knowledge.errors[0]?.code, 'invalid_input');
+    assert.equal(counter.calls.length, 0, 'over-cap NLP must reject before any paid call');
+  } finally {
+    restore();
+  }
+});
+
+test('kg invalid spend config rejects before any paid call', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({ dql: { data: [] } }, counter);
+  try {
+    await assert.rejects(
+      () => callNativeTool(
+        'kg',
+        { action: 'search', query: 'type:Person' },
+        { env: { ...KG_TOKEN_ENV, DIFFBOT_SEARCH_SIZE: 'banana' } },
+      ),
+      /DIFFBOT_SEARCH_SIZE/,
+    );
+    assert.equal(counter.calls.length, 0, 'invalid config must reject before any paid call');
+  } finally {
+    restore();
+  }
+});
+
+test('kg public maxProviders above operator cap rejects instead of partitioning', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({ dql: { data: [] } }, counter);
+  try {
+    await assert.rejects(
+      () => callNativeTool(
+        'kg',
+        { action: 'search', query: 'type:Person', maxProviders: 2 },
+        { env: { ...KG_TOKEN_ENV, DIFFBOT_MAX_PROVIDERS: '1' } },
+      ),
+      /maxProviders.*cap/i,
+    );
+    assert.equal(counter.calls.length, 0, 'over-cap maxProviders must reject before any paid call');
+  } finally {
+    restore();
+  }
+});
+
+test('kg requested providers above operator cap reject instead of partitioning excess', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({ dql: { data: [] } }, counter);
+  try {
+    await assert.rejects(
+      () => callNativeTool(
+        'kg',
+        { action: 'search', query: 'type:Person', providers: ['diffbot', 'nope'] },
+        { env: { ...KG_TOKEN_ENV, DIFFBOT_MAX_PROVIDERS: '1' } },
+      ),
+      /cap/i,
+    );
+    assert.equal(counter.calls.length, 0, 'excess providers must reject rather than partition');
+  } finally {
+    restore();
+  }
+});
+
+test('kg omitted maxProviders uses configured default cap', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({ dql: { data: [] } }, counter);
+  try {
+    await assert.rejects(
+      () => callNativeTool(
+        'kg',
+        { action: 'search', query: 'type:Person', providers: ['diffbot', 'a', 'b', 'c'] },
+        { env: { ...KG_TOKEN_ENV } },
+      ),
+      /cap/i,
+    );
+    assert.equal(counter.calls.length, 0, 'four requested providers exceed the default cap of 3');
+  } finally {
+    restore();
+  }
+});
+
+test('kg search single provider preserves fetch order', async () => {
+  const restore = mockKgFetchRouter({
+    dql: {
+      data: [
+        { diffbotUri: 'https://diffbot.com/entity/b', type: 'Person', name: 'Bee Second' },
+        { diffbotUri: 'https://diffbot.com/entity/a', type: 'Person', name: 'Aye First' },
+      ],
+    },
+  });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'search', query: 'type:Person' },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    const details = result.details as {
+      knowledge: { data: { entities: Array<{ name?: string }> } };
+    };
+    assert.deepEqual(
+      details.knowledge.data.entities.map((entity) => entity.name),
+      ['Bee Second', 'Aye First'],
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance public envelope carries opaque alignment ids, never raw identity keys', async () => {
+  const restore = mockKgFetchRouter({ enhance: { data: KG_ENHANCE_CONFLICT_ROWS } });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe' },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    const data = kgEnhanceData(result);
+    assert.equal(data.groups?.length, 1);
+    assert.equal(data.groups?.[0]?.id, 'alignment:1');
+    const serialized = JSON.stringify((result.details as { knowledge: unknown }).knowledge);
+    assert.ok(!serialized.includes('canonical_url:'), 'raw alignment key prefix must not leak');
+    assert.ok(!serialized.includes('"key"'), 'public groups must not carry key');
+    assert.ok(serialized.includes('alignment:1'), 'opaque public id present');
+    const employers = data.conflicts.filter((claim) => claim.predicate === 'employer');
+    assert.equal(employers.length, 2, 'Acme vs Globex still conflict');
+    assert.ok(employers.every((claim) => claim.subjectId === data.groups?.[0]?.id), 'conflicts share the opaque subjectId');
+    assert.ok(data.claims.every((claim) => claim.subjectId === data.groups?.[0]?.id));
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance aligned duplicate rows surface cross-row employer conflict', async () => {
+  const restore = mockKgFetchRouter({
+    enhance: {
+      data: [
+        { diffbotUri: 'e1', type: 'Person', name: 'Jane Doe', pageUrl: 'https://example.com/jane', employments: [{ employer: { name: 'Acme' } }] },
+        { diffbotUri: 'e2', type: 'Person', name: 'Jane Doe', pageUrl: 'https://example.com/jane', employments: [{ employer: { name: 'Globex' } }] },
+      ],
+    },
+  });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'enhance', type: 'Person', name: 'Jane Doe' },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    const data = kgEnhanceData(result);
+    assert.equal(data.groups?.length, 1, 'same pageUrl rows align into one group');
+    assert.equal(data.groups?.[0]?.members.length, 2, 'both provider-native rows stay as members');
+    const employers = data.conflicts.filter((claim) => claim.predicate === 'employer');
+    assert.equal(employers.length, 2, 'Acme vs Globex across aligned rows must conflict');
+  } finally {
+    restore();
+  }
+});
+
+test('kg search explicit fanout aggregates rankings with unsupported partition intact', async () => {
+  const counter: KgTestFetchCounter = { calls: [] };
+  const restore = mockKgFetchRouter({
+    dql: {
+      data: [
+        { diffbotUri: 'https://diffbot.com/entity/b', type: 'Person', name: 'Bee Second' },
+        { diffbotUri: 'https://diffbot.com/entity/a', type: 'Person', name: 'Aye First' },
+      ],
+    },
+  }, counter);
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'search', query: 'type:Person', providers: ['diffbot', 'nope'] },
+      { env: { ...KG_TOKEN_ENV } },
+    );
+    const details = result.details as {
+      knowledge: {
+        data: { entities: Array<{ name?: string }>; partitions?: unknown };
+        errors: Array<{ code: string; provider?: string }>;
+      };
+    };
+    assert.deepEqual(
+      details.knowledge.data.entities.map((entity) => entity.name),
+      ['Bee Second', 'Aye First'],
+    );
+    assert.equal(details.knowledge.errors[0]?.code, 'unsupported_option');
+    assert.equal(details.knowledge.errors[0]?.provider, 'nope');
+    assert.equal(counter.calls.length, 1, 'only the capable provider is fetched');
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance aligns distinct names sharing email with opaque conflict subject', async () => {
+  const restore = mockKgFetchRouter({
+    enhance: {
+      data: [
+        { diffbotUri: 'https://diffbot.com/entity/email-a', type: 'Person', name: 'Alice Distinct', emailAddresses: [{ contactString: 'shared-align@example.com' }], employments: [{ employer: { name: 'Acme' } }] },
+        { diffbotUri: 'https://diffbot.com/entity/email-b', type: 'Person', name: 'Bob Other', emailAddresses: [{ contactString: 'SHARED-ALIGN@example.com' }], employments: [{ employer: { name: 'Globex' } }] },
+      ],
+    },
+  });
+  try {
+    const result = await callNativeTool('kg', { action: 'enhance', type: 'Person', name: 'Alice' }, { env: { ...KG_TOKEN_ENV } });
+    const data = kgEnhanceData(result);
+    assert.equal(data.groups?.length, 1);
+    assert.equal(data.groups?.[0]?.basis, 'email');
+    assert.equal(data.groups?.[0]?.strength, 'strong');
+    assert.equal(data.groups?.[0]?.id, 'alignment:1');
+    assert.equal(data.groups?.[0]?.members.length, 2);
+    const employers = data.conflicts.filter((claim) => claim.predicate === 'employer');
+    assert.equal(employers.length, 2);
+    assert.ok(employers.every((claim) => claim.subjectId === data.groups?.[0]?.id));
+    const serialized = JSON.stringify((result.details as { knowledge: unknown }).knowledge);
+    for (const prefix of ['canonical_url:', 'email:', 'phone:', 'external_identifier:', 'provider_id:', 'typed_identity:']) {
+      assert.ok(!serialized.includes(prefix), `raw identity-key prefix ${prefix} must not leak`);
+    }
+    for (const key of ['"signals"', '"emails"', '"phones"', '"externalIds"', '"canonicalUrl"', '"providerId"']) {
+      assert.ok(!serialized.includes(key), `raw signals key ${key} must not leak`);
+    }
+    assert.ok(!serialized.includes('contactString'));
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance aligns distinct names sharing phone with opaque conflict subject', async () => {
+  const restore = mockKgFetchRouter({
+    enhance: {
+      data: [
+        { diffbotUri: 'https://diffbot.com/entity/phone-a', type: 'Person', name: 'Carol Distinct', phoneNumbers: [{ contactString: '+1-555-999-0001' }], employments: [{ employer: { name: 'Acme' } }] },
+        { diffbotUri: 'https://diffbot.com/entity/phone-b', type: 'Person', name: 'Dave Other', phoneNumbers: [{ contactString: '+1-555-999-0001' }], employments: [{ employer: { name: 'Globex' } }] },
+      ],
+    },
+  });
+  try {
+    const result = await callNativeTool('kg', { action: 'enhance', type: 'Person', name: 'Carol' }, { env: { ...KG_TOKEN_ENV } });
+    const data = kgEnhanceData(result);
+    assert.equal(data.groups?.length, 1);
+    assert.equal(data.groups?.[0]?.basis, 'phone');
+    const employers = data.conflicts.filter((claim) => claim.predicate === 'employer');
+    assert.equal(employers.length, 2);
+    assert.ok(employers.every((claim) => claim.subjectId === data.groups?.[0]?.id));
+    const serialized = JSON.stringify((result.details as { knowledge: unknown }).knowledge);
+    assert.ok(!serialized.includes('phone:'));
+    assert.ok(!serialized.includes('"signals"'));
+  } finally {
+    restore();
+  }
+});
+
+test('kg enhance aligns distinct names sharing external id with opaque conflict subject', async () => {
+  const restore = mockKgFetchRouter({
+    enhance: {
+      data: [
+        { diffbotUri: 'https://diffbot.com/entity/ext-a', type: 'Person', name: 'Erin Distinct', wikidata_id: 'Q-align-1', employments: [{ employer: { name: 'Acme' } }] },
+        { diffbotUri: 'https://diffbot.com/entity/ext-b', type: 'Person', name: 'Frank Other', wikidata_id: 'Q-align-1', employments: [{ employer: { name: 'Globex' } }] },
+      ],
+    },
+  });
+  try {
+    const result = await callNativeTool('kg', { action: 'enhance', type: 'Person', name: 'Erin' }, { env: { ...KG_TOKEN_ENV } });
+    const data = kgEnhanceData(result);
+    assert.equal(data.groups?.length, 1);
+    assert.equal(data.groups?.[0]?.basis, 'external_identifier');
+    const employers = data.conflicts.filter((claim) => claim.predicate === 'employer');
+    assert.equal(employers.length, 2);
+    assert.ok(employers.every((claim) => claim.subjectId === data.groups?.[0]?.id));
+    const serialized = JSON.stringify((result.details as { knowledge: unknown }).knowledge);
+    assert.ok(!serialized.includes('external_identifier:'));
+    assert.ok(!serialized.includes('"signals"'));
+  } finally {
+    restore();
+  }
+});
+
+test('kg search hostile cursor from rejects cursor_invalid with zero fetch', async () => {
+  const { fingerprintKgRequest, issueKgCursor } = await import('../src/knowledge-domain.js');
+  const { DIFFBOT_KG_ADAPTER_CURSOR_V, DIFFBOT_KG_MAX_FROM } = await import('../src/diffbot-kg.js');
+  const query = 'type:Person';
+  const pageSize = 10;
+  const fingerprint = fingerprintKgRequest({ action: 'search', query, limit: pageSize, providers: 'auto' });
+  const hostileStates = [{ from: -1 }, { from: 1.5 }, { from: DIFFBOT_KG_MAX_FROM + 1 }, { from: DIFFBOT_KG_MAX_FROM - 5 }];
+  for (const state of hostileStates) {
+    const counter: KgTestFetchCounter = { calls: [] };
+    const restore = mockKgFetchRouter({ dql: { data: [] } }, counter);
+    try {
+      const cursor = issueKgCursor({ provider: 'diffbot', fingerprint, adapterCursorV: DIFFBOT_KG_ADAPTER_CURSOR_V, state: state as { from: number }, fanout: false });
+      await assert.rejects(
+        () => callNativeTool('kg', { action: 'search', query, limit: pageSize, cursor }, { env: { ...KG_TOKEN_ENV } }),
+        /cursor_invalid|Cursor state\.from/i,
+      );
+      assert.equal(counter.calls.length, 0, `hostile from=${state.from} must reject before any paid call`);
+    } finally {
+      restore();
+    }
+  }
+  const okCounter: KgTestFetchCounter = { calls: [] };
+  const okRestore = mockKgFetchRouter({ dql: { data: [] } }, okCounter);
+  try {
+    const cursor = issueKgCursor({ provider: 'diffbot', fingerprint, adapterCursorV: DIFFBOT_KG_ADAPTER_CURSOR_V, state: { from: 10 }, fanout: false });
+    const result = await callNativeTool('kg', { action: 'search', query, limit: pageSize, cursor }, { env: { ...KG_TOKEN_ENV } });
+    const details = result.details as { knowledge: { errors: unknown[] } };
+    assert.equal(details.knowledge.errors.length, 0);
+    assert.equal(okCounter.calls.length, 1, 'normal cursor pagination must still fetch');
+  } finally {
+    okRestore();
+  }
+});
+
+test('kg search terminal page at exact bound reports hasMore false with no cursor', async () => {
+  const { fingerprintKgRequest, issueKgCursor } = await import('../src/knowledge-domain.js');
+  const { DIFFBOT_KG_ADAPTER_CURSOR_V, DIFFBOT_KG_MAX_FROM } = await import('../src/diffbot-kg.js');
+  assert.equal(DIFFBOT_KG_MAX_FROM, 10000);
+  const query = 'type:Person';
+  const pageSize = 50;
+  const fingerprint = fingerprintKgRequest({ action: 'search', query, limit: pageSize, providers: 'auto' });
+  const rows = Array.from({ length: pageSize }, (_, i) => ({
+    diffbotUri: `https://diffbot.com/entity/terminal-${i}`,
+    type: 'Person',
+    name: `Terminal ${i}`,
+  }));
+  const terminalRestore = mockKgFetchRouter({ dql: { data: rows } });
+  try {
+    const cursor = issueKgCursor({ provider: 'diffbot', fingerprint, adapterCursorV: DIFFBOT_KG_ADAPTER_CURSOR_V, state: { from: 9950 }, fanout: false });
+    const result = await callNativeTool(
+      'kg',
+      { action: 'search', query, limit: pageSize, cursor },
+      { env: { ...KG_TOKEN_ENV, DIFFBOT_SEARCH_SIZE: '50' } },
+    );
+    const details = result.details as { knowledge: { pagination: { hasMore: boolean; nextCursor?: string } } };
+    assert.equal(details.knowledge.pagination.hasMore, false);
+    assert.equal(details.knowledge.pagination.nextCursor, undefined);
+  } finally {
+    terminalRestore();
+  }
+  const earlyRestore = mockKgFetchRouter({ dql: { data: rows } });
+  try {
+    const result = await callNativeTool(
+      'kg',
+      { action: 'search', query, limit: pageSize },
+      { env: { ...KG_TOKEN_ENV, DIFFBOT_SEARCH_SIZE: '50' } },
+    );
+    const details = result.details as { knowledge: { pagination: { hasMore: boolean; nextCursor?: string } } };
+    assert.equal(details.knowledge.pagination.hasMore, true);
+    assert.ok(typeof details.knowledge.pagination.nextCursor === 'string');
+  } finally {
+    earlyRestore();
+  }
+});

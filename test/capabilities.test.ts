@@ -361,3 +361,64 @@ test('github channel advertises the Stage 5 canonical action set', () => {
   assert.equal(provider.consumesCookie, false);
   assert.deepEqual([...provider.cookieDomains], []);
 });
+
+// ── Diffbot knowledge channel (additive; legacy channels untouched) ──
+
+test('diffbot channel advertises knowledge actions with DIFFBOT_TOKEN backends', () => {
+  const channel = channelCapability('diffbot');
+  assert.ok(channel, 'diffbot channel must exist');
+  assert.equal(channel.family, 'research');
+  assert.equal(channel.publicTool, 'kg');
+  assert.equal(channel.availability, 'available');
+  assert.equal(channel.tier, 1);
+  assert.deepEqual([...channel.domains], []);
+  assert.deepEqual(channel.actions.map((action) => action.action).sort(), ['analyze_text', 'enhance', 'search']);
+  for (const action of channel.actions) {
+    assert.equal(action.readOnly, true);
+    assert.ok(!('aliases' in action));
+  }
+  assert.deepEqual(channel.backends.map((backend) => backend.id).sort(), [
+    'diffbot-analyze-text',
+    'diffbot-dql',
+    'diffbot-enhance',
+    'diffbot-web-search',
+  ]);
+  for (const backend of channel.backends) {
+    assert.equal(backend.mode, 'native');
+    assert.equal(backend.auth?.required, true);
+    assert.deepEqual([...(backend.auth?.anyOf ?? [])], ['DIFFBOT_TOKEN']);
+  }
+  assert.deepEqual([...(backendCapability('diffbot', 'diffbot-dql')?.actions ?? [])], ['search']);
+  assert.deepEqual([...(backendCapability('diffbot', 'diffbot-enhance')?.actions ?? [])], ['enhance']);
+  assert.deepEqual([...(backendCapability('diffbot', 'diffbot-analyze-text')?.actions ?? [])], ['analyze_text']);
+  const webSearch = backendCapability('diffbot', 'diffbot-web-search');
+  assert.ok(webSearch);
+  assert.deepEqual([...webSearch.actions], ['search']);
+  assert.match(String(webSearch.note), /never primary/);
+});
+
+test('diffbot provider claims DIFFBOT_TOKEN only with no cookie import', () => {
+  const provider = channelCapability('diffbot')?.provider;
+  assert.ok(provider);
+  assert.equal(provider.provider, 'diffbot');
+  assert.deepEqual([...provider.envKeys], ['DIFFBOT_TOKEN']);
+  assert.deepEqual([...provider.cookieDomains], []);
+  assert.equal(provider.loginFlow, 'env_var');
+  assert.equal(provider.risk, 'low');
+  assert.equal(provider.consumesCookie, false);
+  assert.match(provider.setup, /DIFFBOT_TOKEN/);
+  assert.ok(!cookieImportProviders().includes('diffbot'), 'diffbot must not import unused cookies');
+  assert.deepEqual([...cookieImportProviders()].sort(), ['bilibili', 'reddit', 'youtube']);
+});
+
+test('diffbot registration leaves legacy channels untouched', () => {
+  assert.deepEqual([...canonicalActionsFor('web')].sort(), ['read', 'search']);
+  assert.deepEqual([...canonicalActionsFor('research')], ['search']);
+  assert.deepEqual(socialPlatforms(), ['v2ex', 'twitter', 'reddit', 'xiaohongshu', 'facebook', 'instagram', 'linkedin']);
+  assert.deepEqual(mediaPlatforms(), ['rss', 'youtube', 'bilibili']);
+  const names = new Set(setupChannelNames());
+  assert.ok(names.has('diffbot'));
+  for (const legacy of ['web', 'github', 'rss', 'research', 'browser']) {
+    assert.ok(names.has(legacy), `missing legacy channel ${legacy}`);
+  }
+});

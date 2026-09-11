@@ -20,3 +20,4 @@ __pycache__/
 **/.smart-edit-undo/
 .pi-subagents/artifacts/
 .subagents/
+.pi/

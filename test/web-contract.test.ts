@@ -236,6 +236,20 @@ test('web pagination unsupported: cursors rejected with cursor_invalid', () => {
   );
 });
 
+test('search preference order places diffbot after keyed providers, before keyless', async () => {
+  const { WEB_BACKEND_PREFERENCE } = await import('../src/web-contract.js');
+  assert.deepEqual([...WEB_BACKEND_PREFERENCE.search], [
+    'codex',
+    'tavily',
+    'exa',
+    'brave',
+    'searxng',
+    'diffbot',
+    'ollama-search',
+    'duckduckgo',
+  ]);
+});
+
 test('plan ordering: complete before degraded, tier then preference', () => {
   const degraded = plan({ backend: 'codex', degraded: true });
   const full = plan({ backend: 'duckduckgo' });

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { test } from 'node:test';
 import { callNativeTool } from '../src/native-tools.js';
+import { fetchReadablePage } from '../src/web.js';
 
 function invalidRequestCode(err: unknown): string | undefined {
   return (err as { code?: string })?.code;
@@ -443,4 +444,373 @@ test('crawl path rejects out-of-range maxChars with invalid_request', async () =
     }, { env: { ...NO_EMBEDDING } }),
     (err: unknown) => invalidRequestCode(err) === 'invalid_request',
   );
+});
+
+// ── Diffbot web_search backend (normal RRF, never primary) ──
+
+function publicLookupStub() {
+  return async () => [{ address: '93.184.216.34', family: 4 as const }];
+}
+
+test('web_search diffbot backend serves results with source diffbot', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://llm.diffbot.com/api/v1/web_search')) {
+      return new Response(JSON.stringify({
+        search_results: [
+          { pageUrl: 'https://example.com/diffbot-a', title: 'Diffbot Alpha', content: 'diffbot snippet a' },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'diffbot', DIFFBOT_TOKEN: 'test-token' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string; source: string }>;
+      fusion: { backends: string[] };
+    };
+    assert.equal(details.results.length, 1);
+    assert.equal(details.results[0]?.url, 'https://example.com/diffbot-a');
+    assert.equal(details.results[0]?.source, 'diffbot');
+    assert.ok(details.fusion.backends.includes('diffbot'));
+  });
+});
+
+test('web_search diffbot participates in RRF without primary weighting', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://llm.diffbot.com/api/v1/web_search')) {
+      return new Response(JSON.stringify({
+        search_results: [
+          { pageUrl: 'https://example.com/shared?utm_source=diffbot', title: 'Shared', content: 'shared snippet' },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.startsWith('https://api.duckduckgo.com/')) {
+      return new Response(JSON.stringify({
+        Heading: 'Shared',
+        AbstractURL: 'https://www.example.com/shared',
+        AbstractText: 'duck snippet',
+        RelatedTopics: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'diffbot,duckduckgo', DIFFBOT_TOKEN: 'test-token' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string; rrfScore?: number }>;
+      fusion: { backends: string[]; primary?: string };
+    };
+    assert.equal(details.results.length, 1);
+    assert.ok((details.results[0]?.rrfScore ?? 0) > 0, 'diffbot+ddg duplicate must fuse with an rrfScore');
+    assert.equal(details.fusion.primary, undefined, 'diffbot must never take primary weighting');
+    assert.deepEqual(details.fusion.backends.sort(), ['diffbot', 'duckduckgo']);
+  });
+});
+
+test('web_search explicit diffbot without token rejects as not configured', async () => {
+  let calls = 0;
+  await withFetch(async () => {
+    calls++;
+    return new Response('{}', { status: 200 });
+  }, async () => {
+    await assert.rejects(
+      () => callNativeTool('web_search', { query: 'example' }, { env: { PI_SEARCH_WEB_BACKENDS: 'diffbot' } }),
+      /not configured/,
+    );
+  });
+  assert.equal(calls, 0, 'unconfigured diffbot must not spawn any network call');
+});
+
+test('web_search diffbot never retries a non-retryable HTTP-200 error envelope (single paid call)', async () => {
+  let diffbotCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://llm.diffbot.com/api/v1/web_search')) {
+      diffbotCalls++;
+      return new Response(JSON.stringify({ error: 'upstream request timeout', errorCode: 504 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    await assert.rejects(
+      () => callNativeTool('web_search', { query: 'example', limit: 5 }, {
+        env: { PI_SEARCH_WEB_BACKENDS: 'diffbot', DIFFBOT_TOKEN: 'test-token' },
+      }),
+      /All web search backends failed/,
+    );
+  });
+  assert.equal(diffbotCalls, 1, 'non-retryable 200-envelope error must not trigger a second paid call');
+});
+
+test('web_search returns other providers when Diffbot rejects above operator cap (no paid call)', async () => {
+  let diffbotCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://llm.diffbot.com/api/v1/web_search')) {
+      diffbotCalls++;
+      return new Response(JSON.stringify({ search_results: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.startsWith('https://api.duckduckgo.com/')) {
+      return new Response(JSON.stringify({
+        Heading: 'Example',
+        AbstractURL: 'https://example.com/capped',
+        AbstractText: 'duck result',
+        RelatedTopics: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, {
+      env: { PI_SEARCH_WEB_BACKENDS: 'diffbot,duckduckgo', DIFFBOT_TOKEN: 'test-token', DIFFBOT_SEARCH_SIZE: '3' },
+    });
+    const details = result.details as {
+      results: Array<{ url: string; source: string }>;
+      fusion: { backends: string[]; failures: Array<{ backend: string; error: string }> };
+    };
+    assert.equal(details.results.length, 1);
+    assert.equal(details.results[0]?.url, 'https://example.com/capped');
+    assert.deepEqual(details.fusion.backends, ['duckduckgo']);
+    assert.ok(details.fusion.failures.some((f) => f.backend === 'diffbot' && /DIFFBOT_SEARCH_SIZE/.test(f.error)));
+  });
+  assert.equal(diffbotCalls, 0, 'operator-cap rejection must not trigger a paid Diffbot call');
+});
+
+// ── Diffbot Analyze-GET fetch fallback ──
+
+function analyzeSuccessBody(url: string, text: string): unknown {
+  return {
+    objects: [{ title: 'Fallback Title', pageUrl: url, text, links: [] }],
+  };
+}
+
+test('fetch falls back to Diffbot Analyze on native failure and marks execution fallback', async () => {
+  let analyzeCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/article', 'fallback content words '.repeat(40))), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('fetch failed');
+  }, async () => {
+    const result = await callNativeTool('semantic_crawl', {
+      source: { type: 'url', url: 'https://example.com/article' },
+      query: 'fallback content',
+    }, {
+      env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token' },
+      lookup: publicLookupStub(),
+    });
+    const text = JSON.stringify(result);
+    assert.match(text, /Fallback Title/, 'fallback page title must surface');
+    const details = result.details as {
+      fallback?: { provider: string; path: string; qualityImpact: string; pages: number };
+      northstar?: { status: string };
+    };
+    assert.equal(details.fallback?.provider, 'diffbot');
+    assert.equal(details.fallback?.path, 'fallback');
+    assert.equal(details.fallback?.qualityImpact, 'not_assessed', 'degraded marks execution path, never content quality');
+    assert.equal(details.fallback?.pages, 1);
+    assert.equal(details.northstar?.status, 'degraded');
+    assert.equal(analyzeCalls, 1);
+  });
+});
+
+test('fetch never falls back on policy rejection (blocked hostname)', async () => {
+  let analyzeCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/x', 'should never be used')), { status: 200 });
+    }
+    throw new Error('fetch failed');
+  }, async () => {
+    await assert.rejects(
+      () => callNativeTool('fetch', {
+        url: 'http://localhost:3000/debug',
+        query: 'fallback content',
+        followLinks: true,
+      }, {
+        env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token' },
+        lookup: publicLookupStub(),
+      }),
+      /Blocked hostname|Private\/reserved/,
+    );
+  });
+  assert.equal(analyzeCalls, 0, 'policy rejection must never trigger paid fallback');
+});
+
+test('fetch never falls back on oversize response', async () => {
+  let analyzeCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/big', 'should never be used')), { status: 200 });
+    }
+    return new Response('x', { status: 200, headers: { 'content-length': '2000000', 'content-type': 'text/html' } });
+  }, async () => {
+    const result = await callNativeTool('fetch', {
+      url: 'https://example.com/big',
+      query: 'fallback content',
+    }, {
+      env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token' },
+      lookup: publicLookupStub(),
+    });
+    const details = result.details as { fallback?: unknown };
+    assert.equal(details.fallback, undefined, 'size failure must never trigger paid fallback');
+  });
+  assert.equal(analyzeCalls, 0, 'size failure must never trigger paid fallback');
+});
+
+test('fetch never falls back on caller abort', async () => {
+  let analyzeCalls = 0;
+  const controller = new AbortController();
+  controller.abort();
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/x', 'should never be used')), { status: 200 });
+    }
+    throw new Error('fetch failed');
+  }, async () => {
+    await assert.rejects(
+      () => callNativeTool('agentic_browse', {
+        action: 'read',
+        url: 'https://example.com/article',
+      }, {
+        env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token' },
+        lookup: publicLookupStub(),
+        signal: controller.signal,
+      }),
+    );
+  });
+  assert.equal(analyzeCalls, 0, 'caller abort must never trigger paid fallback');
+});
+
+test('fetch shares one Analyze budget across pages (budget 1 = single fallback call)', async () => {
+  let analyzeCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://llm.diffbot.com/api/v1/web_search')) throw new Error(`unexpected fetch ${url}`);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/article', 'shared budget fallback words '.repeat(40))), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.startsWith('https://api.duckduckgo.com/')) {
+      return new Response(JSON.stringify({
+        Heading: '',
+        AbstractURL: '',
+        AbstractText: '',
+        RelatedTopics: [
+          { Text: 'one - more', FirstURL: 'https://example.com/one' },
+          { Text: 'two - more', FirstURL: 'https://example.com/two' },
+          { Text: 'three - more', FirstURL: 'https://example.com/three' },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('fetch failed');
+  }, async () => {
+    await callNativeTool('semantic_crawl', {
+      source: { type: 'search', query: 'shared budget' },
+      query: 'shared budget fallback',
+      maxPages: 3,
+    }, {
+      env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token', DIFFBOT_FALLBACK_BUDGET: '1', PI_SEARCH_WEB_BACKENDS: 'duckduckgo' },
+      lookup: publicLookupStub(),
+    });
+  });
+  assert.equal(analyzeCalls, 1, 'one shared budget across the fetch must cap Analyze calls at 1');
+});
+
+test('fetch without token never calls Analyze (no behavior change)', async () => {
+  let analyzeCalls = 0;
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.includes('api.diffbot.com')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/x', 'should never be used')), { status: 200 });
+    }
+    throw new Error('fetch failed');
+  }, async () => {
+    await callNativeTool('fetch', {
+      url: 'https://example.com/article',
+      query: 'fallback content',
+    }, {
+      env: { ...NO_EMBEDDING },
+      lookup: publicLookupStub(),
+    });
+  });
+  assert.equal(analyzeCalls, 0, 'no token must mean no Analyze call');
+});
+
+test('fetchReadablePage without token falls through ineligible bridge errors to plain fetch', async () => {
+  const bridge = { fetch: async () => { throw new Error('Scrapling response exceeded size limit'); } };
+  await withFetch(async () => new Response('<html><head><title>Plain</title></head><body><p>plain fetch content words</p></body></html>', { status: 200, headers: { 'content-type': 'text/html' } }), async () => {
+    const page = await fetchReadablePage('https://example.com/article', undefined, bridge as never, publicLookupStub(), { env: {} });
+    assert.match(page.content, /plain fetch content/);
+    assert.equal(page.fallback, undefined);
+  });
+});
+
+test('fetchReadablePage with token returns plain fetch after ineligible bridge failure without Analyze', async () => {
+  let analyzeCalls = 0;
+  const bridge = { fetch: async () => { throw new Error('Scrapling response exceeded size limit'); } };
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody(url, 'should never be used')), { status: 200 });
+    }
+    return new Response('<html><head><title>Plain</title></head><body><p>plain fetch content words</p></body></html>', { status: 200, headers: { 'content-type': 'text/html' } });
+  }, async () => {
+    const page = await fetchReadablePage('https://example.com/article', undefined, bridge as never, publicLookupStub(), { env: { DIFFBOT_TOKEN: 'test-token' } });
+    assert.match(page.content, /plain fetch content/);
+    assert.equal(page.fallback, undefined);
+  });
+  assert.equal(analyzeCalls, 0, 'ineligible bridge failure must not trigger Analyze when plain fetch succeeds');
+});
+
+test('fetchReadablePage with token throws original ineligible error when bridge and plain both fail', async () => {
+  let analyzeCalls = 0;
+  const bridge = { fetch: async () => { throw new Error('Scrapling response exceeded size limit'); } };
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
+      analyzeCalls++;
+      return new Response(JSON.stringify(analyzeSuccessBody(url, 'should never be used')), { status: 200 });
+    }
+    throw new Error('plain fetch failed');
+  }, async () => {
+    await assert.rejects(
+      () => fetchReadablePage('https://example.com/article', undefined, bridge as never, publicLookupStub(), { env: { DIFFBOT_TOKEN: 'test-token' } }),
+      /exceeded size limit/,
+    );
+  });
+  assert.equal(analyzeCalls, 0, 'blocked Analyze must never trigger a paid call');
+});
+
+test('fetchReadablePage without token surfaces plain error when bridge and plain both fail', async () => {
+  const bridge = { fetch: async () => { throw new Error('Scrapling response exceeded size limit'); } };
+  await withFetch(async () => { throw new Error('plain fetch failed'); }, async () => {
+    await assert.rejects(
+      () => fetchReadablePage('https://example.com/article', undefined, bridge as never, publicLookupStub(), { env: {} }),
+      /plain fetch failed/,
+    );
+  });
+});
+
+test('fetchReadablePage without token returns empty bridge result without a second fetch', async () => {
+  let plainFetches = 0;
+  const bridge = { fetch: async () => ({ url: 'https://example.com/article', title: '', content: '   ' }) };
+  await withFetch(async () => { plainFetches++; return new Response('unused', { status: 200 }); }, async () => {
+    const page = await fetchReadablePage('https://example.com/article', undefined, bridge as never, publicLookupStub(), { env: {} });
+    assert.equal(page.content, '');
+  });
+  assert.equal(plainFetches, 0, 'legacy no-token path must not issue a second fetch for empty bridge content');
 });

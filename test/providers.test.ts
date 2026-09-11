@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CHANNEL_CAPABILITIES, cookieImportProviders } from '../src/capabilities.js';
-import { PROVIDER_DESCRIPTORS, findProvider, providerSummary } from '../src/providers.js';
+import { PROVIDER_DESCRIPTORS, authForChannel, findProvider, liveAuthSnapshot, providerChannels, providerSummary } from '../src/providers.js';
 
 test('descriptor availability derives from the canonical registry', () => {
   for (const desc of PROVIDER_DESCRIPTORS) {
@@ -132,6 +132,45 @@ test('providerSummary exposes availability without values', () => {
   const twitter = summary.find((p) => p.provider === 'twitter');
   assert.equal(twitter?.availability, 'available');
   assert.ok(Array.isArray(twitter?.keyNames));
+});
+
+test('diffbot descriptor is additive with legacy singular channel intact', () => {
+  const desc = findProvider('diffbot');
+  assert.ok(desc, 'diffbot descriptor must exist');
+  assert.equal(desc.channel, 'diffbot');
+  assert.deepEqual([...providerChannels(desc)], ['diffbot', 'web', 'research']);
+  assert.equal(providerChannels(desc)[0], desc.channel, 'legacy singular channel stays first');
+  assert.equal(desc.family, 'research');
+  assert.deepEqual([...desc.envKeys], ['DIFFBOT_TOKEN']);
+  assert.deepEqual([...desc.cookieDomains], []);
+  assert.equal(desc.loginFlow, 'env_var');
+  assert.equal(desc.risk, 'low');
+  assert.equal(desc.availability, 'available');
+  assert.match(desc.setup, /DIFFBOT_TOKEN/);
+});
+
+test('providerChannels preserves legacy singular behavior', () => {
+  for (const name of ['github', 'web', 'youtube'] as const) {
+    const desc = findProvider(name);
+    assert.ok(desc, `${name} descriptor must exist`);
+    assert.deepEqual([...providerChannels(desc)], [desc.channel]);
+  }
+});
+
+test('authForChannel keeps legacy resolution with multi-channel fallback', () => {
+  const sentinel = 'SENTINEL_DIFFBOT_TOKEN_abc123xyz';
+  const configured = authForChannel('diffbot', { DIFFBOT_TOKEN: sentinel });
+  assert.ok(configured);
+  assert.equal(configured.configured, true);
+  assert.deepEqual(configured.keyNames, ['DIFFBOT_TOKEN']);
+  assert.equal(authForChannel('diffbot', {})?.configured, false);
+  const web = authForChannel('web', {});
+  assert.ok(web);
+  assert.equal(web.loginFlow, 'none', 'legacy web provider wins over multi-channel fallback');
+  const snapshot = liveAuthSnapshot({ DIFFBOT_TOKEN: sentinel });
+  assert.equal(snapshot.diffbot?.configured, true);
+  assert.deepEqual(snapshot.diffbot?.keyNames, ['DIFFBOT_TOKEN']);
+  assert.equal(liveAuthSnapshot({}).diffbot?.configured, false);
 });
 
 test('github descriptor reads both token spellings with no cookie domains', () => {

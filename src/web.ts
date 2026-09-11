@@ -30,6 +30,9 @@ import { EmbeddingClient } from './embedding-client.js';
 import { SidecarManager } from './sidecar-manager.js';
 import { ScraplingBridge } from './scrapling-bridge.js';
 import { extractLinksFromHtml } from './link-extraction.js';
+import { diffbotConfigured, searchDiffbot } from './diffbot-search.js';
+import { analyzePage, createAnalyzeBudget, type AnalyzeBudget } from './diffbot-extract.js';
+import { DiffbotError } from './diffbot-transport.js';
 import { buildNorthstarResult, parseEntity, type NorthstarEntityV1 } from './result-contract.js';
 import {
   resolveWebActionForTool,
@@ -75,6 +78,7 @@ export const SEARCH_BACKENDS: WebSearchBackend[] = [
   { name: 'exa', configured: (env) => Boolean(env.EXA_API_KEY?.trim()), search: searchExa },
   { name: 'tavily', configured: (env) => Boolean(env.TAVILY_API_KEY?.trim()), search: searchTavily },
   { name: 'ollama-search', configured: (env) => Boolean((env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim()), search: searchOllama },
+  { name: 'diffbot', configured: (env) => diffbotConfigured(env), search: (query, limit, env, signal) => searchDiffbot(query, limit, env, signal) },
 ];
 
 const CATEGORY_HINTS: Record<string, string> = {
@@ -88,6 +92,41 @@ const CATEGORY_HINTS: Record<string, string> = {
   people: 'profile biography linkedin personal site',
   'financial report': 'annual report 10-k investor relations earnings',
 };
+
+/**
+ * Backend search with paid-call guard: a non-retryable DiffbotError
+ * (contract/size/policy/HTTP-200 error envelope) never retries — the
+ * shared retry helper sniffs message text and would otherwise re-fire
+ * a paid call when the envelope text contains e.g. "timeout".
+ * Retryable DiffbotErrors keep one retry (maxAttempts 2 semantics);
+ * other backends use the shared helper unchanged.
+ */
+async function searchBackendWithRetry(
+  backend: WebSearchBackend,
+  query: string,
+  limit: number,
+  env: Record<string, string | undefined>,
+  signal?: AbortSignal,
+): Promise<WebResult[]> {
+  const maxAttempts = backend.name === 'duckduckgo' ? 1 : 2;
+  if (backend.name !== 'diffbot') {
+    return retryWithBackoff<WebResult[]>(
+      () => backend.search(query, limit, env, signal),
+      { maxAttempts, ...(signal ? { signal } : {}) },
+    );
+  }
+  try {
+    return await backend.search(query, limit, env, signal);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (error instanceof DiffbotError && !error.retryable) throw error;
+    if (maxAttempts <= 1) throw error;
+    return retryWithBackoff<WebResult[]>(
+      () => backend.search(query, limit, env, signal),
+      { maxAttempts: 1, ...(signal ? { signal } : {}) },
+    );
+  }
+}
 
 export async function webSearch(args: Record<string, unknown>, options: WebToolOptions = {}): Promise<BackendCallResult> {
   const action = resolveWebActionForTool('web_search', args);
@@ -120,10 +159,7 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   const failures: Array<{ backend: string; error: string }> = [];
 
   const settled = await Promise.allSettled(backends.map(async (backend) => {
-    const results = await retryWithBackoff<WebResult[]>(
-      () => backend.search(effectiveQuery, limit, env, options.signal),
-      { maxAttempts: backend.name === 'duckduckgo' ? 1 : 2, ...(options.signal ? { signal: options.signal } : {}) },
-    );
+    const results = await searchBackendWithRetry(backend, effectiveQuery, limit, env, options.signal);
     return { backend: backend.name, results: results.map((result) => ({ ...result, source: result.source ?? backend.name })) };
   }));
 
@@ -195,7 +231,27 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
   const maxPages = bounds.maxPages;
   const maxChars = bounds.maxChars;
   const maxDepth = followLinks ? 3 : (args.maxDepth != null ? Number(args.maxDepth) : (source.type === 'url' ? 1 : 0));
-  const runtime = options.fetchPageText ? { fetchPageText: options.fetchPageText } : undefined;
+  // Shared per-fetch Diffbot Analyze budget: one instance across the whole BFS /
+  // flat fetch so DIFFBOT_FALLBACK_BUDGET caps Analyze-GET calls per fetch
+  // invocation. Created only when a token is present (no behavior without
+  // DIFFBOT_TOKEN); out-of-range budget values throw, never clamp.
+  const fallbackEnv = options.env ?? process.env;
+  const fallbackBudget: AnalyzeBudget | undefined = fallbackEnv.DIFFBOT_TOKEN?.trim()
+    ? createAnalyzeBudget(undefined, fallbackEnv)
+    : undefined;
+  const runtime = {
+    ...(options.fetchPageText ? { fetchPageText: options.fetchPageText } : {}),
+    env: fallbackEnv,
+    ...(fallbackBudget ? { fallbackBudget } : {}),
+  };
+  let fallbackPages = 0;
+  const primaryFailures: string[] = [];
+  const noteFallback = (page: ReadablePage): void => {
+    if (page.fallback) {
+      fallbackPages++;
+      if (page.primaryError) primaryFailures.push(page.primaryError);
+    }
+  };
 
   // Determine seed URLs: followLinks always starts from a single root URL
   let seedUrls: string[];
@@ -259,6 +315,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
         pagesAttempted++;
         try {
           const page = await fetchReadablePage(entry.url, options.signal, bridge, options.lookup, runtime);
+          noteFallback(page);
 
           // Index page content
           for (const chunk of chunkTextSmart(page.content)) {
@@ -299,6 +356,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
       for (const url of seedUrls.slice(0, maxPages)) {
         try {
           const page = await fetchReadablePage(url, options.signal, bridge, options.lookup, runtime);
+          noteFallback(page);
           for (const chunk of chunkTextSmart(page.content)) {
             const id = String(chunkCounter++);
             bm25Index.add(id, chunk.text);
@@ -406,11 +464,16 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
   // maxChars is honored on the crawl path too (same total-text bound as read).
   const truncated = fullText.length > maxChars;
   const text = truncated ? fullText.slice(0, maxChars) : fullText;
+  // Execution-fallback marker (not a quality judgment): when at least one
+  // page came from Diffbot Analyze, the envelope degrades and details carry
+  // path/provider/qualityImpact plus the safe primary failures.
+  const fallbackUsed = fallbackPages > 0;
   const envelope = buildNorthstarResult({
     request: { tool: 'semantic_crawl', channel: 'web', action: 'crawl' },
     outcomes: [{
       source: 'web',
       backend: 'native-fetch',
+      ...(fallbackUsed ? { degraded: true } : {}),
       entities: northstarArticles(resultChunks.map((chunk, index) => ({
         version: 1 as const,
         kind: 'article' as const,
@@ -423,9 +486,21 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
       }))),
     }],
     pagination: { supported: false, limit: topK, hasMore: false },
+    ...(fallbackUsed
+      ? { notes: [`Diffbot Analyze fallback supplied ${fallbackPages} page(s) after native fetch exhaustion; primary failures in details.fallback; content quality not assessed.`] }
+      : {}),
   });
 
-  return northstarTextResult(text, { query, results: resultChunks, ranking: { method: rankingMethod, documentCount: bm25Index.stats().documentCount }, maxChars, truncated }, envelope);
+  return northstarTextResult(text, {
+    query,
+    results: resultChunks,
+    ranking: { method: rankingMethod, documentCount: bm25Index.stats().documentCount },
+    maxChars,
+    truncated,
+    ...(fallbackUsed
+      ? { fallback: { provider: 'diffbot', path: 'fallback', qualityImpact: 'not_assessed', pages: fallbackPages, primaryFailures: primaryFailures.slice(0, 10) } }
+      : {}),
+  }, envelope);
 }
 
 export interface ReadablePage {
@@ -434,6 +509,39 @@ export interface ReadablePage {
   content: string;
   rawHtml?: string;
   links?: string[];
+  /**
+   * Present when page text came from Diffbot Analyze fallback after
+   * native/Scrapling exhaustion. Execution-path marker only:
+   * qualityImpact is always 'not_assessed' — degraded never implies a
+   * content-quality judgment.
+   */
+  fallback?: { provider: 'diffbot'; path: 'fallback'; qualityImpact: 'not_assessed' } | undefined;
+  /** Safe (token-free, 500-char sliced) primary failure that triggered fallback. */
+  primaryError?: string | undefined;
+}
+
+export interface FetchPageRuntime {
+  fetchPageText?: ((url: string, signal?: AbortSignal) => Promise<string>) | undefined;
+  env?: Record<string, string | undefined> | undefined;
+  /** Shared per-fetch Analyze budget (one instance across a whole crawl). */
+  fallbackBudget?: AnalyzeBudget | undefined;
+}
+
+/**
+ * Failure classes eligible for Diffbot Analyze fallback: network/upstream
+ * errors, blocked responses, timeouts, empty/unusable content (handled by the
+ * caller). Never: caller abort, policy/input/size/security/contract failures.
+ */
+export function isDiffbotFallbackEligible(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false;
+  if (error instanceof DiffbotError) return false;
+  const name = (error as { name?: unknown })?.name;
+  if (name === 'AbortError') return signal?.aborted ? false : true;
+  const message = error instanceof Error ? error.message : String(error);
+  if (/Disallowed URL scheme|URL credentials are not allowed|Blocked hostname|Private\/reserved|DNS resolved .* private\/reserved|DNS lookup aborted|credentials are never forwarded|too large|exceeded size|exceeds maximum|out of range|invalid_request|unsupported_action|unsupported_option|cursor_invalid|contract_invalid_response|response_too_large/i.test(message)) {
+    return false;
+  }
+  return true;
 }
 
 export async function fetchReadablePage(
@@ -441,11 +549,12 @@ export async function fetchReadablePage(
   signal?: AbortSignal,
   bridge?: ScraplingBridge,
   lookup?: DnsLookup,
-  runtime?: { fetchPageText?: ((url: string, signal?: AbortSignal) => Promise<string>) | undefined },
+  runtime?: FetchPageRuntime,
 ): Promise<ReadablePage> {
   const trimmed = rawUrl.trim();
   // Test seam: serve HTML without SSRF validation or network. Production
   // never sets fetchPageText, so every real fetch still validates below.
+  // The seam also skips Diffbot fallback so tests stay deterministic.
   if (runtime?.fetchPageText) {
     const html = await runtime.fetchPageText(trimmed, signal);
     const title = cleanText((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').trim());
@@ -455,21 +564,99 @@ export async function fetchReadablePage(
   // DNS preflight: reject hostnames resolving to private/reserved IPs (matches browser path)
   await resolvePublicHostname(new URL(url).hostname, signal, lookup);
 
-  // Try Scrapling bridge first (if provided and enabled)
+  let primaryError: unknown;
+  // Analyze eligibility is tracked separately from the plain-fetch attempt:
+  // an ineligible bridge/plain failure blocks paid Analyze but never blocks
+  // a successful plain fetch. The first ineligible error is rethrown when
+  // plain fetch also fails or yields no usable content.
+  let analyzeBlockedError: unknown;
+  // No behavior without DIFFBOT_TOKEN: legacy path returns bridge/plain
+  // results directly with no eligibility gate and no second fetch.
+  const envEarly = runtime?.env ?? process.env;
+  const hasToken = Boolean(envEarly.DIFFBOT_TOKEN?.trim());
+  // Try Scrapling bridge first (if provided and enabled). Empty bridge
+  // content counts as unusable and falls through to plain fetch.
   if (bridge) {
     try {
       const result = await bridge.fetch(url);
-      const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
-      return { url: result.url, title: result.title || '', content: stripHtml(result.content), rawHtml: result.content, ...(links ? { links } : {}) };
-    } catch {
-      // Fall through to plain fetch
+      const content = stripHtml(result.content);
+      if (content.trim()) {
+        const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
+        return { url: result.url, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
+      }
+      if (!hasToken) {
+        const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
+        return { url: result.url, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
+      }
+    } catch (error) {
+      if (!hasToken) {
+        // Legacy no-token path: bridge errors are ignored before plain fetch;
+        // a plain-fetch failure below surfaces its own error, never this one.
+      } else {
+        primaryError ??= error;
+        if (!isDiffbotFallbackEligible(error, signal)) analyzeBlockedError ??= error;
+      }
+      // Fall through to plain fetch in all cases; Analyze eligibility is
+      // enforced after plain fetch, not here.
     }
   }
 
-  // Fallback: plain HTTP fetch
-  const html = await fetchText(url, signal);
-  const title = cleanText((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').trim());
-  return { url, title, content: stripHtml(html), rawHtml: html };
+  let plainHtml: string | undefined;
+  let plainTitle = '';
+  try {
+    const html = await fetchText(url, signal);
+    const title = cleanText((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').trim());
+    plainHtml = html;
+    plainTitle = title;
+    const content = stripHtml(html);
+    if (content.trim()) return { url, title, content, rawHtml: html };
+    // Empty/unusable content: eligible for Analyze fallback (no primary error).
+  } catch (error) {
+    if (!hasToken) throw error;
+    primaryError ??= error;
+    if (!isDiffbotFallbackEligible(error, signal)) analyzeBlockedError ??= error;
+    if (analyzeBlockedError) throw analyzeBlockedError;
+  }
+  if (analyzeBlockedError) throw analyzeBlockedError;
+
+  // Diffbot Analyze-GET fallback: recoverable failures only, after
+  // native/Scrapling exhaustion. No behavior without DIFFBOT_TOKEN.
+  const env = runtime?.env ?? process.env;
+  const token = env.DIFFBOT_TOKEN?.trim();
+  if (!token) {
+    if (primaryError) throw primaryError;
+    const html = plainHtml ?? '';
+    const title = plainTitle;
+    return { url, title, content: stripHtml(html), rawHtml: html };
+  }
+  const budget = runtime?.fallbackBudget ?? createAnalyzeBudget(undefined, env);
+  if (budget.remaining <= 0) {
+    if (primaryError) throw primaryError;
+    return { url, title: '', content: '', rawHtml: '' };
+  }
+  const safePrimary = primaryError
+    ? (primaryError instanceof Error ? primaryError.message : String(primaryError)).slice(0, 500)
+    : undefined;
+  try {
+    const analyzed = await analyzePage(url, {
+      token,
+      ...(signal !== undefined ? { signal } : {}),
+      ...(lookup !== undefined ? { lookup } : {}),
+      budget,
+    });
+    const links = Array.isArray(analyzed.links) && analyzed.links.length > 0 ? analyzed.links : undefined;
+    return {
+      url: analyzed.url,
+      title: analyzed.title || '',
+      content: analyzed.content,
+      ...(links ? { links } : {}),
+      fallback: { provider: 'diffbot', path: 'fallback', qualityImpact: 'not_assessed' },
+      ...(safePrimary !== undefined ? { primaryError: safePrimary } : {}),
+    };
+  } catch {
+    if (primaryError) throw primaryError;
+    throw new Error('Diffbot Analyze fallback failed and the native fetch returned no usable content');
+  }
 }
 
 async function semanticSourceUrls(source: Record<string, unknown>, query: string, maxPages: number, signal?: AbortSignal, env?: Record<string, string | undefined>): Promise<string[]> {

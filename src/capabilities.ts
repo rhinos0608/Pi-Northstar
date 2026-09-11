@@ -14,7 +14,7 @@ import { SOCIAL_CANONICAL_ACTIONS as STAGE2_CANONICAL_ACTIONS } from './social-c
 
 export type ReachFamily = 'social' | 'media' | 'web' | 'dev' | 'research' | 'browser';
 
-export type PublicToolName = 'web_search' | 'github' | 'social' | 'media' | 'browser';
+export type PublicToolName = 'web_search' | 'github' | 'social' | 'media' | 'browser' | 'kg';
 
 export interface ActionCapability {
   action: string;
@@ -555,6 +555,56 @@ export const CHANNEL_CAPABILITIES: readonly ChannelCapability[] = [
       // never be consumed. Never import unused credentials.
       consumesCookie: false,
       setup: OPENCLI_SETUP,
+    },
+  },
+  {
+    id: 'diffbot',
+    family: 'research',
+    publicTool: 'kg',
+    availability: 'available',
+    description: 'Diffbot knowledge graph: DQL search, entity enhance, text analysis, and web-search participation',
+    tier: 1,
+    domains: [],
+    actions: [act('search'), act('enhance'), act('analyze_text')],
+    backends: [
+      {
+        id: 'diffbot-dql',
+        mode: 'native',
+        quality: 'full',
+        actions: ['search'],
+        auth: { required: true, anyOf: ['DIFFBOT_TOKEN'] },
+      },
+      {
+        id: 'diffbot-enhance',
+        mode: 'native',
+        quality: 'full',
+        actions: ['enhance'],
+        auth: { required: true, anyOf: ['DIFFBOT_TOKEN'] },
+      },
+      {
+        id: 'diffbot-analyze-text',
+        mode: 'native',
+        quality: 'full',
+        actions: ['analyze_text'],
+        auth: { required: true, anyOf: ['DIFFBOT_TOKEN'] },
+      },
+      {
+        id: 'diffbot-web-search',
+        mode: 'native',
+        quality: 'full',
+        actions: ['search'],
+        auth: { required: true, anyOf: ['DIFFBOT_TOKEN'] },
+        note: 'RRF rankings only for web_search, never primary.',
+      },
+    ],
+    provider: {
+      provider: 'diffbot',
+      envKeys: ['DIFFBOT_TOKEN'],
+      cookieDomains: [],
+      loginFlow: 'env_var',
+      risk: 'low',
+      consumesCookie: false,
+      setup: 'Set DIFFBOT_TOKEN to enable Diffbot knowledge search, enhance, text analysis, and web-search participation',
     },
   },
 ];

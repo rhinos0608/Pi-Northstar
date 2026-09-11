@@ -177,6 +177,25 @@ results report `youtube-data-api` (full), `youtube-oembed` (degraded,
 details-only, limited fields), or `youtube-transcript` (degraded,
 transcript-only, unofficial).
 
+## Diffbot privacy warning (read before installing)
+
+Setting `DIFFBOT_TOKEN` routes paid traffic to Diffbot endpoints. Read this before installing or enabling.
+
+- **External transmission.** Queries, page URLs, enhancement selectors, and `analyze_text` input text are sent to Diffbot over HTTPS: `llm.diffbot.com` (web search, Bearer auth), `kg.diffbot.com` (DQL search, Enhance, `?token=`), `nl.diffbot.com` (`analyze_text` POST, `?token=`), `api.diffbot.com` (Analyze-GET page fallback, `?token=`). Do not submit text you are not authorized to share.
+- **Sensitive selectors supported — you control them.** `enhance` accepts `email`/`phone` selectors when you supply them; they are transmitted as given. Submit only selectors you hold consent to process.
+- **NLP authorization guidance (advisory).** `analyze_text` (1–100000 chars, rejected outside, never clamped) can extract entities, facts, sentiment, and topics — including email/phone. Obtain user authorization before submitting sensitive text. This guidance is documented, not enforced in code.
+- **Advisory limitation.** `kg` output is framed as untrusted evidence; consent and safety notes are advisory and never authorize actions or secret access. Without `DIFFBOT_TOKEN` nothing changes: unconfigured backends are skipped silently.
+- **No logs/cache.** Token never logged; no response persistence or disk cache. Token and sensitive selectors (email/phone) redacted from errors (500-char slice). Token reaches only the in-repo Node CLI worker (`src/cli.ts` via `buildCliEnvironment`); never third-party CLIs, MCP servers, or Python children.
+- **Credit/spend controls.** Every paid call spends Diffbot credit; no automatic paid retries (retryable transport 5xx/timeout only) and no account quota probe — monitor spend in the Diffbot dashboard. `DIFFBOT_FALLBACK_BUDGET` (default 3, max 25 per fetch, 0 disables) is enforced on the Analyze fallback path and rejects out-of-range, never clamps. Operator limits are defaults/caps consumed on every `kg` call: `DIFFBOT_SEARCH_SIZE` (default 10, cap 50 per provider), `DIFFBOT_ENHANCE_SIZE` (default 1, cap 10 per provider), `DIFFBOT_NLP_MAX_CHARS` (100000 hard cap), `DIFFBOT_MAX_PROVIDERS` (default 3, cap 8). `resolveDiffbotSpend` validates once per call and rejects out-of-range before any paid call, never clamps. See `.env.example`.
+
+### What Diffbot adds
+
+- `web_search`: Diffbot joins as one more backend (`name: 'diffbot'`, source label `diffbot`); results enter RRF fusion, never primary-weighted. Request schemas unchanged.
+- `fetch`: Analyze-GET (`fields=allContent,links`) is recoverable fallback only after native/Scrapling exhaustion (network/upstream/blocked/timeout/empty); never on policy/input/abort/size/security/contract failures. Target URL validated first. Success marks envelope `degraded` (execution-path only, `qualityImpact: 'not_assessed'`).
+- `kg` tool (new, lowercase): actions `search` (entity-returning DQL, `language: 'dql'` fixed; facet/report/export/collection/crawl modes return `unsupported_option`), `enhance` (type `Person`/`Organization` + at least one selector from `id`/`name`/`url`/`email`/`phone`/`location`/`description`, plus Person-only `employer`/`title`/`school`; portable `fields`/`maxEntities`/`includeRelationships`/`includeEvidence`/`confidenceThreshold`), `analyze_text` (booleans `extractEntities`/`extractFacts`/`extractSentiment`/`extractTopics`, `language` ISO 639-1 or `auto`; mention spans bounds-checked, invalid dropped). `enhance` applies Atlas-owned `fields` projection (`basic`/`contact`/`professional`/`all`), explicit relationship predicates only (`includeRelationships: false` suppresses them, never invents), per-entity evidence statuses (`provided`/`not_requested`/`provider_unsupported`/`unavailable`), and confidence filtering that retains rows with missing confidence. Output carries aligned groups, claims, and conflicts with provider trace tags and no raw upstream payload. Output envelope `pi-northstar.knowledge-result` v1 (`ok`/`empty`/`partial`/`degraded`/`error`). Error codes: `invalid_input`, `unsupported_option`, `cursor_invalid`, `pagination_not_supported`, `transport_invalid_response`, `contract_invalid_response`, `semantic_invalid_response`, `invalid_entity`, `response_too_large`, `upstream_error`. Opaque cursors (single-provider only; explicit multi-provider fanout returns one bounded page, no cursor). Routing: providers omitted → highest-priority capable configured provider with sequential fallback on recoverable transport/contract/semantic failures only, never same-provider paid retry; explicit providers → concurrent with per-provider `unsupported_option` partitions, never silently skipped. Non-goals (excluded): account, crawl, bulk, bulk enhance, facets, reports, exports, collections, persistence/cache, adjudication, provider-native options, enhance `refresh`.
+- Status: native adapters landed (`src/diffbot-transport.ts`, `src/diffbot-search.ts`, `src/diffbot-extract.ts`, `src/diffbot-kg.ts`, `src/knowledge-contract.ts`); `web_search`/`kg`/registry wiring registered. No behavior without `DIFFBOT_TOKEN`.
+- Canonical docs: [overview](https://www.diffbot.com/docs/) · [authentication](https://www.diffbot.com/docs/authentication) · [Extract/Analyze](https://www.diffbot.com/docs/extract/article) · [DQL](https://www.diffbot.com/docs/dql/post) · [Enhance](https://www.diffbot.com/docs/enhance/post) · [Web Search](https://www.diffbot.com/docs/web-search/post) · [NL process text](https://www.diffbot.com/docs/natural-language/process-text).
+
 ## Quick start
 
 Two ways to bring Pi-Northstar into `pi`:
@@ -252,6 +271,14 @@ export REDDIT_CLIENT_SECRET="..."       # Reddit API
 export REDDIT_USER_AGENT="pi-northstar/0.1"
 export SEARXNG_BASE_URL="https://..."   # Self-hosted SearXNG
 ```
+
+Diffbot is paid and external — read [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing) before setting any `DIFFBOT_*` variable:
+
+```bash
+export DIFFBOT_TOKEN="..."                # Diffbot APIs (off when unset; see .env.example for spend caps)
+```
+
+Explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only when all three omit it does runtime fall back to a login-shell lookup, which fails closed and never logs the token.
 
 ### Codex/ChatGPT search
 
@@ -457,6 +484,8 @@ User-facing setup and status commands (not LLM tools):
 
 `browser` tool provides headless browser control via **agent-browser** (core path) with reliability checks matching [pi-agent-browser-native](https://github.com/fitchmultz/pi-agent-browser-native). A legacy CDP fallback exists but is **deprecated** — use agent-browser.
 
+> Privacy: optional paid backends (Diffbot) transmit queries/URLs/selectors/text externally — see [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing).
+
 ### Installation
 
 `agent-browser` is an **optional** npm dependency (`optionalDependencies` in `package.json`), not required by any other tool. By default `npm install` downloads the native binary (~86 MB) alongside everything else, so `browser` works immediately with no extra setup:
@@ -608,6 +637,8 @@ Batch and job commands cannot target loopback URLs — use top-level `navigate` 
 ## Desktop automation
 
 `desktop` tool provides native desktop observation and interaction via [Cua Driver](https://github.com/trycua/cua).
+
+> Privacy: optional paid backends (Diffbot) transmit queries/URLs/selectors/text externally — see [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing).
 
 ### Installation
 

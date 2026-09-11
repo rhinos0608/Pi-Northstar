@@ -476,7 +476,7 @@ export interface WebWorker {
  * (full backends before degraded fallbacks).
  */
 export const WEB_BACKEND_PREFERENCE: Readonly<Record<WebAction, readonly string[]>> = {
-  search: ['codex', 'tavily', 'exa', 'brave', 'searxng', 'ollama-search', 'duckduckgo'],
+  search: ['codex', 'tavily', 'exa', 'brave', 'searxng', 'diffbot', 'ollama-search', 'duckduckgo'],
   read: ['native-fetch'],
   crawl: ['native-fetch'],
 };

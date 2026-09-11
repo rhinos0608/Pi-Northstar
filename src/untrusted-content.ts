@@ -18,6 +18,7 @@ export const EXTERNAL_TOOL_NAMES = [
   'social',
   'media',
   'browser',
+  'kg',
 ] as const;
 
 export type ExternalToolName = (typeof EXTERNAL_TOOL_NAMES)[number];

@@ -67,6 +67,28 @@ test('buildServerParameters rejects invalid forwarded env list', () => {
   );
 });
 
+test('sentinel: DIFFBOT_* never forward to the MCP server by default', () => {
+  const params = buildServerParameters({
+    PATH: '/usr/bin',
+    DIFFBOT_TOKEN: 'SENTINEL_DIFFBOT_TOKEN_abc123xyz',
+    DIFFBOT_SEARCH_SIZE: '10',
+    DIFFBOT_ENHANCE_SIZE: '1',
+    DIFFBOT_NLP_MAX_CHARS: '100000',
+    DIFFBOT_MAX_PROVIDERS: '3',
+    DIFFBOT_FALLBACK_BUDGET: '3',
+  });
+  for (const key of [
+    'DIFFBOT_TOKEN',
+    'DIFFBOT_SEARCH_SIZE',
+    'DIFFBOT_ENHANCE_SIZE',
+    'DIFFBOT_NLP_MAX_CHARS',
+    'DIFFBOT_MAX_PROVIDERS',
+    'DIFFBOT_FALLBACK_BUDGET',
+  ]) {
+    assert.equal(params.env?.[key], undefined, `MCP server env must not carry ${key} by default`);
+  }
+});
+
 test('resultToText keeps text content and serializes non-text content', () => {
   const text = resultToText({
     content: [

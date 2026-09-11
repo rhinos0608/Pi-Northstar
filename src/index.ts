@@ -50,8 +50,14 @@ function reachActionsForFamilies(families: readonly string[]): string[] {
 const socialActionEnum = reachActionsForFamilies(['social']);
 const mediaActionEnum = reachActionsForFamilies(['media']);
 
+// kg actions are fixed by the knowledge contract (search/enhance/analyze_text);
+// enhance `fields` uses the Atlas-owned portable enum, never provider natives.
+const kgActionEnum = ['search', 'enhance', 'analyze_text'] as const;
+const kgEnhanceFieldsEnum = ['basic', 'contact', 'professional', 'all'] as const;
+const kgEnhanceTypeEnum = ['Person', 'Organization'] as const;
+
 export default function (pi: ExtensionAPI): void {
-  const env = loadSearchMcpEnvironment(process.env);
+  const env = loadSearchMcpEnvironment(process.env, { allowLoginShellFallback: true });
   const client = createSearchBackend(env);
   const desktop = desktopEnabled(env) ? new DesktopService(undefined, env) : undefined;
   void ensureFirstStartBootstrap(env);
@@ -297,6 +303,50 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const route = buildMediaRoute(params);
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
+    },
+  });
+
+  pi.registerTool({
+    name: 'kg',
+    label: 'Knowledge',
+    description: 'Diffbot knowledge graph: DQL entity search, Person/Organization enhance, and text analysis (entities, facts, topics, sentiment). Requires DIFFBOT_TOKEN. For analyze_text, obtain user authorization before submitting sensitive or personal text — Diffbot receives the full submitted text, and email/phone selectors are sent when you supply them.',
+    promptGuidelines: [
+      'Use kg search with DQL for entity lookup, enhance to enrich a Person or Organization from validated selectors, and analyze_text to extract structure from text.',
+      'Obtain user authorization before submitting sensitive or personal text to analyze_text; the full text is sent to Diffbot for processing.',
+      'Portable intent only: no provider-native options are accepted.',
+    ],
+    parameters: Type.Object({
+      action: Type.Optional(StringEnum(kgActionEnum, { description: 'Knowledge action: search (DQL entities), enhance (Person/Organization), analyze_text (NLP).' })),
+      query: Type.Optional(Type.String({ description: 'DQL query for the search action; entity-returning DQL only.' })),
+      language: Type.Optional(Type.String({ description: "Search language, fixed to 'dql' in v1; analyze_text language is ISO 639-1 or auto." })),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: 'Search page size, default 10.' })),
+      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque continuation cursor from a previous kg search result. Single-provider auto mode only; rejected with explicit providers.' })),
+      providers: Type.Optional(Type.Array(Type.String(), { description: 'Explicit provider allowlist. Omitted providers auto-select the highest-priority capable configured provider.' })),
+      maxProviders: Type.Optional(Type.Number({ minimum: 1, maximum: 8, description: 'Explicit fanout cap, default 3.' })),
+      type: Type.Optional(StringEnum(kgEnhanceTypeEnum, { description: 'Enhance entity type.' })),
+      id: Type.Optional(Type.String({ description: 'Enhance selector: Diffbot entity id.' })),
+      name: Type.Optional(Type.String({ description: 'Enhance selector: entity name.' })),
+      url: Type.Optional(Type.String({ description: 'Enhance selector: entity URL.' })),
+      email: Type.Optional(Type.String({ description: 'Enhance selector: email address. Sent to Diffbot when supplied.' })),
+      phone: Type.Optional(Type.String({ description: 'Enhance selector: phone number. Sent to Diffbot when supplied.' })),
+      location: Type.Optional(Type.String({ description: 'Enhance selector: location.' })),
+      description: Type.Optional(Type.String({ description: 'Enhance selector: free-text description.' })),
+      employer: Type.Optional(Type.String({ description: 'Person-only enhance selector: employer.' })),
+      title: Type.Optional(Type.String({ description: 'Person-only enhance selector: job title.' })),
+      school: Type.Optional(Type.String({ description: 'Person-only enhance selector: school.' })),
+      fields: Type.Optional(StringEnum(kgEnhanceFieldsEnum, { description: 'Portable enhance field set.' })),
+      maxEntities: Type.Optional(Type.Number({ minimum: 1, maximum: 10, description: 'Enhance size per provider, default 1.' })),
+      includeRelationships: Type.Optional(Type.Boolean()),
+      includeEvidence: Type.Optional(Type.Boolean()),
+      confidenceThreshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+      text: Type.Optional(Type.String({ description: 'Text to analyze (1..100000 chars). Obtain user authorization before submitting sensitive text.' })),
+      extractEntities: Type.Optional(Type.Boolean()),
+      extractFacts: Type.Optional(Type.Boolean()),
+      extractSentiment: Type.Optional(Type.Boolean()),
+      extractTopics: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
+      return callSearchMcpTool(client, 'kg', params, signal, 120_000, env);
     },
   });
 
