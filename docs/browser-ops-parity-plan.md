@@ -3,9 +3,9 @@
 This document defines *how* to build it inside Pi-Northstar's architecture:
 a single `browser` MCP tool (`src/index.ts`) → `browser()` router (`src/browser-tools.ts`) →
 `AgentBrowserAdapter` (`src/agent-browser.ts`) → process runner (`src/agent-browser-process.ts`)
-→ `agent-browser` CLI v0.32.0 subprocess.
+→ `agent-browser` CLI v0.37.1 subprocess.
 
-## Grounding notes (from `agent-browser skills get core --full`, installed v0.32.0)
+## Grounding notes (from `agent-browser skills get core --full`, installed v0.37.1)
 
 These facts came directly from the installed CLI's own docs and materially shape the specs below:
 

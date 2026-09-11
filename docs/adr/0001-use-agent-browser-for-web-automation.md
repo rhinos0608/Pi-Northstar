@@ -14,7 +14,7 @@ This does not claim complete SSRF containment.
 
 Pi-Northstar exposes one public `browser` tool through `src/index.ts`. `src/browser-tools.ts` maps 13 actions to custom CDP primitives in `src/cdp.ts`. That same CDP module also implements loopback cookie import and headed provider login. Browser automation and authentication setup therefore share code but have different security and lifecycle requirements.
 
-`agent-browser@0.32.0` is available from npm, licensed Apache-2.0, and requires Node.js 24 or newer. Its package postinstall downloads a platform-specific native binary. It provides session-isolated browser automation, accessibility snapshots and refs, structured JSON output, action policies, domain controls, and daemon lifecycle management.
+`agent-browser@0.37.1` is available from npm, licensed Apache-2.0, and requires Node.js 24 or newer. Its package postinstall downloads a platform-specific native binary. It provides session-isolated browser automation, accessibility snapshots and refs, structured JSON output, action policies, domain controls, and daemon lifecycle management.
 
 Research references:
 
@@ -24,7 +24,7 @@ Research references:
 
 ## Decision
 
-Replace public custom-CDP browser automation with a Pi-owned, typed adapter around exact-pinned `agent-browser@0.32.0`.
+Replace public custom-CDP browser automation with a Pi-owned, typed adapter around exact-pinned `agent-browser@0.37.1`.
 
 Preserve public tool name `browser`, existing input names, and existing actions:
 
@@ -147,7 +147,7 @@ Negative:
 
 ## Approval checklist
 
-- [x] Exact `agent-browser@0.32.0`, Node.js >=24, native postinstall, and package-size impact approved 2026-07-16.
+- [x] Exact `agent-browser@0.37.1`, Node.js >=24, native postinstall, and package-size impact approved 2026-07-16.
 - [x] Default-disabled `evaluate`/`set_cookies` plus metadata-only `cookies` approved 2026-07-16.
 - [x] Strict owned-session domain containment and documented CDN/IdP additions approved 2026-07-16.
 - [x] One-release dual-backend rollback window and removal owner/date approved 2026-07-16.

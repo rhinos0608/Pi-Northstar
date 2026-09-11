@@ -13,6 +13,7 @@ function fakeScript(opts: { probeSuccess?: boolean; failNavigate?: boolean } = {
     : `let cmds=[]; try{cmds=JSON.parse(body);}catch{cmds=[];} const results=cmds.map(cmd=>{ const expr=cmd[1]||''; if(cmd[0]==='eval' && expr.includes('__pi_click_probe__')){ if(expr.includes('window.__pi_click_probe__ =')) return {success:true}; return {success:true, data:{fired:false}}; } if(cmd[0]==='eval') return {success:true, data:{fired:false,count:0}}; return {success:true}; }); process.stdout.write(JSON.stringify(results)+'\\n');`;
   return `#!/usr/bin/env node
 const args=process.argv.slice(2);
+if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
 function out(o){ process.stdout.write(JSON.stringify(o)+'\\n'); }
 if(args[0]==='batch'){
   let body=''; process.stdin.on('data',c=>body+=c); process.stdin.on('end',()=>{ ${batchHandler} });

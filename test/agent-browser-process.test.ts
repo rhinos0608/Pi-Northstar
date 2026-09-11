@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +65,20 @@ async function makeRuntimeRoot(): Promise<string> {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+// Poll with setImmediate (never setTimeout: these timeout tests mock timers).
+// A stub that touches readyPath after installing its SIGTERM trap proves the
+// trap is armed before mocked clocks advance. Without this, SIGTERM can win
+// the shell-startup race and reap the child, making escalation assertions
+// depend on scheduling luck instead of timer behavior.
+async function waitForChildReady(readyPath: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    if (existsSync(readyPath)) return;
+    if (Date.now() > deadline) throw new Error(`stub child never signaled readiness: ${readyPath}`);
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
 test('runCommand success path leaves no pending timers', async () => {
   const exe = await writeStubExecutable(`echo '{"success":true,"data":{"ok":1}}'`);
   const runtimeRoot = await makeRuntimeRoot();
@@ -119,8 +134,9 @@ test('closeSession honors already-aborted signal', async () => {
 
 test('runCommand timeout path still fires SIGKILL when child ignores SIGTERM', async (t) => {
   // Stub ignores SIGTERM so only SIGKILL can reap it.
-  const exe = await writeStubExecutable(`trap '' TERM\nexec sleep 30`);
   const runtimeRoot = await makeRuntimeRoot();
+  const ready = join(runtimeRoot, 'child-ready');
+  const exe = await writeStubExecutable(`trap '' TERM\ntouch ${ready}\nexec sleep 30`);
   const kills: string[] = [];
   const pids: number[] = [];
   const origKill = ChildProcess.prototype.kill;
@@ -138,6 +154,7 @@ test('runCommand timeout path still fires SIGKILL when child ignores SIGTERM', a
     // Let the async runner reach spawn before advancing mocked clocks.
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
+    await waitForChildReady(ready);
     t.mock.timers.tick(60_000);
     const result = await pending;
     assert.equal(result.success, false);
@@ -157,8 +174,9 @@ test('runCommand timeout path still fires SIGKILL when child ignores SIGTERM', a
 
 test('runBatchStdin timeout path still fires SIGKILL when child ignores SIGTERM', async (t) => {
   // Stub ignores SIGTERM so only SIGKILL can reap it.
-  const exe = await writeStubExecutable(`trap '' TERM\nexec sleep 30`);
   const runtimeRoot = await makeRuntimeRoot();
+  const ready = join(runtimeRoot, 'child-ready');
+  const exe = await writeStubExecutable(`trap '' TERM\ntouch ${ready}\nexec sleep 30`);
   const kills: string[] = [];
   const pids: number[] = [];
   const origKill = ChildProcess.prototype.kill;
@@ -176,6 +194,7 @@ test('runBatchStdin timeout path still fires SIGKILL when child ignores SIGTERM'
     // Let the async runner reach spawn before advancing mocked clocks.
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
+    await waitForChildReady(ready);
     t.mock.timers.tick(120_000);
     const results = await pending;
     assert.equal(results.length, 1);
@@ -196,8 +215,9 @@ test('runBatchStdin timeout path still fires SIGKILL when child ignores SIGTERM'
 
 test('runScreenshot timeout path still fires SIGKILL when child ignores SIGTERM', async (t) => {
   // Stub ignores SIGTERM so only SIGKILL can reap it.
-  const exe = await writeStubExecutable(`trap '' TERM\nexec sleep 30`);
   const runtimeRoot = await makeRuntimeRoot();
+  const ready = join(runtimeRoot, 'child-ready');
+  const exe = await writeStubExecutable(`trap '' TERM\ntouch ${ready}\nexec sleep 30`);
   const kills: string[] = [];
   const pids: number[] = [];
   const origKill = ChildProcess.prototype.kill;
@@ -215,6 +235,7 @@ test('runScreenshot timeout path still fires SIGKILL when child ignores SIGTERM'
     // Let the async runner reach spawn before advancing mocked clocks.
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
+    await waitForChildReady(ready);
     t.mock.timers.tick(60_000);
     const result = await pending;
     assert.ok('error' in result);

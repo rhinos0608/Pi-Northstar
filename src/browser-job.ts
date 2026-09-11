@@ -116,9 +116,9 @@ export function jobStepToBrowserRequest(step: JobStep): BrowserRequest {
   if (step.kind === 'open') {
     action = 'navigate';
   } else if (step.kind === 'assert') {
+    // Post-condition: page must contain assertText (CLI substring match).
+    // Selector stays for pre-wait scoping when both are present.
     action = 'wait';
-  } else if (step.kind === 'select') {
-    action = 'fill';
   } else {
     action = step.kind as BrowserAction;
   }
@@ -129,12 +129,8 @@ export function jobStepToBrowserRequest(step: JobStep): BrowserRequest {
   if (step.selector) req.selector = step.selector;
   if (step.text) req.text = step.text;
   if (step.waitMs !== undefined) req.waitMs = step.waitMs;
-
-  // For select: map values[0] to text for the fill action
-  if (step.kind === 'select' && step.values && step.values.length > 0) {
-    const first = step.values[0];
-    if (typeof first === 'string') req.text = first;
-  }
+  if (step.kind === 'select' && step.values) req.values = step.values;
+  if (step.kind === 'assert' && step.assertText) req.text = step.assertText;
 
   return req;
 }

@@ -143,6 +143,8 @@ export function agentBrowserExecutableConfigured(
     || findOnPath('agent-browser', env.PATH) !== undefined;
 }
 
+export const EXPECTED_AGENT_BROWSER_VERSION = '0.37.1';
+
 export async function resolveAgentBrowserExecutable(explicitPath?: string): Promise<string> {
   if (explicitPath) {
     if (!existsSync(explicitPath)) {
@@ -181,7 +183,7 @@ export async function resolveAgentBrowserExecutable(explicitPath?: string): Prom
     }
   }
 
-  throw new Error('agent-browser executable not found. Install agent-browser@0.32.0.');
+  throw new Error(`agent-browser executable not found. Install agent-browser@${EXPECTED_AGENT_BROWSER_VERSION}.`);
 }
 
 /**
@@ -213,8 +215,8 @@ export async function verifyVersion(executablePath: string): Promise<string> {
       if (code !== 0) reject(new Error(`agent-browser --version exited ${code}`));
       else {
         const version = stdout.trim();
-        if (!/^agent-browser\s+0\.32\.0$/.test(version) && version !== '0.32.0') {
-          reject(new Error(`agent-browser version mismatch: expected 0.32.0, got ${version || '<empty>'}`));
+        if (version !== EXPECTED_AGENT_BROWSER_VERSION && version !== `agent-browser ${EXPECTED_AGENT_BROWSER_VERSION}`) {
+          reject(new Error(`agent-browser version mismatch: expected ${EXPECTED_AGENT_BROWSER_VERSION}, got ${version || '<empty>'}`));
           return;
         }
         resolve(version);
@@ -547,7 +549,10 @@ export async function runBatchStdin(
     });
 
     child.on('close', (code) => {
-      if (settled) return;
+      if (settled) {
+        if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+        return;
+      }
 
       if (tracker.capped) {
         settle([{ success: false, error: 'Output limit exceeded' }]);
@@ -652,6 +657,7 @@ export async function runScreenshot(
 
     child.on('close', async (code) => {
       if (settled) {
+        if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
         await cleanupScreenshot();
         return;
       }

@@ -9,7 +9,7 @@ import { AgentBrowserAdapter } from '../src/agent-browser.js';
 test('adapter status reports exact executable version without browser launch', async () => {
   const adapter = new AgentBrowserAdapter();
   const result = await adapter.status();
-  assert.match(String(result.details && (result.details as Record<string, unknown>).version), /0\.32\.0/);
+  assert.match(String(result.details && (result.details as Record<string, unknown>).version), /0\.37\.1/);
   await adapter.close();
 });
 
@@ -20,6 +20,7 @@ test('screenshot returns Pi image content with mimeType', async () => {
   await mkdir(join(runtimeRoot, 'screenshots'), { recursive: true });
   await writeFile(executablePath, `#!/usr/bin/env node
 const { writeFileSync } = require('node:fs');
+if (process.argv[2] === '--version') { process.stdout.write('agent-browser 0.37.1\\n'); process.exit(0); }
 if (process.argv[2] === 'screenshot') {
   const png = Buffer.alloc(25);
   png.set([0x89, 0x50, 0x4e, 0x47]);
@@ -51,6 +52,7 @@ test('screenshot returns Pi image content with mimeType through the Pi Jiti load
   await mkdir(join(runtimeRoot, 'screenshots'), { recursive: true });
   await writeFile(executablePath, `#!/usr/bin/env node
 const { writeFileSync } = require('node:fs');
+if (process.argv[2] === '--version') { process.stdout.write('agent-browser 0.37.1\\n'); process.exit(0); }
 if (process.argv[2] === 'screenshot') {
   const png = Buffer.alloc(25);
   png.set([0x89, 0x50, 0x4e, 0x47]);
@@ -162,6 +164,147 @@ test('job returns validation error for empty steps', async () => {
   assert.match(String(details.error), /non-empty/);
   assert.equal((result as unknown as { failureCategory?: string }).failureCategory, 'invalid-request');
   await adapter.close();
+});
+
+// ── argv-contract and policy regression tests ──
+
+test('semanticAction nth dispatches index positionally (find nth <index> <selector>)', async () => {
+  const { mkdtemp: mkd, writeFile: wf, readFile: rf, rm: rmf } = await import('node:fs/promises');
+  const { tmpdir: td } = await import('node:os');
+  const { join: joinp } = await import('node:path');
+  const root = await mkd(joinp(td(), 'pi-atlas-nth-'));
+  const runtimeRoot = joinp(root, 'runtime');
+  const executablePath = joinp(root, 'agent-browser.cjs');
+  const logPath = joinp(root, 'argv.log');
+  await wf(executablePath, `#!/usr/bin/env node
+const { appendFileSync } = require('node:fs');
+if (process.argv[2] === '--version') { process.stdout.write('agent-browser 0.37.1\\n'); process.exit(0); }
+appendFileSync(${JSON.stringify(logPath)}, process.argv.slice(2).join(' ') + '\\n');
+process.stdout.write(JSON.stringify({success:true,data:{}})+'\\n');
+`);
+  const { chmod: chmodp } = await import('node:fs/promises');
+  await chmodp(executablePath, 0o700);
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot });
+  try {
+    const result = await adapter.execute(
+      { action: 'semanticAction', semanticAction: { locator: 'nth', query: '.card', verb: 'hover', index: 2 } },
+      { env: { PATH: process.env.PATH } },
+    );
+    assert.equal((result.details as Record<string, unknown>).ok, true);
+    const log = await rf(logPath, 'utf8');
+    assert.match(log, /^find nth 2 \.card hover$/m);
+  } finally {
+    await adapter.close();
+    await rmf(root, { recursive: true, force: true });
+  }
+});
+
+test('batch open to private IP literal is rejected before dispatch', async () => {
+  const { mkdtemp: mkd2, writeFile: wf2, rm: rm2, chmod: chmod2 } = await import('node:fs/promises');
+  const { tmpdir: td2 } = await import('node:os');
+  const { join: joinp2 } = await import('node:path');
+  const root = await mkd2(joinp2(td2(), 'pi-atlas-batch-ssrf-'));
+  const executablePath = joinp2(root, 'agent-browser.cjs');
+  await wf2(executablePath, '#!/usr/bin/env node\nif (process.argv.includes("--version")) { console.log("agent-browser 0.37.1"); } else { process.exit(1); }\n');
+  await chmod2(executablePath, 0o700);
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot: joinp2(root, 'runtime') });
+  try {
+    const result = await adapter.execute(
+      { action: 'batch', batch: { commands: [{ args: ['open', 'http://10.0.0.1/loot'] }] } },
+      { env: { PATH: process.env.PATH, PI_SEARCH_BROWSER_ALLOW_SENSITIVE: '1' } },
+    );
+    assert.match(String((result.details as Record<string, unknown>).error), /command 0/);
+    assert.match(String((result.details as Record<string, unknown>).error), /Private\/reserved|Blocked hostname|Disallowed/);
+  } finally {
+    await adapter.close();
+    await rm2(root, { recursive: true, force: true });
+  }
+});
+
+test('explicit executable path with wrong version is rejected', async () => {
+  const { mkdtemp: mkd3, writeFile: wf3, rm: rm3, chmod: chmod3 } = await import('node:fs/promises');
+  const { tmpdir: td3 } = await import('node:os');
+  const { join: joinp3 } = await import('node:path');
+  const root = await mkd3(joinp3(td3(), 'pi-atlas-version-gate-'));
+  const executablePath = joinp3(root, 'agent-browser.cjs');
+  await wf3(executablePath, '#!/usr/bin/env node\nconsole.log("agent-browser 0.30.0");\n');
+  await chmod3(executablePath, 0o700);
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot: joinp3(root, 'runtime') });
+  try {
+    const result = await adapter.execute({ action: 'snapshot' }, { env: { PATH: process.env.PATH } });
+    assert.match(String((result.details as Record<string, unknown>).error), /version mismatch/);
+  } finally {
+    await adapter.close();
+    await rm3(root, { recursive: true, force: true });
+  }
+});
+
+// ── select action + batch loopback denial ──
+
+test('select dispatches option values via stdin batch, never argv', async () => {
+  const { mkdtemp: mkd4, writeFile: wf4, readFile: rf4, rm: rm4, chmod: chmod4 } = await import('node:fs/promises');
+  const { tmpdir: td4 } = await import('node:os');
+  const { join: joinp4 } = await import('node:path');
+  const root = await mkd4(joinp4(td4(), 'pi-atlas-select-'));
+  const executablePath = joinp4(root, 'agent-browser.cjs');
+  const logPath = joinp4(root, 'argv.log');
+  const stdinPath = joinp4(root, 'stdin.log');
+  await wf4(executablePath, `#!/usr/bin/env node
+const { appendFileSync: afs } = require('node:fs');
+if (process.argv[2] === '--version') { process.stdout.write('agent-browser 0.37.1\\n'); process.exit(0); }
+let body = '';
+process.stdin.on('data', (c) => { body += c; });
+process.stdin.on('end', () => {
+  afs(${JSON.stringify(logPath)}, process.argv.slice(2).join(' ') + '\\n');
+  afs(${JSON.stringify(stdinPath)}, body + '\\n');
+  process.stdout.write(JSON.stringify({success:true,data:{}})+'\\n');
+});
+`);
+  await chmod4(executablePath, 0o700);
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot: joinp4(root, 'runtime') });
+  try {
+    const result = await adapter.execute(
+      { action: 'select', selector: '#country', values: ['US', 'CA'] },
+      { env: { PATH: process.env.PATH } },
+    );
+    assert.equal((result.details as Record<string, unknown>).ok, true);
+    assert.match(await rf4(logPath, 'utf8'), /^batch --json --bail$/m);
+    assert.doesNotMatch(await rf4(logPath, 'utf8'), /select #country/);
+    assert.match(await rf4(stdinPath, 'utf8'), /"select","#country","US","CA"/);
+    const tooMany = await adapter.execute(
+      { action: 'select', selector: '#country', values: Array.from({ length: 33 }, (_, i) => `v${i}`) },
+      { env: { PATH: process.env.PATH } },
+    );
+    assert.match(String((tooMany.details as Record<string, unknown>).error), /too many values/);
+  } finally {
+    await adapter.close();
+    await rm4(root, { recursive: true, force: true });
+  }
+});
+
+test('batch navigation commands are rejected in loopback sessions', async () => {
+  const { mkdtemp: mkd5, writeFile: wf5, rm: rm5, chmod: chmod5 } = await import('node:fs/promises');
+  const { tmpdir: td5 } = await import('node:os');
+  const { join: joinp5 } = await import('node:path');
+  const root = await mkd5(joinp5(td5(), 'pi-atlas-batch-loopback-'));
+  const executablePath = joinp5(root, 'agent-browser.cjs');
+  await wf5(executablePath, '#!/usr/bin/env node\nif (process.argv.includes("--version")) { console.log("agent-browser 0.37.1"); } else { process.exit(1); }\n');
+  await chmod5(executablePath, 0o700);
+  const adapter = new AgentBrowserAdapter({
+    executablePath,
+    runtimeRoot: joinp5(root, 'runtime'),
+    loopbackMode: { proxyUrl: 'http://127.0.0.1:1', origin: 'http://localhost:3000' },
+  });
+  try {
+    const result = await adapter.execute(
+      { action: 'batch', batch: { commands: [{ args: ['open', 'https://example.com/'] }] } },
+      { env: { PATH: process.env.PATH, PI_SEARCH_BROWSER_ALLOW_SENSITIVE: '1' } },
+    );
+    assert.match(String((result.details as Record<string, unknown>).error), /not allowed in batch for loopback sessions/);
+  } finally {
+    await adapter.close();
+    await rm5(root, { recursive: true, force: true });
+  }
 });
 
 // ── batch policy denial ──

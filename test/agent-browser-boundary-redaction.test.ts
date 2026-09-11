@@ -27,7 +27,7 @@ test('boundary: credentialed navigate does not leak password via execute catch',
   const sentinel = makeSentinel('SENTINEL_CRED');
   const url = `http://user:${sentinel}@example.com/path`;
   // Minimal fake that would succeed if not rejected; validation should reject before spawn
-  const fake = `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({success:true,data:{}})+'\\n');\n`;
+  const fake = `#!/usr/bin/env node\nif(process.argv.includes('--version')){process.stdout.write('agent-browser 0.37.1\\n');}else{process.stdout.write(JSON.stringify({success:true,data:{}})+'\\n');}\n`;
   const { adapter, root } = await makeAdapterWithFake(fake);
   try {
     const result = await adapter.execute({ action: 'navigate', url }, { env: { PATH: process.env.PATH } });
@@ -51,6 +51,7 @@ test('boundary: getUrl with raw stdout sentinel is rejected, sentinel absent', a
   const sentinel = makeSentinel('SENTINEL_RAW');
   const fake = `#!/usr/bin/env node
 const args=process.argv.slice(2);
+if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
 if(args[0]==='get' && args[1]==='url'){
   process.stdout.write('${sentinel} NOT_JSON\\n');
   process.exit(0);
@@ -79,6 +80,7 @@ test('boundary: getTitle with raw stdout sentinel is rejected, sentinel absent',
   const sentinel = makeSentinel('SENTINEL_RAW2');
   const fake = `#!/usr/bin/env node
 const args=process.argv.slice(2);
+if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
 if(args[0]==='get' && args[1]==='title'){
   process.stdout.write('${sentinel} NOT_JSON_TITLE\\n');
   process.exit(0);
@@ -103,6 +105,7 @@ process.stdout.write(JSON.stringify({success:true,data:{}})+'\\n');
 test('invalidation: no-URL navigate success invalidates stale refs', async () => {
   const fake = `#!/usr/bin/env node
 const args=process.argv.slice(2);
+if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
 function out(o){process.stdout.write(JSON.stringify(o)+'\\n');}
 if(args[0]==='snapshot'){out({success:true,data:{url:'http://example.com',nodes:[{ref:'@e1',role:'button',name:'Submit'}]}});}
 else if(args[0]==='open'){out({success:true,data:{}});}
@@ -126,6 +129,7 @@ else out({success:true,data:{}});
 test('invalidation: semanticAction success invalidates stale refs', async () => {
   const fake = `#!/usr/bin/env node
 const args=process.argv.slice(2);
+if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
 function out(o){process.stdout.write(JSON.stringify(o)+'\\n');}
 if(args[0]==='batch'){
   let body='';process.stdin.on('data',c=>body+=c);process.stdin.on('end',()=>{
@@ -159,6 +163,7 @@ else out({success:true,data:{}});
 test('invalidation: batch success invalidates stale refs', async () => {
   const fake = `#!/usr/bin/env node
 const args=process.argv.slice(2);
+if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
 function out(o){process.stdout.write(JSON.stringify(o)+'\\n');}
 if(args[0]==='snapshot'){out({success:true,data:{url:'http://example.com',nodes:[{ref:'@e1',role:'button',name:'Submit'}]}});}
 else if(args[0]==='batch'){
@@ -186,6 +191,7 @@ test('sanitize: evaluate error with credential does not leak', async () => {
   const cred = `token=${sentinel}`;
   const fake = `#!/usr/bin/env node
 const args=process.argv.slice(2);
+if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
 function out(o){process.stdout.write(JSON.stringify(o)+'\\n');}
 if(args[0]==='batch'){let b='';process.stdin.on('data',c=>b+=c);process.stdin.on('end',()=>{process.stdout.write(JSON.stringify([{success:false,error:'${cred}'}])+'\\n');});} else out({success:true,data:{}});
 `;
@@ -202,7 +208,8 @@ test('sanitize: scroll error with password does not leak', async () => {
   const sentinel = makeSentinel('SCROLL_SENTINEL');
   const cred = `password=${sentinel}`;
   const fake = `#!/usr/bin/env node
-const a=process.argv.slice(2);function o(x){process.stdout.write(JSON.stringify(x)+'\\n');}
+const a=process.argv.slice(2);
+if(a[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}function o(x){process.stdout.write(JSON.stringify(x)+'\\n');}
 if(a[0]==='scroll')o({success:false,error:'${cred}'}); else o({success:true,data:{}});
 `;
   const { adapter, root } = await makeAdapterWithFake(fake);
@@ -218,7 +225,8 @@ test('sanitize: tabs error with token does not leak', async () => {
   const sentinel = makeSentinel('TABS_SENTINEL');
   const cred = `token=${sentinel}`;
   const fake = `#!/usr/bin/env node
-const a=process.argv.slice(2);function o(x){process.stdout.write(JSON.stringify(x)+'\\n');}
+const a=process.argv.slice(2);
+if(a[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}function o(x){process.stdout.write(JSON.stringify(x)+'\\n');}
 if(a[0]==='tab')o({success:false,error:'${cred}'}); else o({success:true,data:{}});
 `;
   const { adapter, root } = await makeAdapterWithFake(fake);

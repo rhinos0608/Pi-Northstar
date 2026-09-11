@@ -31,7 +31,7 @@
     "typebox": "*"
   },
   "optionalDependencies": {
-    "agent-browser": "0.32.0"
+    "agent-browser": "0.37.1"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.79.10",

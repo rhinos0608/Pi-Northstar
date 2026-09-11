@@ -22,6 +22,7 @@ export type BrowserAction =
   | 'set_cookies'
   | 'snapshot'
   | 'fill'
+  | 'select'
   | 'wait'
   | 'get_url'
   | 'get_title'
@@ -32,7 +33,7 @@ export type BrowserAction =
 export const BROWSER_ACTIONS: readonly BrowserAction[] = [
   'status', 'tabs', 'navigate', 'evaluate', 'text', 'html', 'screenshot',
   'click', 'type', 'scroll', 'close', 'cookies', 'set_cookies',
-  'snapshot', 'fill', 'wait', 'get_url', 'get_title',
+  'snapshot', 'fill', 'select', 'wait', 'get_url', 'get_title',
   'semanticAction', 'job', 'batch',
 ] as const;
 
@@ -191,6 +192,7 @@ export const MAX_URL_LENGTH = 8_000;
 export const MAX_COOKIES = 500;
 export const MAX_SCROLL_COORD = 100_000;
 export const MAX_WAIT_MS = 120_000;
+export const MAX_SELECT_VALUES = 32;
 
 export function validateSelector(selector: string): string {
   const trimmed = selector.trim();
@@ -258,7 +260,10 @@ export function validateWaitMs(value: unknown): number {
 // ── Semantic action types (Component 9) ──
 
 export type SemanticLocator = 'role' | 'text' | 'label' | 'placeholder' | 'alt' | 'title' | 'testid' | 'first' | 'last' | 'nth';
-export type SemanticVerb = 'click' | 'fill' | 'check' | 'uncheck' | 'select' | 'type' | 'hover';
+// find action set verified against agent-browser 0.37.1 (`find --help`):
+// click, fill, check, hover, text. Anything else fails at the CLI with
+// "Unknown action", so reject it here with a nameable validation error.
+export type SemanticVerb = 'click' | 'fill' | 'check' | 'hover' | 'text';
 
 export interface SemanticActionRequest {
   locator: SemanticLocator;
@@ -271,8 +276,8 @@ export interface SemanticActionRequest {
 }
 
 const VALID_LOCATORS: readonly SemanticLocator[] = ['role', 'text', 'label', 'placeholder', 'alt', 'title', 'testid', 'first', 'last', 'nth'];
-const VALID_VERBS: readonly SemanticVerb[] = ['click', 'fill', 'check', 'uncheck', 'select', 'type', 'hover'];
-const VALUE_VERBS = new Set<SemanticVerb>(['fill', 'type', 'select']);
+const VALID_VERBS: readonly SemanticVerb[] = ['click', 'fill', 'check', 'hover', 'text'];
+const VALUE_VERBS = new Set<SemanticVerb>(['fill']);
 
 /** Validate a raw semantic action request, throwing on invalid shape. */
 export function validateSemanticActionRequest(raw: Record<string, unknown>): SemanticActionRequest {
@@ -383,6 +388,7 @@ export interface BrowserRequest {
   urls?: string[];
   cookies?: unknown[];
   waitMs?: number;
+  values?: string[];
   compact?: boolean;
   semanticAction?: SemanticActionRequest;
   job?: import('./browser-job.js').JobRequest;
@@ -411,6 +417,10 @@ export function validateBrowserRequest(raw: Record<string, unknown>): BrowserReq
   if (Array.isArray(raw.cookies)) request.cookies = raw.cookies;
 
   if (typeof raw.waitMs === 'number') request.waitMs = raw.waitMs;
+  if (Array.isArray(raw.values)) {
+    if (!raw.values.every((v): v is string => typeof v === 'string')) throw new Error('values must be an array of strings');
+    request.values = [...raw.values];
+  }
   if (raw.compact === true) request.compact = true;
   if (typeof raw.semanticAction === 'object' && raw.semanticAction !== null) {
     request.semanticAction = validateSemanticActionRequest(raw.semanticAction as Record<string, unknown>);

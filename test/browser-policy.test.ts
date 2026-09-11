@@ -102,18 +102,15 @@ test('validateSemanticActionRequest requires value for fill verb', () => {
   );
 });
 
-test('validateSemanticActionRequest requires value for type verb', () => {
-  assert.throws(
-    () => validateSemanticActionRequest({ locator: 'role', query: 'textbox', verb: 'type' }),
-    /value is required when verb is type/,
-  );
-});
-
-test('validateSemanticActionRequest requires value for select verb', () => {
-  assert.throws(
-    () => validateSemanticActionRequest({ locator: 'role', query: 'select', verb: 'select' }),
-    /value is required when verb is select/,
-  );
+test('validateSemanticActionRequest rejects verbs outside the CLI find action set', () => {
+  // agent-browser 0.37.1 find accepts only click, fill, check, hover, text
+  // (verified: `find role foo <verb>` errors "Unknown action" without launching).
+  for (const verb of ['type', 'select', 'uncheck']) {
+    assert.throws(
+      () => validateSemanticActionRequest({ locator: 'role', query: 'x', verb, value: 'v' }),
+      /verb is required and must be one of/,
+    );
+  }
 });
 
 test('validateSemanticActionRequest accepts valid role click', () => {

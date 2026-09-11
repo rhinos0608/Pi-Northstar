@@ -8,7 +8,7 @@ import { AgentBrowserAdapter } from '../src/agent-browser.js';
 test('loopback adapter accepts configured origin without public validator', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-atlas-loopback-'));
   const executablePath = join(root, 'agent-browser.cjs');
-  await writeFile(executablePath, '#!/usr/bin/env node\nconsole.log(JSON.stringify({ success: true, data: {} }));\n');
+  await writeFile(executablePath, '#!/usr/bin/env node\nif (process.argv.includes("--version")) { console.log("agent-browser 0.37.1"); } else { console.log(JSON.stringify({ success: true, data: {} })); }\n');
   await chmod(executablePath, 0o700);
   const adapter = new AgentBrowserAdapter({
     executablePath,

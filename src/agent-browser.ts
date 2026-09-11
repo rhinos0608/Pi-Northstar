@@ -18,6 +18,7 @@ import {
   validateCookiesArray,
   validateScrollCoord,
   validateWaitMs,
+  MAX_SELECT_VALUES,
   dnsPreflight,
   freezeAllowedDomains,
   checkDomainAllowed,
@@ -90,6 +91,7 @@ export const SCREENSHOT_MAX_DIMENSION = 8_000;
 export class AgentBrowserAdapter {
   private session: AgentBrowserSession;
   private executablePath: string | undefined;
+  private versionVerified = false;
   private allowedDomains: string[] = [];
   private domainsFrozen = false;
   private _closed = false;
@@ -107,10 +109,20 @@ export class AgentBrowserAdapter {
     };
   }
 
-  private async resolveExecutable(): Promise<string> {
-    if (!this.executablePath) {
-      this.executablePath = await resolveAgentBrowserExecutable();
+  private async resolveExecutable(options?: AgentBrowserProcessOptions): Promise<string> {
+    const candidate = options?.executablePath ?? this.executablePath;
+    if (candidate) {
+      // Operator-configured paths are trusted locations, not trusted versions:
+      // drift between the pinned CLI surface and the binary breaks argv contracts.
+      if (!this.versionVerified || this.executablePath !== candidate) {
+        await verifyVersion(candidate);
+        this.executablePath = candidate;
+        this.versionVerified = true;
+      }
+      return this.executablePath;
     }
+    this.executablePath = await resolveAgentBrowserExecutable();
+    this.versionVerified = true;
     return this.executablePath;
   }
 
@@ -231,6 +243,8 @@ export class AgentBrowserAdapter {
         return this.handleSnapshot(request, options);
       case 'fill':
         return this.handleFill(request, options);
+      case 'select':
+        return this.handleSelect(request, options);
       case 'wait':
         return this.handleWait(request, options);
       case 'get_url':
@@ -249,6 +263,7 @@ export class AgentBrowserAdapter {
   }
 
   private async ensureSession(options: AgentBrowserProcessOptions): Promise<void> {
+    await this.resolveExecutable(options);
     if (!this.session.runtimeRoot) {
       const root = options.runtimeRoot ?? await createRuntimeRoot();
       this.session = {
@@ -275,8 +290,8 @@ export class AgentBrowserAdapter {
   private mergeOptions(options: AgentBrowserProcessOptions): AgentBrowserProcessOptions {
     const exePath = this.executablePath ?? options.executablePath ?? '';
     const merged: AgentBrowserProcessOptions = {
-      executablePath: exePath,
       ...options,
+      executablePath: exePath,
     };
     if (this.session.runtimeRoot) merged.runtimeRoot = this.session.runtimeRoot;
     if (this.session.namespace) merged.namespace = this.session.namespace;
@@ -292,6 +307,30 @@ export class AgentBrowserAdapter {
   }
 
   // ── Action handlers ──
+
+  /**
+   * Shared public-navigation trust boundary: static URL validation, DNS
+   * preflight, first-hostname domain freeze, and containment check. Used by
+   * single navigate and by batch/job navigation steps alike so raw command
+   * arrays cannot tunnel underneath the policy layer. Throws on invalid
+   * targets; returns { ok: false } only for domain-policy blocks.
+   */
+  private async preflightNavigationTarget(rawUrl: string, signal?: AbortSignal): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+    const url = validateNavigationUrl(rawUrl);
+    const hostname = new URL(url).hostname.toLowerCase();
+    await dnsPreflight(hostname, signal);
+    if (!this.domainsFrozen) {
+      this.setAllowedDomains([hostname]);
+      await validateAllowedDomainsDns(this.allowedDomains, signal);
+    }
+    if (this.allowedDomains.length > 0 && !checkDomainAllowed(hostname, this.allowedDomains)) {
+      return {
+        ok: false,
+        error: `Navigation to ${hostname} blocked by domain policy. Allowed domains: ${this.allowedDomains.join(', ')}. Close the session and navigate fresh to a different hostname to continue.`,
+      };
+    }
+    return { ok: true, url };
+  }
 
   private async handleNavigate(request: BrowserRequest, options: AgentBrowserProcessOptions): Promise<BackendCallResult> {
     if (!request.url) {
@@ -331,27 +370,11 @@ export class AgentBrowserAdapter {
     }
 
     // ── Public adapter: SSRF defense-in-depth ──
-    const url = validateNavigationUrl(request.url);
-    const hostname = new URL(url).hostname.toLowerCase();
-
-    // DNS preflight
-    await dnsPreflight(hostname, options.signal);
-
-    // Domain containment: default to navigation hostname if not set
-    if (!this.domainsFrozen) {
-      const domains = [hostname];
-      this.setAllowedDomains(domains);
-      await validateAllowedDomainsDns(this.allowedDomains, options.signal);
+    const preflight = await this.preflightNavigationTarget(request.url, options.signal);
+    if (!preflight.ok) {
+      return jsonTextResult({ ok: false, error: preflight.error });
     }
-
-    if (this.allowedDomains.length > 0) {
-      if (!checkDomainAllowed(hostname, this.allowedDomains)) {
-        return jsonTextResult({
-          ok: false,
-          error: `Navigation to ${hostname} blocked by domain policy. Allowed domains: ${this.allowedDomains.join(', ')}. Close the session and navigate fresh to a different hostname to continue.`,
-        });
-      }
-    }
+    const url = preflight.url;
 
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
@@ -663,10 +686,44 @@ export class AgentBrowserAdapter {
     return jsonTextResult(result?.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result?.error ?? 'Command failed') });
   }
 
+  private async handleSelect(request: BrowserRequest, options: AgentBrowserProcessOptions): Promise<BackendCallResult> {
+    const selector = request.selector ? validateSelector(request.selector) : '';
+    const rawValues = (request.values ?? []).filter((v): v is string => typeof v === 'string');
+    if (!selector) return jsonTextResult({ error: 'selector is required' });
+    if (rawValues.length === 0) return jsonTextResult({ error: 'values is required and must be a non-empty array' });
+    if (rawValues.length > MAX_SELECT_VALUES) {
+      return jsonTextResult({ error: `too many values (max ${MAX_SELECT_VALUES})` });
+    }
+    // Option values ride the stdin batch as sensitive payloads, never argv.
+    const values = rawValues.map((v) => validateText(v));
+    await this.ensureSession(options);
+    const merged = this.mergeOptions(options);
+    const results = await runBatchStdin(
+      [{ args: ['select', selector, ...values], sensitive: true }],
+      merged,
+    );
+    const result = results[0];
+    if (result?.success) this.pageState.invalidate(this.session.namespace, 'select');
+    return jsonTextResult(result?.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result?.error ?? 'Command failed') });
+  }
+
   private async handleWait(request: BrowserRequest, options: AgentBrowserProcessOptions): Promise<BackendCallResult> {
     const ms = validateWaitMs(request.waitMs ?? 1000);
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
+
+    // Text post-condition (job assert steps): CLI substring-matches page text.
+    // With a selector, scope first (wait for element), then check the text.
+    if (request.selector && request.text) {
+      const selector = validateSelector(request.selector);
+      const scoped = await runCommand(['wait', selector], merged);
+      if (!scoped.success) return jsonTextResult({ ok: false, error: sanitizeErrorMessage(scoped.error ?? 'Command failed') });
+    }
+    if (request.text) {
+      const text = validateText(request.text);
+      const result = await runCommand(['wait', '--text', text], merged);
+      return jsonTextResult(result.success ? { ok: true } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
+    }
 
     if (request.selector) {
       const selector = validateSelector(request.selector);
@@ -708,12 +765,16 @@ export class AgentBrowserAdapter {
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
 
-    const args: string[] = ['find', sa.locator, sa.query, sa.verb];
+    // nth takes the index positionally: find nth <index> <selector> <verb>.
+    // Without it every nth(index) dispatched the same command.
+    const args: string[] = sa.locator === 'nth'
+      ? ['find', 'nth', String(sa.index ?? 0), sa.query, sa.verb]
+      : ['find', sa.locator, sa.query, sa.verb];
     if (sa.name) args.push('--name', sa.name);
     if (sa.exact) args.push('--exact');
 
-    // Value payloads (fill/type/select) go via stdin batch, never argv
-    const hasValue = ['fill', 'type', 'select'].includes(sa.verb) && sa.value !== undefined;
+    // Value payloads (fill) go via stdin batch, never argv
+    const hasValue = sa.verb === 'fill' && sa.value !== undefined;
     if (hasValue) {
       const results = await runBatchStdin(
         [{ args: [...args, sa.value!], sensitive: true }],
@@ -793,6 +854,30 @@ export class AgentBrowserAdapter {
     }
     const batch = request.batch;
     if (!batch) return jsonTextResult({ error: 'batch is required' });
+
+    // Navigation-capable batch commands pass through the exact same trust
+    // boundary as single navigate: no raw tunnel underneath the policy layer.
+    // Loopback stays rejected outright (validateNoLoopbackInBatch); public
+    // targets get static validation + DNS preflight + domain freeze here, so
+    // the first batch navigation freezes containment for the rest of the batch.
+    // In loopback sessions any batch navigation is rejected: public preflight
+    // would overwrite the pinned loopback domain with an attacker-influenced
+    // host. Use a single navigate action for loopback targets instead.
+    for (let i = 0; i < batch.commands.length; i++) {
+      const cmd = batch.commands[i]!;
+      const action = cmd.args[0]?.toLowerCase();
+      if ((action === 'open' || action === 'navigate') && typeof cmd.args[1] === 'string') {
+        if (this.loopbackMode) {
+          return jsonTextResult({ error: `command ${i}: navigation commands are not allowed in batch for loopback sessions. Use a single navigate action instead.` });
+        }
+        try {
+          const preflight = await this.preflightNavigationTarget(cmd.args[1], options.signal);
+          if (!preflight.ok) return jsonTextResult({ error: `command ${i}: ${preflight.error}` });
+        } catch (error) {
+          return jsonTextResult({ error: `command ${i}: ${error instanceof Error ? error.message : String(error)}` });
+        }
+      }
+    }
 
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);

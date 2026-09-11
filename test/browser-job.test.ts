@@ -129,17 +129,19 @@ test('jobStepToBrowserRequest maps type', () => {
   assert.equal(req.text, 'world');
 });
 
-test('jobStepToBrowserRequest maps select to fill with first value', () => {
+test('jobStepToBrowserRequest maps select to the native select action with all values', () => {
   const req = jobStepToBrowserRequest({ kind: 'select', selector: '#sel', values: ['a', 'b'] });
-  assert.equal(req.action, 'fill');
+  assert.equal(req.action, 'select');
   assert.equal(req.selector, '#sel');
-  assert.equal(req.text, 'a');
+  assert.deepEqual(req.values, ['a', 'b']);
+  assert.equal(req.text, undefined);
 });
 
-test('jobStepToBrowserRequest maps select with empty values to fill without text', () => {
+test('jobStepToBrowserRequest maps select with empty values to select without text', () => {
   const req = jobStepToBrowserRequest({ kind: 'select', selector: '#sel', values: [] });
-  assert.equal(req.action, 'fill');
+  assert.equal(req.action, 'select');
   assert.equal(req.selector, '#sel');
+  assert.deepEqual(req.values, []);
   assert.equal(req.text, undefined);
 });
 
@@ -163,6 +165,14 @@ test('jobStepToBrowserRequest maps assert to wait', () => {
   const req = jobStepToBrowserRequest({ kind: 'assert', selector: 'body', assertText: 'Done' });
   assert.equal(req.action, 'wait');
   assert.equal(req.selector, 'body');
+  assert.equal(req.text, 'Done');
+});
+
+test('jobStepToBrowserRequest maps assert without assertText to plain selector wait', () => {
+  const req = jobStepToBrowserRequest({ kind: 'assert', selector: 'body' });
+  assert.equal(req.action, 'wait');
+  assert.equal(req.selector, 'body');
+  assert.equal(req.text, undefined);
 });
 
 test('validateJobRequest rejects loopback URL in open step', () => {
