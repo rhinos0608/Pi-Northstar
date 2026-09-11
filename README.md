@@ -40,9 +40,8 @@ there is never DuckDuckGo/generic-web substitution: `semantic_scholar`,
 `openalex`, `pubmed`, `stackoverflow`, `datacite`, `ror`, `gdelt`, `wikipedia`,
 `wikidata`, `arxiv`, `crossref`, `hackernews` (`source: "all"` fans out over
 all in registry order). Unsupported or unknown sources return an explicit safe
-error instead of substituted results. Optional filters (`yearFrom`/`yearTo`,
-`author`, `doi`, `venue`) match per-source capability — an unsupported filter
-surfaces per-source rather than being silently dropped. Results carry a
+error instead of substituted results. `yearFrom` is the only model-facing filter (`web_search` param, research-only); `yearTo`/`author`/`doi`/`venue` are research-backend capabilities, not `web_search` params. An unsupported filter
+surfaces per-source rather than being silently dropped. `source`/`yearFrom` are ignored on plain (non-research) search by contract. Results carry a
 canonical `details.northstar` envelope (schema `pi-northstar.result` v1)
 beside the legacy `{query, source, results}` fields; per-source failures
 surface as `partial`/`error` status with `errors[]`, not silent empty results.
@@ -250,7 +249,7 @@ If the agent-browser download is slow or fails:
 - Use `npm install --verbose` to see download progress
 - If stuck, try clearing npm cache: `npm cache clean --force && npm install`
 
-That's it — web search works immediately via DuckDuckGo with zero configuration. If a file-backed `codex login` session is available, Pi-Northstar also detects it automatically and uses Codex results first.
+That's it — web search works immediately via DuckDuckGo with zero configuration. If a file-backed `codex login` session is available, Pi-Northstar detects it automatically for explicit `codex` selection (merged through uniform RRF, never automatic).
 
 ## Configuration
 
@@ -282,7 +281,7 @@ Explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only whe
 
 ### Codex/ChatGPT search
 
-Pi-Northstar automatically checks `CODEX_ACCESS_TOKEN`, then `${CODEX_HOME:-~/.codex}/auth.json` created by `codex login`. When credentials exist and no explicit backend override is set, Codex web search is primary: its ordered results appear first, then results from other configured providers are URL-normalized and deduplicated before filling remaining slots. Only search query is sent; conversation history and project files are not included.
+Pi-Northstar automatically checks `CODEX_ACCESS_TOKEN`, then `${CODEX_HOME:-~/.codex}/auth.json` created by `codex login`. Codex runs only when `codex` appears in an explicit `PI_SEARCH_WEB_BACKENDS` list, as one more backend merged through uniform RRF with URL-dedup — never automatic, never primary-first. Only search query is sent; conversation history and project files are not included.
 
 ```bash
 export CODEX_ACCESS_TOKEN="..."       # Optional override
@@ -297,10 +296,32 @@ export CODEX_HOME="$HOME/.codex"       # Optional auth-file location
 ### Backend selection
 
 ```bash
-export PI_SEARCH_WEB_BACKENDS="codex,duckduckgo,brave"  # Exact provider set; codex remains primary when listed
+export PI_SEARCH_WEB_BACKENDS="tavily,exa,brave"  # Explicit ordered set; omit or leave blank for automatic top 3
 ```
 
-Search backends: `codex` (primary-first when listed — Codex results lead, remaining rankings are RRF-fused and URL-deduplicated), `duckduckgo` (always configured), `searxng` (operator-configured, local), `brave`, `exa`, `tavily`, `ollama-search`. Override exclusively via `PI_SEARCH_WEB_BACKENDS`.
+Search backends in automatic preference order: `tavily`, `exa`, `brave`, `diffbot`, `firecrawl`, `jina`, `searxng`, `ollama-search`, `duckduckgo` (`duckduckgo` always configured; `codex` is explicit-only, never automatic). Selection is environment-only — there are no model-facing provider flags:
+
+- Missing or blank `PI_SEARCH_WEB_BACKENDS` dispatches the first 3 configured backends in preference order concurrently, with no replenishment.
+- An explicit list runs every runnable listed backend concurrently (max 8) in caller order; unknown IDs, duplicates, and lists over 8 reject before any call. Unavailable entries are recorded, never silently replaced.
+- Every fulfilled non-empty ranking — including Codex — merges through uniform RRF with URL-dedup; backend provenance (`backend`, per-result contributors) stays visible in results. No provider retries.
+- Provider deadline: `PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS`, default `12000`, integer `1000..30000`; malformed values reject before dispatch. Caller abort cancels in-flight requests.
+
+### Native AI (environment-only, default on)
+
+Provider-native summaries and answers are controlled only by `PI_SEARCH_NATIVE_SUMMARIES` and `PI_SEARCH_NATIVE_ANSWERS` (`1`/`true`/`0`/`false`, default on; anything else rejects before dispatch). There are no model-facing AI toggles. Generated text never replaces retrieval snippets: summaries carry result-URL provenance, Tavily answers carry supporting-result-set provenance (never claim citations), empty answers or answers without supporting URLs are dropped, items cap at 8000 chars / 32 per call. Firecrawl search and fetch summaries honor `PI_SEARCH_NATIVE_SUMMARIES=0` (no summary requested, none emitted). Jina emits no generated text.
+
+### Optional knowledge composition (web_search only)
+
+`web_search` accepts an optional `knowledge` object with five optional booleans — `entities`, `facts`, `topics`, `sentiment`, `enhance` — gated at runtime by `PI_SEARCH_KG_ENRICHMENT=1` plus at least one `true` flag (unknown keys, non-boolean values, or all-false reject as `invalid_request`). Rejected for `category: "research"`; standalone `kg` behavior is unchanged. Only the first 3 fused results with non-empty original snippets are analyzed (max 8000 chars each); generated text, page-fetch content, and contact selectors are never submitted. Excerpts that look like email/phone, `category:"people"`, or personal-profile URLs (e.g. LinkedIn `/in/`) are skipped without echo — detection is defense-in-depth and never proves content is non-sensitive. Optional `enhance` covers at most 3 normalized Person/Organization entities by name plus validated public homepage only, never contact selectors. Output is framed as untrusted evidence, never generated AI presented as fact.
+
+### External fetch fallback (Firecrawl/Jina, environment-gated)
+
+Setting `FIRECRAWL_API_KEY` / `JINA_API_KEY` sends queries and admitted public URLs to fixed vendor hosts only (`api.firecrawl.dev`, `s.jina.ai` / `r.jina.ai`) plus vendor-side external page processing. No cookies, browser state, or caller headers are forwarded. Do not submit URLs or text you are not authorized to share.
+
+- Fetch fallback runs only when `PI_SEARCH_EXTERNAL_FETCH=1`/`true` (default off) **and** `PI_SEARCH_FETCH_BACKENDS` names an ordered unique subset of `firecrawl,jina` (max 2; blank means no attempts; duplicates/unknown/>2 reject before any call). Attempts run sequentially in listed order, stop at the first valid non-empty page, one request per adapter, no retries.
+- Cost caps: Firecrawl search takes `min(limit,3)` with summaries on, `min(limit,10)` with summaries off (one call, never a second unsummarized call); Jina search takes `min(limit,5)`; every paid call spends vendor credit with no quota probe — monitor vendor dashboards. Fetch bounds: 1,000,000-byte vendor response max, 50,000-char retained page content, fetch provider timeout `PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS` default `15000` integer `1000..30000`.
+- Targets pass local public-URL validation plus system-DNS preflight before the vendor receives them; policy/URL/DNS/caller-abort/size/404/410 failures never reach vendors. Vendor-side redirect hops after handoff cannot be constrained locally (residual risk). External success after native exhaustion is marked `degraded` (`qualityImpact: 'not_assessed'`).
+- Research (`category: "research"`) never touches generic web providers or external fetch vendors, and external fetch never runs inside the research path.
 
 ```bash
 export PI_SEARCH_BROWSER_BACKEND="cdp"                     # Deprecated: CDP fallback (no reliability checks)
@@ -358,7 +379,7 @@ Pi-Northstar has two layers of semantic capability:
 
 When you call `fetch` with a `query` parameter, Pi-Northstar performs **hybrid search**:
 
-1. **URL discovery** — queries configured search backends (`codex` primary-first when listed, `duckduckgo` always configured, operator-configured local `searxng`, `brave`, `exa`, `tavily`, `ollama-search`; override exclusively via `PI_SEARCH_WEB_BACKENDS`); Codex results lead, then remaining rankings are RRF-fused and URL-deduplicated
+1. **URL discovery** — queries configured search backends under the environment-only selection policy above (automatic top 3 in preference order when `PI_SEARCH_WEB_BACKENDS` is absent/blank; explicit lists run all runnable entries concurrently, max 8; `codex` explicit-only); every fulfilled ranking merges through uniform RRF with URL-dedup
 2. **Page fetching** — optionally uses Scrapling (Python stealth browser) for JS-rendered pages and anti-bot bypass, falls back to plain HTTP
 3. **Chunking** — sentence-boundary-aware text splitting with overlap
 4. **BM25 ranking** — Okapi BM25 lexical scoring (TF saturation, IDF weighting, length normalization)
@@ -389,7 +410,7 @@ fetch({ query: "How does React concurrent rendering work?", searchQuery: "React 
 ```
 
 - `query` — what you want to find in the crawled pages
-- `searchQuery` — what to search the web for (defaults to `query` if omitted)
+- `searchQuery` — what to search the web for (required with `query` when `url` omitted; no default — `query` alone does not discover)
 - `topK` — how many chunks to return (default 8, max 20)
 - `maxPages` — how many pages to crawl (default 10, max 25)
 - `maxChars` — output budget honored on both fetch paths (`read` and `crawl`), max 50000
