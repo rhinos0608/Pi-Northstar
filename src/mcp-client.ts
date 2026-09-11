@@ -134,6 +134,7 @@ function toProcessEnvironment(env: SearchMcpEnvironment): Record<string, string>
     'EXA_API_KEY',
     'BRAVE_API_KEY',
     'TAVILY_API_KEY',
+    'TAVILY_RESEARCH_MODEL',
     'OPENAI_API_KEY',
     'ANTHROPIC_API_KEY',
     'CRAWL4AI_BASE_URL',

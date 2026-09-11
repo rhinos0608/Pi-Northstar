@@ -149,6 +149,34 @@ export interface WebFetchAdapter {
   fetch(input: WebFetchAdapterInput): Promise<WebFetchedPage>;
 }
 
+export const WEB_REPORT_PROVIDER_IDS = ['tavily'] as const;
+
+export type WebReportProviderId = (typeof WEB_REPORT_PROVIDER_IDS)[number];
+
+export interface WebReportSource {
+  url: string;
+  title: string;
+}
+
+export interface WebReportResult {
+  provider: WebReportProviderId;
+  text: string;
+  sources: WebReportSource[];
+}
+
+/** Provider-neutral terminal failure marker for report-adapter errors. */
+export interface TerminalReportError extends Error {
+  terminal: true;
+}
+
+export function terminalReportError(message: string): TerminalReportError {
+  return Object.assign(new Error(message), { terminal: true as const });
+}
+
+export function isTerminalReportError(error: unknown): boolean {
+  return error instanceof Error && (error as { terminal?: unknown }).terminal === true;
+}
+
 export const DEFAULT_WEB_SEARCH_PROVIDER_ORDER: readonly WebSearchProviderId[] = [
   'tavily',
   'exa',

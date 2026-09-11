@@ -16,6 +16,7 @@ import {
   WEB_CRAWL_TOP_K_MAX,
   WEB_ENTITY_CONTENT_MAX,
   WEB_PAGE_CONTENT_MAX,
+  DEFAULT_WEB_READ_MAX_CHARS,
   WEB_READ_MAX_CHARS_MAX,
   WEB_SEARCH_LIMIT_MAX,
   RESEARCH_SEARCH_LIMIT_MAX,
@@ -132,6 +133,8 @@ test('read requires url; maxChars 1-50000 honored and rejected out of range', ()
   );
   const { request } = validateWebRequest({ action: 'read', url: 'https://example.com', maxChars: 50000 });
   assert.equal(request.maxChars, 50000);
+  assert.equal(DEFAULT_WEB_READ_MAX_CHARS, 30000);
+  assert.equal(validateWebRequest({ action: 'read', url: 'https://example.com' }).request.maxChars, 30000);
   // Shape only: no reachability check at contract layer.
   const shape = validateWebRequest({ action: 'read', url: 'https://example.com/x' });
   assert.equal(shape.request.url, 'https://example.com/x');
@@ -281,4 +284,41 @@ test('plan ordering: complete before degraded, tier then preference', () => {
     orderWebPlans('search', [late, early]).map((p) => p.backend),
     ['codex', 'duckduckgo'],
   );
+});
+
+test('web contract: mode omitted means agentMode false', async () => {
+  const mod = await import('../src/web-contract.js');
+  const { request } = mod.validateWebRequest({ action: 'search', query: 'q' });
+  assert.equal(request.agentMode, false);
+});
+
+test('web contract: mode agent accepted', async () => {
+  const mod = await import('../src/web-contract.js');
+  const { request } = mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent' });
+  assert.equal(request.agentMode, true);
+});
+
+test('web contract: mode other values reject invalid_request', async () => {
+  const mod = await import('../src/web-contract.js');
+  for (const mode of ['auto', '', 1, true, null]) {
+    assert.throws(
+      () => mod.validateWebRequest({ action: 'search', query: 'q', mode }),
+      (err: unknown) => (err as { code?: string }).code === 'invalid_request',
+      `mode ${String(mode)} must reject`,
+    );
+  }
+});
+
+test('web contract: agent mode rejects knowledge and research categories', async () => {
+  const mod = await import('../src/web-contract.js');
+  assert.throws(
+    () => mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', knowledge: { entities: true } }),
+    (err: unknown) => (err as { code?: string }).code === 'invalid_request',
+  );
+  for (const category of ['research', 'academic']) {
+    assert.throws(
+      () => mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', category }),
+      (err: unknown) => (err as { code?: string }).code === 'invalid_request',
+    );
+  }
 });

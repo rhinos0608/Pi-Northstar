@@ -11,7 +11,8 @@ import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, researc
 import { guardText } from './tool-output.js';
 import { isExternalToolName, wrapUntrustedText } from './untrusted-content.js';
 import { DesktopService } from './desktop-tools.js';
-import { validateWebRequest } from './web-contract.js';
+import { DEFAULT_WEB_READ_MAX_CHARS, validateWebRequest } from './web-contract.js';
+import { DEFAULT_WEB_AGENT_TIMEOUT_MS } from './web-agent-report.js';
 import { DESKTOP_ACTIONS } from './desktop-contract.js';
 import { desktopEnabled } from './desktop-policy.js';
 import { BROWSER_ACTIONS } from './browser-policy.js';
@@ -92,7 +93,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'web_search',
     label: 'Web Search',
-    description: 'Broad web discovery before fetch/social/media/kg. Plain search (limit 1-20, default 8) returns normalized article entities. Research-only category "research" (limit 1-30, default 12) fans out over exactly 12 academic/public-data sources with no generic-web substitution; source/yearFrom are research-only and ignored on plain search. Do not use for single-URL reads (use fetch), repo facts (use github), or entity enrichment (use kg). Out-of-range input rejected, never clamped.',
+    description: 'Broad web discovery before fetch/social/media/kg. Plain search (limit 1-20, default 8) returns normalized article entities. mode:"agent" returns a provider-generated research report as the tool text (untrusted evidence). Research-only category "research" (limit 1-30, default 12) fans out over exactly 12 academic/public-data sources with no generic-web substitution; source/yearFrom are research-only and ignored on plain search. Do not use for single-URL reads (use fetch), repo facts (use github), or entity enrichment (use kg). Out-of-range input rejected, never clamped.',
     promptGuidelines: [
       'Use web_search first for broad discovery, then fetch/social/media/kg for depth.',
       'Use web_search category "research" for academic literature and public-data sources (arXiv, Semantic Scholar, PubMed, Wikipedia, Hacker News, Stack Overflow, ...).',
@@ -113,6 +114,7 @@ export default function (pi: ExtensionAPI): void {
         sentiment: Type.Optional(Type.Boolean({ description: 'Extract sentiment from top results.' })),
         enhance: Type.Optional(Type.Boolean({ description: 'Enhance normalized Person/Organization entities with validated public homepage.' })),
       }, { description: 'Optional knowledge composition over top results. Requires PI_SEARCH_KG_ENRICHMENT=1 plus at least one true flag. Not supported with category "research".' })),
+      mode: Type.Optional(StringEnum(['agent'], { description: 'Agent mode: "agent" returns a provider-generated research report as the tool text (untrusted evidence); omitted keeps current search behavior.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const route = buildSearchRoute(params);
@@ -123,7 +125,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Read one URL (no query: full readable text) or crawl for passages (with query: ranked chunks). Needs url or searchQuery — query alone discovers nothing and throws without one. Prefer query over full-page reads. followLinks crawls same-domain pages within maxPages. maxChars <= 50000 both paths; topK <= 20, maxPages <= 25. Out-of-range rejected, never clamped.',
+    description: 'Read one URL (no query: full readable text) or crawl for passages (with query: ranked chunks). siteMap:true lists discovered same-origin URLs under url (optional query ranks, maxPages caps). Needs url or searchQuery — query alone discovers nothing and throws without one. Prefer query over full-page reads. followLinks crawls same-domain pages within maxPages. maxChars <= 50000 both paths; topK <= 20, maxPages <= 25. Out-of-range rejected, never clamped.',
     promptSnippet: 'Fetch URL content — compose with web_search first for URLs, then fetch with url (or searchQuery) plus query for semantic chunks. query alone without url/searchQuery fails. Prefer query over full-page reads. Use followLinks with url + query for same-domain crawls.',
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: 'Passage selector. Omit for full readable text of url; with url/searchQuery returns ranked chunks only.' })),
@@ -131,8 +133,9 @@ export default function (pi: ExtensionAPI): void {
       searchQuery: Type.Optional(Type.String({ description: 'Web discovery query when no url known. Required with query unless url given; no default, query alone does not discover.' })),
       topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Chunks to return, default 8. Crawl paths only.' })),
       maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Pages to crawl, default 10. Crawl paths only.' })),
-      maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget both paths, default 12000.' })),
+      maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget both paths, default 30000.' })),
       followLinks: Type.Optional(Type.Boolean({ description: 'Same-domain crawl from url (maxDepth 3, within maxPages). Requires url + query; output always semantically packed.' })),
+      siteMap: Type.Optional(Type.Boolean({ description: 'Sitemap mode: list discovered URLs under url (same origin only). Requires url; optional query ranks URLs, maxPages caps them (default 10, max 25). Rejects searchQuery/followLinks/topK/maxChars.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const route = buildFetchRoute(params);
@@ -439,7 +442,13 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   });
 }
 
-export function buildSearchRoute(params: { query: string; category?: string; source?: string; yearFrom?: number; limit?: number; cursor?: string; knowledge?: { entities?: boolean; facts?: boolean; topics?: boolean; sentiment?: boolean; enhance?: boolean } }): { tool: string; args: Record<string, unknown>; timeout: number } {
+export function buildSearchRoute(params: { query: string; category?: string; source?: string; yearFrom?: number; limit?: number; cursor?: string; knowledge?: { entities?: boolean; facts?: boolean; topics?: boolean; sentiment?: boolean; enhance?: boolean }; mode?: string }): { tool: string; args: Record<string, unknown>; timeout: number } {
+  if (params.mode === 'agent' && (params.category === 'research' || params.category === 'academic')) {
+    throw new Error(`mode "agent" is not supported with category "${params.category}"`);
+  }
+  if (params.mode === 'agent' && params.knowledge !== undefined) {
+    throw new Error('knowledge is not supported with mode "agent"');
+  }
   // Knowledge composition is web-only; reject research/academic combinations
   // before dispatch. Mirrors isResearchCategory in web-contract (not exported;
   // web-contract must stay untouched) so academic cannot slip to the web route
@@ -475,10 +484,14 @@ export function buildSearchRoute(params: { query: string; category?: string; sou
       timeout: 120_000,
     };
   }
-  const webInput: { action: string; query?: string; limit?: number; knowledge?: unknown } = { action: 'search', query: params.query };
+  const webInput: { action: string; query?: string; limit?: number; knowledge?: unknown; mode?: unknown } = { action: 'search', query: params.query };
   if (params.limit !== undefined) webInput.limit = params.limit;
   if (params.knowledge !== undefined) webInput.knowledge = params.knowledge;
+  if (params.mode !== undefined) webInput.mode = params.mode;
   const { request } = validateWebRequest(webInput);
+  // Agent ceiling shares its source with the report deadline (which clamps
+  // operator values to this same default) so env can never outrun the route.
+  const timeout = request.agentMode ? DEFAULT_WEB_AGENT_TIMEOUT_MS : 120_000;
   return {
     tool: 'web_search',
     args: {
@@ -487,8 +500,9 @@ export function buildSearchRoute(params: { query: string; category?: string; sou
       resultFormat: 'collated',
       ...(params.category ? { category: params.category } : {}),
       ...(params.knowledge !== undefined ? { knowledge: params.knowledge } : {}),
+      ...(request.agentMode ? { mode: 'agent' } : {}),
     },
-    timeout: 120_000,
+    timeout,
   };
 }
 
@@ -514,7 +528,27 @@ export function buildMediaRoute(params: { platform?: string; action?: string; ur
   };
 }
 
-export function buildFetchRoute(params: { query?: string; url?: string; searchQuery?: string; topK?: number; maxPages?: number; maxChars?: number; followLinks?: boolean }): { tool: string; args: Record<string, unknown>; timeout: number } {
+export function buildFetchRoute(params: { query?: string; url?: string; searchQuery?: string; topK?: number; maxPages?: number; maxChars?: number; followLinks?: boolean; siteMap?: boolean }): { tool: string; args: Record<string, unknown>; timeout: number } {
+  if (params.siteMap !== undefined) {
+    if (typeof params.siteMap !== 'boolean') throw new Error('siteMap must be a boolean');
+    if (params.siteMap) {
+      for (const key of ['searchQuery', 'followLinks', 'topK', 'maxChars'] as const) {
+        if (params[key] !== undefined) throw new Error(`${key} is not supported with siteMap`);
+      }
+      if (!params.url?.trim()) throw new Error('url is required with siteMap');
+      // Route ceiling sits above the fixed 150s Tavily Map provider bound.
+      return {
+        tool: 'fetch',
+        args: {
+          url: params.url.trim(),
+          siteMap: true,
+          ...(params.query !== undefined ? { query: params.query } : {}),
+          ...(params.maxPages !== undefined ? { maxPages: params.maxPages } : {}),
+        },
+        timeout: 180_000,
+      };
+    }
+  }
   const followLinks = Boolean(params.followLinks);
 
   if (followLinks) {
@@ -564,7 +598,7 @@ export function buildBrowseArgs(params: { url: string; maxChars?: number }): Rec
   return {
     action: 'read',
     url: params.url,
-    maxChars: params.maxChars ?? 12000,
+    maxChars: params.maxChars ?? DEFAULT_WEB_READ_MAX_CHARS,
   };
 }
 

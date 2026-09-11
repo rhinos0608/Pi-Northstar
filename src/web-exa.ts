@@ -61,7 +61,6 @@ export const exaSearchAdapter: WebSearchAdapter = {
         query: input.query,
         numResults,
         type: 'auto',
-        useAutoprompt: true,
         contents,
       }),
       ...validated,

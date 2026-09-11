@@ -381,12 +381,12 @@ test('followLinks crawl respects maxDepth via custom maxDepth', async () => {
 // ── maxChars honored on both read and crawl paths ──
 
 test('read path honors maxChars', async () => {
-  const body = `<html><head><title>Long page</title></head><body><p>${'alpha beta gamma delta content words '.repeat(200)}</p></body></html>`;
+  const body = `<html><head><title>Long page</title></head><body><p>${'alpha beta gamma delta content words '.repeat(1000)}</p></body></html>`;
   const { server, baseUrl } = await startServer({ '/': body });
   try {
     const result = await callNativeTool('agentic_browse', { action: 'read', url: baseUrl + '/' }, { fetchPageText: localFetchText });
     const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
-    assert.ok(text.length <= 12000, `default maxChars bounds read text, got ${text.length}`);
+    assert.ok(text.length <= 30000, `default maxChars bounds read text, got ${text.length}`);
     const small = await callNativeTool(
       'agentic_browse',
       { action: 'read', url: baseUrl + '/', maxChars: 100 },
@@ -1391,4 +1391,158 @@ test('external fetch without token never triggers on ineligible 404 failure', as
     );
   });
   assert.equal(firecrawlCalls, 0, 'ineligible 404 must never reach remote vendors without a token either');
+});
+
+test('native web_search agent mode returns report text with details.report, no fusion', async () => {
+  await withFetch(async (input, init) => {
+    const url = String(input);
+    if (url === 'https://api.tavily.com/research' && init?.method === 'POST') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      assert.deepEqual(body, { input: 'deep topic', model: 'pro', stream: true });
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of [
+            'data: {"choices": [{"delta": {"content": "Agent report "}}]}\n\n',
+            'data: {"choices": [{"delta": {"content": "body", "sources": [{"url": "https://a.example/x", "title": "A"}, {"url": "https://b.example/y", "title": "B"}]}}]}\n\n',
+            'event: done\ndata: {}\n\n',
+          ]) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'deep topic', mode: 'agent' }, { env: { TAVILY_API_KEY: 'k', ...NO_EMBEDDING } });
+    const text = (result.content as Array<{ text?: string }>).map((c: { text?: string }) => c.text ?? '').join('');
+    assert.ok(text.includes('Agent report body'));
+    const details = result.details as Record<string, unknown>;
+    const report = details.report as { status: string; provider: string; sources: Array<{ url: string; title: string }> };
+    assert.equal(report.status, 'ok');
+    assert.equal(report.provider, 'tavily');
+    assert.equal(report.sources.length, 2);
+    assert.ok(!('fusion' in details));
+    assert.ok(!('nativeAi' in details));
+    assert.ok(!('knowledge' in details));
+  });
+});
+
+test('native web_search agent mode rejects knowledge and research category before fetch', async () => {
+  let fetched = false;
+  await withFetch(async () => {
+    fetched = true;
+    return new Response('{}', { status: 200 });
+  }, async () => {
+    await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'agent', knowledge: { entities: true } }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'agent', category: 'research' }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'bogus' }, { env: { TAVILY_API_KEY: 'k' } }));
+  });
+  assert.equal(fetched, false);
+});
+
+test('native web_search agent mode unconfigured provider errors', async () => {
+  await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'agent' }, { env: { ...NO_EMBEDDING } }), /No report-capable/);
+});
+
+test('native fetch siteMap returns ordered URL list with details.siteMap', async () => {
+  await withFetch(async (input, init) => {
+    const url = String(input);
+    if (url === 'https://api.tavily.com/map' && init?.method === 'POST') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      assert.equal(body.allow_external, false);
+      assert.equal(body.limit, 10);
+      return new Response(JSON.stringify({
+        base_url: 'https://docs.example.com',
+        results: ['https://docs.example.com/b', 'https://docs.example.com/a'],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true }, { env: { TAVILY_API_KEY: 'k', ...NO_EMBEDDING }, lookup: publicLookupStub() });
+    const text = (result.content as Array<{ text?: string }>).map((c: { text?: string }) => c.text ?? '').join('');
+    assert.ok(text.includes('1. https://docs.example.com/b'));
+    assert.ok(text.includes('2. https://docs.example.com/a'));
+    const details = result.details as Record<string, unknown>;
+    const siteMap = details.siteMap as { status: string; provider: string; baseUrl: string; urls: string[]; ranking: string };
+    assert.equal(siteMap.status, 'ok');
+    assert.equal(siteMap.provider, 'tavily');
+    assert.equal(siteMap.baseUrl, 'https://docs.example.com');
+    assert.deepEqual(siteMap.urls, ['https://docs.example.com/b', 'https://docs.example.com/a']);
+    assert.equal(siteMap.ranking, 'provider');
+  });
+});
+
+test('native fetch siteMap empty map yields empty status', async () => {
+  await withFetch(async () => new Response(JSON.stringify({ results: [] }), { status: 200, headers: { 'content-type': 'application/json' } }), async () => {
+    const result = await callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true }, { env: { TAVILY_API_KEY: 'k', ...NO_EMBEDDING }, lookup: publicLookupStub() });
+    const siteMap = (result.details as Record<string, unknown>).siteMap as { status: string; urls: string[] };
+    assert.equal(siteMap.status, 'empty');
+    assert.deepEqual(siteMap.urls, []);
+  });
+});
+
+test('native fetch siteMap rejects combos and non-boolean before fetch', async () => {
+  let fetched = false;
+  await withFetch(async () => {
+    fetched = true;
+    return new Response('{}', { status: 200 });
+  }, async () => {
+    await assert.rejects(() => callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true, searchQuery: 'x' }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true, followLinks: true, query: 'x' }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true, topK: 5 }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true, maxChars: 500 }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: 'yes' }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('fetch', { siteMap: true }, { env: { TAVILY_API_KEY: 'k' } }));
+    await assert.rejects(() => callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true, maxPages: '5' }, { env: { TAVILY_API_KEY: 'k' } }), /maxPages/);
+  });
+  assert.equal(fetched, false);
+});
+
+test('native fetch siteMap unconfigured provider errors', async () => {
+  await assert.rejects(() => callNativeTool('fetch', { url: 'https://docs.example.com/', siteMap: true }, { env: { ...NO_EMBEDDING } }), /No sitemap-capable/);
+});
+
+// ── Visible truncation: marker + counts inside maxChars, no mid-word cut ──
+
+test('read path truncation carries a visible marker with counts inside maxChars', async () => {
+  const body = `<html><head><title>Long page</title></head><body><p>${'alpha beta gamma delta content words '.repeat(50)}</p></body></html>`;
+  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/long', maxChars: 500 }, {
+    fetchPageText: async () => body,
+  });
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
+  assert.ok(text.length <= 500, `truncated text must fit maxChars, got ${text.length}`);
+  assert.match(text, /\[truncated: showing \d+ of \d+ chars; raise maxChars up to 50000 for more\]/);
+  assert.doesNotMatch(text.slice(0, text.indexOf('[truncated')), /[A-Za-z]$/);
+  const details = result.details as { truncated?: boolean; maxChars?: number; omittedChars?: number; content?: string };
+  assert.equal(details.truncated, true);
+  assert.equal(details.maxChars, 500);
+  assert.ok((details.omittedChars ?? 0) > 0, 'omitted count must be positive');
+  assert.equal(details.content, text);
+});
+
+test('read path without truncation carries no marker', async () => {
+  const body = '<html><head><title>Short</title></head><body><p>short page words</p></body></html>';
+  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/short' }, {
+    fetchPageText: async () => body,
+  });
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
+  assert.doesNotMatch(text, /\[truncated:/);
+  assert.equal((result.details as { truncated?: boolean }).truncated, false);
+});
+
+test('crawl path truncation carries a visible marker with counts inside maxChars', async () => {
+  const body = `<html><head><title>Crawl page</title></head><body><p>${'crawl target words '.repeat(50)}</p></body></html>`;
+  const result = await callNativeTool('semantic_crawl', {
+    source: { type: 'url', url: 'https://example.com/crawl' },
+    query: 'crawl target',
+    maxChars: 500,
+  }, { fetchPageText: async () => body, env: { ...NO_EMBEDDING } });
+  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
+  assert.ok(text.length <= 500, `truncated text must fit maxChars, got ${text.length}`);
+  assert.match(text, /\[truncated: showing \d+ of \d+ chars; raise maxChars up to 50000 for more\]/);
+  const details = result.details as { truncated?: boolean; maxChars?: number; omittedChars?: number };
+  assert.equal(details.truncated, true);
+  assert.equal(details.maxChars, 500);
+  assert.ok((details.omittedChars ?? 0) > 0, 'omitted count must be positive');
 });

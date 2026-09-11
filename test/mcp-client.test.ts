@@ -60,6 +60,12 @@ test('buildServerParameters filters inherited environment', () => {
   });
 });
 
+test('buildServerParameters forwards TAVILY_RESEARCH_MODEL by default', () => {
+  const params = buildServerParameters({ TAVILY_RESEARCH_MODEL: 'auto', DATABASE_URL: 'secret' });
+  assert.equal(params.env?.TAVILY_RESEARCH_MODEL, 'auto');
+  assert.equal(params.env?.DATABASE_URL, undefined);
+});
+
 test('buildServerParameters rejects invalid forwarded env list', () => {
   assert.throws(
     () => buildServerParameters({ SEARCH_MCP_FORWARD_ENV_JSON: '[1]' }),

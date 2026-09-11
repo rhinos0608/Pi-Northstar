@@ -99,3 +99,13 @@ test('sentinel: DIFFBOT_* never leak to unrelated child environments', () => {
   assert.equal(cliEnv.DIFFBOT_TOKEN, SENTINEL, 'core Pi-Northstar CLI path carries the token');
   assert.equal(cliEnv.DATABASE_URL, undefined, 'unrelated secrets stay out of the CLI child env');
 });
+
+test('buildCliEnvironment forwards PI_SEARCH_WEB_AGENT_TIMEOUT_MS when set', () => {
+  const env = buildCliEnvironment({ PI_SEARCH_WEB_AGENT_TIMEOUT_MS: '60000' });
+  assert.equal(env.PI_SEARCH_WEB_AGENT_TIMEOUT_MS, '60000');
+});
+
+test('buildCliEnvironment forwards TAVILY_RESEARCH_MODEL when set, omits when unset', () => {
+  assert.equal(buildCliEnvironment({ TAVILY_RESEARCH_MODEL: 'mini' }).TAVILY_RESEARCH_MODEL, 'mini');
+  assert.equal(buildCliEnvironment({ PATH: '/usr/bin' }).TAVILY_RESEARCH_MODEL, undefined);
+});

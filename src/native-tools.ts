@@ -49,9 +49,11 @@ import { ScraplingBridge } from './scrapling-bridge.js';
 import { buildNorthstarResult, parseEntity } from './result-contract.js';
 import { resolveWebActionForTool, validateWebRequest } from './web-contract.js';
 import {
+  boundPageText,
   fetchReadablePage,
   requireString,
   semanticCrawl,
+  siteMapFetch,
   webSearch,
   wordCount,
   type WebToolOptions,
@@ -83,6 +85,12 @@ async function dispatchNativeTool(
     case 'semantic_crawl':
       return semanticCrawl(args, options);
     case 'fetch': {
+      // Sitemap mode intercepts before read/crawl routing: strict boolean,
+      // combos rejected inside siteMapFetch before any dispatch.
+      if (args.siteMap !== undefined) {
+        if (typeof args.siteMap !== 'boolean') throw new Error('siteMap must be a boolean');
+        if (args.siteMap) return siteMapFetch(args, options);
+      }
       // Contract-first routing: query-less fetch is read, fetch with a query
       // is crawl. resolveWebActionForTool validates before dispatch.
       const action = resolveWebActionForTool('fetch', args);
@@ -148,9 +156,10 @@ async function agenticBrowse(args: Record<string, unknown>, options: NativeToolO
       options.lookup,
       readRuntime,
     );
-    const content = page.content.slice(0, maxChars);
+    const bounded = boundPageText(page.content, maxChars);
+    const content = bounded.text;
     const parsed = parseEntity(
-      { id: page.url, url: page.url, title: page.title, snippet: content.slice(0, 8000), source: 'web' },
+      { id: page.url, url: page.url, title: page.title, snippet: bounded.shown.slice(0, 8000), source: 'web' },
       { source: 'web', kind: 'article' },
     );
     // Execution-fallback markers (not quality judgments): Diffbot Analyze
@@ -177,7 +186,9 @@ async function agenticBrowse(args: Record<string, unknown>, options: NativeToolO
       title: page.title,
       content,
       wordCount: wordCount(content),
-      truncated: page.content.length > maxChars,
+      truncated: bounded.truncated,
+      maxChars,
+      omittedChars: bounded.omittedChars,
       ...(fallbackUsed
         ? { fallback: { provider: 'diffbot', path: 'fallback', qualityImpact: 'not_assessed', ...(page.primaryError !== undefined ? { primaryFailure: page.primaryError } : {}) } }
         : {}),

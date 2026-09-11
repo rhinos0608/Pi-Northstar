@@ -25,8 +25,8 @@ Each public tool validates input, calls into the shared services above, and shap
 
 | Tool | What it does |
 |---|---|
-| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
-| `fetch` | Canonical action `read` without a `query` (full readable text of one URL); canonical action `crawl` with a `query` (crawls pages, returns ranked relevant chunks). `maxChars` ≤ 50000 is honored on both paths; crawl takes `topK` ≤ 20 and `maxPages` ≤ 25. Out-of-range input is rejected, never silently clamped. |
+| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). `mode: "agent"` returns a provider-generated research report as the tool text (untrusted evidence) with `details.report` carrying provider plus validated/capped sources (Tavily Research first provider; RRF/fusion bypassed; incompatible with `knowledge` and research categories). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
+| `fetch` | Canonical action `read` without a `query` (full readable text of one URL); canonical action `crawl` with a `query` (crawls pages, returns ranked relevant chunks). `maxChars` ≤ 50000 is honored on both paths (default 30000); crawl takes `topK` ≤ 20 and `maxPages` ≤ 25. `siteMap: true` lists discovered same-origin URLs under `url` (optional `query` ranks, `maxPages` caps at default 10/max 25; rejects `searchQuery`/`followLinks`/`topK`/`maxChars`). Out-of-range input is rejected, never silently clamped. |
 | `github` | Canonical actions `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits` (REST API only — GraphQL not offered). `GITHUB_TOKEN` or `GH_TOKEN` optional for public reads (harder rate limits without a token); unauthenticated `/search/code` is heavily rate-limited. `list_dir` and `code_search` legacy spellings rejected, never clamped. Results are normalized entities. |
 | `social` | Read-only lookup over canonical actions only (unknown/legacy spellings rejected before dispatch). Available: Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram (no verified post-detail adapter, no download; `get_post`/`get_thread`/`get_comments` unadvertised on Instagram), LinkedIn (read actions via verified OpenCLI Chrome session). Xueqiu/Xiaoyuzhou are absent — not available or planned providers. |
 | `media` | YouTube (official Data API for search/details/hot; keyless unofficial transcript) and Bilibili search, metadata, details, and subtitles. RSS/Atom feed reading. |
@@ -305,6 +305,7 @@ Search backends in automatic preference order: `tavily`, `exa`, `brave`, `diffbo
 - An explicit list runs every runnable listed backend concurrently (max 8) in caller order; unknown IDs, duplicates, and lists over 8 reject before any call. Unavailable entries are recorded, never silently replaced.
 - Every fulfilled non-empty ranking — including Codex — merges through uniform RRF with URL-dedup; backend provenance (`backend`, per-result contributors) stays visible in results. No provider retries.
 - Provider deadline: `PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS`, default `12000`, integer `1000..30000`; malformed values reject before dispatch. Caller abort cancels in-flight requests.
+- Agent report deadline: `PI_SEARCH_WEB_AGENT_TIMEOUT_MS`, default `300000`, clamped to `300000` by the 300s CLI-backend route ceiling (larger values are ineffective); malformed values reject before dispatch. `mode: "agent"` runs one streaming Tavily Research POST (`{input, model, stream: true}`, SSE `text/event-stream` consumed incrementally, no polling) under that single deadline; report text caps at 50000 chars and sources at 20 validated/deduped entries. Report model: `TAVILY_RESEARCH_MODEL`, `mini|pro|auto`, default `pro`; blank defaults, malformed values reject before fetch. No model-facing report knobs. Provider failures throw a neutral provider-attributed error immediately. MCP-server deployments forward the deadline via `SEARCH_MCP_FORWARD_ENV_JSON`.
 
 ### Native AI (environment-only, default on)
 
@@ -413,7 +414,7 @@ fetch({ query: "How does React concurrent rendering work?", searchQuery: "React 
 - `searchQuery` — what to search the web for (required with `query` when `url` omitted; no default — `query` alone does not discover)
 - `topK` — how many chunks to return (default 8, max 20)
 - `maxPages` — how many pages to crawl (default 10, max 25)
-- `maxChars` — output budget honored on both fetch paths (`read` and `crawl`), max 50000
+- `maxChars` — output budget honored on both fetch paths (`read` and `crawl`), default 30000, max 50000
 
 Out-of-range `limit`/`topK`/`maxPages`/`maxChars` values are rejected, never silently clamped.
 

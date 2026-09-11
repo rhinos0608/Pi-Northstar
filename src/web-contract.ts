@@ -102,7 +102,7 @@ export const DEFAULT_WEB_CRAWL_TOP_K = 8;
 export const WEB_CRAWL_TOP_K_MAX = 20;
 export const DEFAULT_WEB_CRAWL_MAX_PAGES = 10;
 export const WEB_CRAWL_MAX_PAGES_MAX = 25;
-export const DEFAULT_WEB_READ_MAX_CHARS = 12000;
+export const DEFAULT_WEB_READ_MAX_CHARS = 30000;
 export const WEB_READ_MAX_CHARS_MAX = 50000;
 export const MAX_WEB_QUERY_LENGTH = 300;
 export const MAX_WEB_URL_LENGTH = 2048;
@@ -126,6 +126,7 @@ export interface WebRequestInput {
    * (PI_SEARCH_KG_ENRICHMENT) enforced at runtime, not here.
    */
   knowledge?: unknown;
+  mode?: unknown;
 }
 
 export interface WebRequest {
@@ -138,6 +139,13 @@ export interface WebRequest {
   maxChars: number;
   researchCategory: boolean;
   knowledge?: WebKnowledgeRequest;
+  agentMode: boolean;
+}
+
+function parseAgentMode(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (value === 'agent') return true;
+  throw webError('invalid_request', "mode must be 'agent'");
 }
 
 function cleanField(value: unknown): string | undefined {
@@ -214,6 +222,13 @@ export function validateWebRequest(input: WebRequestInput): { request: WebReques
   const warnings: string[] = [];
   const action = resolveWebAction(input.action);
   const researchCategory = isResearchCategory(input.category);
+  const agentMode = parseAgentMode((input as { mode?: unknown }).mode);
+  if (agentMode && (input as { knowledge?: unknown }).knowledge !== undefined) {
+    throw webError('invalid_request', 'knowledge is not supported with mode "agent"');
+  }
+  if (agentMode && researchCategory) {
+    throw webError('invalid_request', 'mode "agent" is not supported with research categories');
+  }
 
   assertNoWebCursor(input.cursor);
 
@@ -255,7 +270,7 @@ export function validateWebRequest(input: WebRequestInput): { request: WebReques
     throw webError('invalid_request', 'knowledge is only supported on web search');
   }
   const knowledge = parseWebKnowledge(rawKnowledge);
-  const request: WebRequest = { action, limit, topK, maxPages, maxChars, researchCategory };
+  const request: WebRequest = { action, limit, topK, maxPages, maxChars, researchCategory, agentMode };
   if (query !== undefined) request.query = query;
   if (url !== undefined) request.url = url;
   if (knowledge !== undefined) request.knowledge = knowledge;

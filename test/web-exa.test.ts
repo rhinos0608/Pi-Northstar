@@ -68,6 +68,7 @@ test('exa exact endpoint, method, headers, payload; numResults capped at 10', as
     assert.equal(body.query, 'transformer interpretability');
     assert.equal(body.numResults, 10);
     assert.equal(body.type, 'auto');
+    assert.equal('useAutoprompt' in body, false, 'deprecated useAutoprompt must not be sent');
     assert.deepEqual(body.contents, { text: true, highlights: true, summary: true });
   } finally {
     restore();

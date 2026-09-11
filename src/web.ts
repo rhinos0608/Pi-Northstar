@@ -55,6 +55,8 @@ import {
 } from './web-contract.js';
 import { exaSearchAdapter } from './web-exa.js';
 import { tavilySearchAdapter } from './web-tavily.js';
+import { runAgentReport } from './web-agent-report.js';
+import { runSitemap } from './web-sitemap.js';
 import { firecrawlFetchAdapter, firecrawlSearchAdapter } from './firecrawl.js';
 import { jinaFetchAdapter, jinaSearchAdapter } from './jina.js';
 import { providerSignal, resolveWebProviderPolicy } from './web-provider-policy.js';
@@ -427,11 +429,40 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   if (typeof args.maxPages === 'number') searchInput.maxPages = args.maxPages;
   if (typeof args.maxChars === 'number') searchInput.maxChars = args.maxChars;
   if (args.knowledge !== undefined) searchInput.knowledge = args.knowledge;
+  if (args.mode !== undefined) (searchInput as { mode?: unknown }).mode = args.mode;
   const { request } = validateWebRequest(searchInput);
   const query = request.query!;
   const limit = request.limit;
-  const effectiveQuery = category && CATEGORY_HINTS[category] ? `${query} ${CATEGORY_HINTS[category]}` : query;
   const env = options.env ?? process.env;
+  if (request.agentMode) {
+    const result = await runAgentReport(query, env, options.signal);
+    options.signal?.throwIfAborted();
+    const articles: WebArticleV1[] = [];
+    for (const source of result.sources) {
+      const article: WebArticleV1 = {
+        version: 1,
+        kind: 'article',
+        id: source.url,
+        url: source.url,
+        source: result.provider,
+        backend: result.provider,
+        title: source.title || source.url,
+      };
+      if (validateWebEntity(article).ok) articles.push(article);
+    }
+    const agentEnvelope = buildNorthstarResult({
+      request: { tool: 'web_search', channel: 'web', action: 'search' },
+      outcomes: [{ source: 'web', backend: result.provider, entities: northstarArticles(articles) }],
+      pagination: { supported: false, limit, hasMore: false },
+    });
+    return northstarTextResult(result.text, {
+      query,
+      effectiveQuery: query,
+      results: result.sources.map((source) => ({ title: source.title, url: source.url, source: result.provider })),
+      report: { status: 'ok', provider: result.provider, sources: result.sources.map((source) => ({ url: source.url, title: source.title })) },
+    }, agentEnvelope);
+  }
+  const effectiveQuery = category && CATEGORY_HINTS[category] ? `${query} ${CATEGORY_HINTS[category]}` : query;
 
   // Research isolation: category research/academic never touches generic web
   // providers (buildSearchRoute already routes those to the research tool).
@@ -511,6 +542,71 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
     },
     nativeAi: generatedText,
     ...(knowledge !== null ? { knowledge } : {}),
+  }, envelope);
+}
+
+/**
+ * Sitemap fetch: fetch({ url, siteMap: true, query?, maxPages? }).
+ * siteMap is strict boolean; siteMap:true rejects searchQuery, followLinks,
+ * topK, and maxChars before any dispatch. url required; maxPages defaults
+ * to 10, caps at 25 (fetch-path conventions, enforced in runSitemap).
+ * Tool text is a concise ordered URL list; details.siteMap carries status,
+ * provider, baseUrl, urls, and the actual ranking method. Article entities
+ * use the URL itself as title — no fabricated page content or titles.
+ */
+export async function siteMapFetch(args: Record<string, unknown>, options: WebToolOptions = {}): Promise<BackendCallResult> {
+  if (typeof args.siteMap !== 'boolean') {
+    throw new Error('siteMap must be a boolean');
+  }
+  for (const key of ['searchQuery', 'followLinks', 'topK', 'maxChars'] as const) {
+    if (args[key] !== undefined) throw new Error(`${key} is not supported with siteMap`);
+  }
+  const url = requireString(args.url, 'url');
+  const env = options.env ?? process.env;
+  const query = typeof args.query === 'string' && args.query.trim().length > 0 ? args.query : undefined;
+  if (args.query !== undefined && typeof args.query !== 'string') throw new Error('query must be a string');
+  if (args.maxPages !== undefined && typeof args.maxPages !== 'number') {
+    throw new Error('maxPages must be an integer in [1, 25]');
+  }
+  const result = await runSitemap(url, {
+    ...(query !== undefined ? { query } : {}),
+    ...(typeof args.maxPages === 'number' ? { maxPages: args.maxPages } : {}),
+    env,
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.lookup !== undefined ? { lookup: options.lookup } : {}),
+  });
+  options.signal?.throwIfAborted();
+  const articles: WebArticleV1[] = [];
+  for (const pageUrl of result.urls) {
+    const article: WebArticleV1 = {
+      version: 1,
+      kind: 'article',
+      id: pageUrl,
+      url: pageUrl,
+      source: 'web',
+      backend: result.provider,
+      title: pageUrl,
+    };
+    if (validateWebEntity(article).ok) articles.push(article);
+  }
+  const envelope = buildNorthstarResult({
+    request: { tool: 'fetch', channel: 'web', action: 'read' },
+    outcomes: [{ source: 'web', backend: result.provider, entities: northstarArticles(articles) }],
+    pagination: { supported: false, limit: result.urls.length, hasMore: false },
+  });
+  const lines = result.urls.map((pageUrl, index) => `${index + 1}. ${pageUrl}`);
+  const text = result.urls.length > 0
+    ? `Sitemap for ${result.baseUrl}:\n${lines.join('\n')}`
+    : `No sitemap URLs found for ${result.baseUrl}`;
+  return northstarTextResult(text, {
+    url,
+    siteMap: {
+      status: result.urls.length > 0 ? 'ok' : 'empty',
+      provider: result.provider,
+      baseUrl: result.baseUrl,
+      urls: result.urls,
+      ranking: result.ranking,
+    },
   }, envelope);
 }
 
@@ -785,9 +881,11 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
   const fullText = resultChunks.length
     ? resultChunks.map((chunk, index) => `## ${index + 1}. ${chunk.title || chunk.url}\n${chunk.url}\n\n${chunk.content}`).join('\n\n')
     : `No crawl results for: ${query}`;
-  // maxChars is honored on the crawl path too (same total-text bound as read).
-  const truncated = fullText.length > maxChars;
-  const text = truncated ? fullText.slice(0, maxChars) : fullText;
+  // maxChars honored on crawl path too (same total-text bound as read).
+  // Truncation stays visible: marker + counts ride inside maxChars budget.
+  const bounded = boundPageText(fullText, maxChars);
+  const truncated = bounded.truncated;
+  const text = bounded.text;
   // Execution-fallback markers (not quality judgments): Diffbot Analyze or
   // gated external fetch supplied page(s) after native exhaustion. The
   // envelope degrades; details carry path/provider/qualityImpact plus the
@@ -825,6 +923,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
     ranking: { method: rankingMethod, documentCount: bm25Index.stats().documentCount },
     maxChars,
     truncated,
+    omittedChars: bounded.omittedChars,
     ...(fallbackUsed
       ? { fallback: { provider: 'diffbot', path: 'fallback', qualityImpact: 'not_assessed', pages: fallbackPages, primaryFailures: primaryFailures.slice(0, 10) } }
       : {}),
@@ -1291,4 +1390,40 @@ export function cleanText(text: string): string {
     .replace(/&amp;/g, '&')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+export interface BoundedPageText {
+  text: string;
+  shown: string;
+  truncated: boolean;
+  omittedChars: number;
+}
+
+function wordBoundarySlice(value: string, budget: number): string {
+  if (budget >= value.length) return value;
+  if (budget <= 0) return '';
+  const cut = value.slice(0, budget);
+  const idx = cut.lastIndexOf(' ');
+  if (idx > budget * 0.25) return cut.slice(0, idx).trimEnd();
+  return cut.trimEnd();
+}
+
+/** Bound page text to maxChars with a visible truncation marker inside budget. */
+export function boundPageText(content: string, maxChars: number): BoundedPageText {
+  if (content.length <= maxChars) return { text: content, shown: content, truncated: false, omittedChars: 0 };
+  const total = content.length;
+  const markerFor = (shownLen: number): string =>
+    `\n\n[truncated: showing ${shownLen} of ${total} chars; raise maxChars up to 50000 for more]`;
+  let budget = maxChars - markerFor(maxChars).length;
+  if (budget <= 0) {
+    return { text: markerFor(0).slice(0, maxChars), shown: '', truncated: true, omittedChars: total };
+  }
+  let shown = wordBoundarySlice(content, budget);
+  let marker = markerFor(shown.length);
+  const overflow = shown.length + marker.length - maxChars;
+  if (overflow > 0) {
+    shown = wordBoundarySlice(content, shown.length - overflow);
+    marker = markerFor(shown.length);
+  }
+  return { text: `${shown}${marker}`, shown, truncated: true, omittedChars: total - shown.length };
 }

@@ -15,7 +15,7 @@ test('buildBrowseArgs uses supported agentic_browse read action', () => {
   assert.deepEqual(buildBrowseArgs({ url: 'https://example.com' }), {
     action: 'read',
     url: 'https://example.com',
-    maxChars: 12000,
+    maxChars: 30000,
   });
 });
 
@@ -107,7 +107,7 @@ test('buildFetchRoute no-query routes to agentic_browse with maxChars default', 
   assert.equal(route.tool, 'agentic_browse');
   assert.equal(route.args.url, 'https://example.com/page');
   assert.equal(route.args.action, 'read');
-  assert.equal(route.args.maxChars, 12000);
+  assert.equal(route.args.maxChars, 30000);
   assert.equal(route.timeout, 120_000);
 });
 
@@ -131,6 +131,32 @@ test('buildFetchRoute with query and url sets maxDepth 1', () => {
   const route = buildFetchRoute({ query: 'test query', url: 'https://example.com/page' });
   assert.equal((route.args.source as { type: string }).type, 'url');
   assert.equal(route.args.maxDepth, 1);
+});
+
+test('buildFetchRoute siteMap routes to fetch with sitemap args', () => {
+  const route = buildFetchRoute({ url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
+  assert.equal(route.tool, 'fetch');
+  assert.deepEqual(route.args, { url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
+  assert.equal(route.timeout, 180_000, 'sitemap route ceiling sits above the 150s provider bound');
+});
+
+test('buildFetchRoute siteMap without query or maxPages passes through', () => {
+  const route = buildFetchRoute({ url: 'https://example.com/docs/', siteMap: true });
+  assert.deepEqual(route.args, { url: 'https://example.com/docs/', siteMap: true });
+});
+
+test('buildFetchRoute siteMap rejects missing url, combos, and non-boolean', () => {
+  assert.throws(() => buildFetchRoute({ siteMap: true }), /url is required with siteMap/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, searchQuery: 'x' }), /searchQuery is not supported with siteMap/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, followLinks: true, query: 'x' }), /followLinks is not supported with siteMap/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, topK: 5 }), /topK is not supported with siteMap/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, maxChars: 500 }), /maxChars is not supported with siteMap/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: 'yes' as unknown as boolean }), /siteMap must be a boolean/);
+});
+
+test('buildFetchRoute siteMap:false follows the normal read path', () => {
+  const route = buildFetchRoute({ url: 'https://example.com/page', siteMap: false });
+  assert.equal(route.tool, 'agentic_browse');
 });
 
 test('buildSearchRoute research category routes to research backend', () => {
@@ -213,7 +239,7 @@ test('buildFetchRoute whitespace-only query routes to agentic_browse', () => {
   assert.equal(route.tool, 'agentic_browse');
   assert.equal(route.args.url, 'https://example.com/page');
   assert.equal(route.args.action, 'read');
-  assert.equal(route.args.maxChars, 12000);
+  assert.equal(route.args.maxChars, 30000);
   assert.equal(route.timeout, 120_000);
 });
 
@@ -674,8 +700,8 @@ test('kg description requires user authorization before sensitive text submissio
 
 test('web_search exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
   const defs = await captureAllTools();
-  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'knowledge', 'limit', 'query', 'source', 'yearFrom']);
-  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['followLinks', 'maxChars', 'maxPages', 'query', 'searchQuery', 'topK', 'url']);
+  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'knowledge', 'limit', 'mode', 'query', 'source', 'yearFrom']);
+  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['followLinks', 'maxChars', 'maxPages', 'query', 'searchQuery', 'siteMap', 'topK', 'url']);
   const knowledge = (defs.web_search!.parameters.properties as Record<string, { properties?: Record<string, unknown> }>).knowledge;
   assert.deepEqual(Object.keys(knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
 });
@@ -807,4 +833,23 @@ test('tool_result hook fences kg output as external evidence', async () => {
     isError: false,
   }) as { content: Array<{ text: string }> } | undefined;
   assert.ok(result && result.content[0]!.text.includes('<<<EXTERNAL_EVIDENCE_'), 'kg must be fenced');
+});
+
+test('buildSearchRoute agent mode passes through with 300s timeout', () => {
+  const route = buildSearchRoute({ query: 'deep topic', mode: 'agent' });
+  assert.equal(route.tool, 'web_search');
+  assert.equal(route.args.mode, 'agent');
+  assert.equal(route.timeout, 300_000);
+});
+
+test('buildSearchRoute agent mode rejects research category and knowledge', () => {
+  assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', category: 'research' }), /not supported with category/);
+  assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', category: 'academic' }), /not supported with category/);
+  assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', knowledge: { entities: true } }), /not supported with mode/);
+});
+
+test('buildSearchRoute default mode keeps 120s timeout and no mode arg', () => {
+  const route = buildSearchRoute({ query: 'pi agent' });
+  assert.equal(route.timeout, 120_000);
+  assert.ok(!('mode' in route.args));
 });

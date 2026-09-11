@@ -66,7 +66,7 @@ test('tavily exact endpoint, method, headers, payload; max_results capped at 20'
     const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
     assert.equal(body.query, 'transformer interpretability');
     assert.equal(body.max_results, 20);
-    assert.equal(body.search_depth, 'basic');
+    assert.equal(body.search_depth, 'advanced');
     assert.equal(body.include_answer, 'basic');
     assert.equal(body.include_raw_content, false);
     assert.equal(body.include_images, false);
@@ -246,6 +246,358 @@ test('tavily abort propagates', async () => {
     const controller = new AbortController();
     controller.abort();
     await assert.rejects(tavilySearchAdapter.search(input({ signal: controller.signal })));
+  } finally {
+    restore();
+  }
+});
+
+function sseResponse(chunks: Array<string | Uint8Array>, status = 200): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(typeof chunk === 'string' ? encoder.encode(chunk) : chunk);
+      controller.close();
+    },
+  });
+  return new Response(stream, { status, headers: { 'content-type': 'text/event-stream' } });
+}
+
+const sseEvent = (data: string, event?: string): string =>
+  `${event !== undefined ? `event: ${event}\n` : ''}data: ${data}\n\n`;
+
+const chunkPayload = (content: string, sources?: unknown): string =>
+  JSON.stringify({ choices: [{ delta: { content, ...(sources !== undefined ? { sources } : {}) } }] });
+
+async function runStream(body: Array<string | Uint8Array>, env?: Record<string, string | undefined>): Promise<{ text: string; sources: Array<{ url: string; title: string }> }> {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const { restore } = mockFetch(async () => sseResponse(body));
+  try {
+    const result = await runTavilyResearch('deep query', env ?? { TAVILY_API_KEY: SECRET });
+    assert.equal(result.provider, 'tavily');
+    return result;
+  } finally {
+    restore();
+  }
+}
+
+test('tavily research model defaults to pro on absent/blank, accepts mini|pro|auto', async () => {
+  const { resolveTavilyResearchModel, DEFAULT_TAVILY_RESEARCH_MODEL } = await import('../src/web-tavily.js');
+  assert.equal(DEFAULT_TAVILY_RESEARCH_MODEL, 'pro');
+  assert.equal(resolveTavilyResearchModel({}), 'pro');
+  assert.equal(resolveTavilyResearchModel({ TAVILY_RESEARCH_MODEL: '' }), 'pro');
+  assert.equal(resolveTavilyResearchModel({ TAVILY_RESEARCH_MODEL: '   ' }), 'pro');
+  assert.equal(resolveTavilyResearchModel({ TAVILY_RESEARCH_MODEL: 'mini' }), 'mini');
+  assert.equal(resolveTavilyResearchModel({ TAVILY_RESEARCH_MODEL: 'pro' }), 'pro');
+  assert.equal(resolveTavilyResearchModel({ TAVILY_RESEARCH_MODEL: 'auto' }), 'auto');
+});
+
+test('tavily research invalid model rejects before fetch', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const { calls, restore } = mockFetch(async () => sseResponse([]));
+  try {
+    await assert.rejects(
+      () => runTavilyResearch('q', { TAVILY_API_KEY: SECRET, TAVILY_RESEARCH_MODEL: 'ultra' }),
+      /TAVILY_RESEARCH_MODEL.*mini\|pro\|auto/,
+    );
+    assert.equal(calls.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test('tavily research exact request: endpoint, method, headers, stream:true with default model', async () => {
+  const { TAVILY_RESEARCH_ENDPOINT } = await import('../src/web-tavily.js');
+  assert.ok(TAVILY_RESEARCH_ENDPOINT.endsWith('/research'));
+  const { calls, restore } = mockFetch(async () =>
+    sseResponse([sseEvent(chunkPayload('Hello')), sseEvent('', 'done')]),
+  );
+  try {
+    const { runTavilyResearch } = await import('../src/web-tavily.js');
+    const result = await runTavilyResearch('deep query', { TAVILY_API_KEY: SECRET });
+    assert.equal(result.text, 'Hello');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.url, TAVILY_RESEARCH_ENDPOINT);
+    assert.equal(calls[0]?.init?.method, 'POST');
+    const headers = new Headers(calls[0]?.init?.headers);
+    assert.equal(headers.get('authorization'), `Bearer ${SECRET}`);
+    assert.ok((headers.get('accept') ?? '').includes('text/event-stream'));
+    assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { input: 'deep query', model: 'pro', stream: true });
+    assert.equal(calls[0]?.init?.redirect, 'manual');
+  } finally {
+    restore();
+  }
+});
+
+test('tavily research env model override reaches the request body', async () => {
+  for (const model of ['mini', 'pro', 'auto'] as const) {
+    const { calls, restore } = mockFetch(async () =>
+      sseResponse([sseEvent(chunkPayload('R')), sseEvent('', 'done')]),
+    );
+    try {
+      const { runTavilyResearch } = await import('../src/web-tavily.js');
+      await runTavilyResearch('q', { TAVILY_API_KEY: SECRET, TAVILY_RESEARCH_MODEL: model });
+      assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { input: 'q', model, stream: true });
+    } finally {
+      restore();
+    }
+  }
+});
+
+test('tavily research stream aggregates fragmented content across arbitrary byte splits', async () => {
+  const full =
+    sseEvent(chunkPayload('## Report\n\nFirst héllo ')) +
+    sseEvent(chunkPayload('second **chunk**')) +
+    ': heartbeat comment\n\n' +
+    sseEvent(chunkPayload(' tail'), 'message');
+  const bytes = new TextEncoder().encode(full);
+  // Split mid-line, mid-JSON, and inside the multi-byte héllo sequence.
+  const cuts = [1, 7, 23, 64, 65, 129];
+  let offset = 0;
+  const chunks: Uint8Array[] = [];
+  for (const cut of cuts) {
+    chunks.push(bytes.slice(offset, cut));
+    offset = cut;
+  }
+  chunks.push(bytes.slice(offset));
+  const result = await runStream([...chunks, sseEvent('', 'done')]);
+  assert.equal(result.text, '## Report\n\nFirst héllo second **chunk** tail');
+});
+
+test('tavily research stream handles CRLF framing and multiple data lines', async () => {
+  const frame = `data: ${chunkPayload('A')}\r\n\r\n` +
+    `: comment\r\n` +
+    `data: {"choices": [{"delta": {"content": "B"}}]}\r\n\r\n` +
+    `event: done\r\ndata: {}\r\n\r\n`;
+  const result = await runStream([frame]);
+  assert.equal(result.text, 'AB');
+});
+
+test('tavily research stream normalizes sources: dedupe, http-only, title fallback', async () => {
+  const result = await runStream([
+    sseEvent(chunkPayload('Report body', [
+      { url: 'https://a.example/x', title: 'A' },
+      { url: 'https://a.example/x', title: 'A dup' },
+      { url: 'ftp://bad.example/file', title: 'Bad' },
+      { url: 'https://b.example/y' },
+      { title: 'no url' },
+      7,
+    ])),
+    sseEvent('', 'done'),
+  ]);
+  assert.equal(result.text, 'Report body');
+  assert.deepEqual(result.sources, [
+    { url: 'https://a.example/x', title: 'A' },
+    { url: 'https://b.example/y', title: 'Untitled' },
+  ]);
+});
+
+test('tavily research stream ignores tool-call and progress events, never exposes them', async () => {
+  const toolCall = JSON.stringify({
+    choices: [{ delta: { tool_calls: [{ id: 'call-1', function: { name: 'browse', arguments: 'SECRET-PAYLOAD' } }], role: 'assistant' } }],
+  });
+  const progress = JSON.stringify({ type: 'progress', message: 'PROGRESS-TEXT searching the web' });
+  const result = await runStream([
+    sseEvent(toolCall),
+    sseEvent(progress),
+    sseEvent(chunkPayload('Final answer')),
+    sseEvent('', 'done'),
+  ]);
+  assert.equal(result.text, 'Final answer');
+  assert.ok(!result.text.includes('SECRET-PAYLOAD'));
+  assert.ok(!result.text.includes('PROGRESS-TEXT'));
+});
+
+test('tavily research stream skips malformed JSON data and completes', async () => {
+  const result = await runStream([
+    'data: {not json\n\n',
+    'data: "just a string"\n\n',
+    `data: ${chunkPayload('Recovered')}\n\n`,
+    sseEvent('', 'done'),
+  ]);
+  assert.equal(result.text, 'Recovered');
+});
+
+test('tavily research stream [DONE] data also ends the stream', async () => {
+  const result = await runStream([sseEvent(chunkPayload('Hi')), 'data: [DONE]\n\n']);
+  assert.equal(result.text, 'Hi');
+});
+
+test('tavily research stream exact-size report passes, oversized terminally rejects', async () => {
+  const { TAVILY_RESEARCH_TEXT_MAX_CHARS } = await import('../src/web-tavily.js');
+  assert.equal(TAVILY_RESEARCH_TEXT_MAX_CHARS, 50_000);
+  const exact = await runStream([sseEvent(chunkPayload('x'.repeat(50_000))), sseEvent('', 'done')]);
+  assert.equal(exact.text.length, 50_000);
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const big = mockFetch(async () =>
+    sseResponse([sseEvent(chunkPayload('x'.repeat(50_001))), sseEvent('', 'done')]),
+  );
+  try {
+    await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), /too large/);
+  } finally {
+    big.restore();
+  }
+});
+
+test('tavily research stream caps sources at 20', async () => {
+  const sources = Array.from({ length: 30 }, (_, i) => ({ url: `https://s${i}.example/`, title: `S${i}` }));
+  const result = await runStream([sseEvent(chunkPayload('R', sources)), sseEvent('', 'done')]);
+  assert.equal(result.sources.length, 20);
+});
+
+test('tavily research stream transport bound rejects oversized streams', async () => {
+  const { runTavilyResearch, TAVILY_RESEARCH_STREAM_MAX_BYTES } = await import('../src/web-tavily.js');
+  assert.equal(TAVILY_RESEARCH_STREAM_MAX_BYTES, 1_000_000);
+  const pad = `data: ${JSON.stringify({ filler: 'y'.repeat(100_000) })}\n\n`;
+  const { restore } = mockFetch(async () => sseResponse(Array.from({ length: 12 }, () => pad)));
+  try {
+    await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), /too large/);
+  } finally {
+    restore();
+  }
+});
+
+test('tavily research stream error object fails terminally without payload echo', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const { restore } = mockFetch(async () =>
+    sseResponse([sseEvent(JSON.stringify({ object: 'error', error: 'UPSTREAM-BOOM-SECRET' }))]),
+  );
+  try {
+    await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as { terminal?: unknown }).terminal, true);
+      assert.ok(!error.message.includes('UPSTREAM-BOOM-SECRET'), 'upstream payload leaked');
+      assert.ok(!error.message.includes(SECRET), 'key leaked into error');
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('tavily research stream missing done and empty content terminally reject', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const eof = mockFetch(async () => sseResponse([sseEvent(chunkPayload('orphan content'))]));
+  try {
+    await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), /invalid response/);
+  } finally {
+    eof.restore();
+  }
+  const empty = mockFetch(async () => sseResponse([sseEvent(chunkPayload('   ')), sseEvent('', 'done')]));
+  try {
+    await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), /invalid response/);
+  } finally {
+    empty.restore();
+  }
+});
+
+test('tavily research rejects redirects, non-2xx, and non-SSE content type', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const redirect = mockFetch(async () => new Response('', { status: 307, headers: { location: 'https://evil.example/' } }));
+  try {
+    await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), /Redirect rejected/);
+  } finally {
+    redirect.restore();
+  }
+  for (const status of [401, 500]) {
+    const m = mockFetch(async () => jsonResponse({ error: 'x' }, status));
+    try {
+      await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, new RegExp(`HTTP ${status}`));
+        assert.equal((error as { terminal?: unknown }).terminal, true);
+        assert.ok(!error.message.includes(SECRET), 'key leaked into error');
+        return true;
+      });
+    } finally {
+      m.restore();
+    }
+  }
+  const wrongType = mockFetch(async () => jsonResponse({ choices: [] }));
+  try {
+    await assert.rejects(() => runTavilyResearch('q', { TAVILY_API_KEY: SECRET }), /invalid response/);
+  } finally {
+    wrongType.restore();
+  }
+});
+
+test('tavily research missing key rejects terminally without fetch', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const { calls, restore } = mockFetch(async () => sseResponse([]));
+  try {
+    await assert.rejects(() => runTavilyResearch('q', {}), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as { terminal?: unknown }).terminal, true);
+      return true;
+    });
+    assert.equal(calls.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test('tavily research caller abort propagates', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const hanging = new ReadableStream<Uint8Array>({ start() {} });
+  const { restore } = mockFetch(async () =>
+    new Response(hanging, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+  );
+  try {
+    const controller = new AbortController();
+    const pending = assert.rejects(() =>
+      runTavilyResearch('q', { TAVILY_API_KEY: SECRET }, controller.signal),
+    );
+    controller.abort(new DOMException('aborted', 'AbortError'));
+    await pending;
+  } finally {
+    restore();
+  }
+});
+
+test('tavily research abort during pending read propagates abort reason, not terminal invalid response', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  const hanging = new ReadableStream<Uint8Array>({ start() {} });
+  const { restore } = mockFetch(async () =>
+    new Response(hanging, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+  );
+  try {
+    const controller = new AbortController();
+    const reason = new DOMException('race-abort', 'AbortError');
+    const pending = runTavilyResearch('q', { TAVILY_API_KEY: SECRET }, controller.signal);
+    // Let consumption reach the pending reader.read() before aborting, so the
+    // abort races the read and the winner (cancel -> done:true) must not mask it.
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort(reason);
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof DOMException);
+      assert.equal((error as DOMException).name, 'AbortError');
+      assert.ok(!String((error as Error).message).includes('invalid response'));
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('tavily research early done cancels remaining body', async () => {
+  const { runTavilyResearch } = await import('../src/web-tavily.js');
+  let cancelled = false;
+  const encoder = new TextEncoder();
+  const payload = sseEvent(chunkPayload('Hi')) + sseEvent('', 'done');
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(payload));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const { restore } = mockFetch(async () =>
+    new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+  );
+  try {
+    const result = await runTavilyResearch('q', { TAVILY_API_KEY: SECRET });
+    assert.equal(result.text, 'Hi');
+    assert.equal(cancelled, true);
   } finally {
     restore();
   }
