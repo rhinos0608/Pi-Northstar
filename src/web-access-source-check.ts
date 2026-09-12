@@ -175,7 +175,8 @@ export function assessWebAccessClaim(claim: string, passages: WebAccessCheckPass
   for (const passage of passages) {
     const lower = passage.text.toLowerCase();
     const overlap = termPatterns.filter((pattern) => pattern.test(lower)).length;
-    if (overlap < Math.min(terms.length, 2)) continue;
+    const requiredOverlap = Math.min(terms.length, Math.max(2, Math.ceil(terms.length / 2)));
+    if (overlap < requiredOverlap) continue;
     const contra = hasCompiledMarker(lower, contraMarkers);
     const support = hasCompiledMarker(lower, supportMarkers);
     if (contra && !support) contradicting.push(passage.passage_id);
