@@ -135,10 +135,15 @@ export class ChromeProfileAuth {
   }
 
   /** Activate the staged grant. Throws chrome_revoked when nothing staged
-   *  (e.g. a revoke/shutdown raced the handshake and discarded it). */
+   *  (e.g. a revoke/shutdown raced the handshake and discarded it), or
+   *  when the TTL lapsed mid-handshake: an expired grant never goes live. */
   commitAuthorize(): ChromeGrantRef {
     const staged = this.staged;
     if (staged === null) throw new Error('chrome_revoked: authorization superseded');
+    if (staged.expiresAt !== null && this.now() >= staged.expiresAt) {
+      this.staged = null;
+      throw new Error('chrome_revoked: grant expired before activation');
+    }
     this.staged = null;
     staged.leaseExpiresAt = this.now() + CHROME_LEASE_MAX_MS;
     this.grant = staged;

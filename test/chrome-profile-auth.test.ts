@@ -74,6 +74,17 @@ test('commit recomputes companion lease after delayed handshake', () => {
   assert.equal(auth.msUntilLeaseExpiry(), CHROME_LEASE_MAX_MS);
 });
 
+test('commit rejects a grant whose TTL lapsed mid-handshake', () => {
+  const clock = fakeClock();
+  const auth = new ChromeProfileAuth({ now: clock.now, randomId: ids() });
+  auth.stageAuthorize(60 * 1000, true);
+  clock.advance(60 * 1000 + 1);
+  assert.throws(() => auth.commitAuthorize(), /grant expired before activation/);
+  assert.equal(auth.status().state, 'locked');
+  assert.equal(auth.currentGrant(), null);
+  // Staged grant discarded: a retry stages fresh instead of committing stale.
+  assert.throws(() => auth.commitAuthorize(), /superseded/);
+});
 test('revoke and shutdown lock synchronously for every reason', () => {
   const auth = new ChromeProfileAuth({ now: fakeClock().now, randomId: ids() });
   auth.authorize(15 * 60 * 1000, true);

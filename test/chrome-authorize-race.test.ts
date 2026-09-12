@@ -125,6 +125,37 @@ test('automation kill switch during hanging authorize prevents late ACK resurrec
   assert.deepEqual(auth.status(), { state: 'locked', reason: 'revoked' });
 });
 
+test('TTL lapsing mid-handshake rejects commit and revokes the acked companion grant', async () => {
+  const sends: ChromeBridgeCommand[] = [];
+  let now = 1_000_000;
+  let releaseAuthorize!: (result: ChromeBridgeResult) => void;
+  const authorizeGate = new Promise<ChromeBridgeResult>((resolve) => { releaseAuthorize = resolve; });
+  const bridge = {
+    async send(command: ChromeBridgeCommand): Promise<ChromeBridgeResult> {
+      sends.push(command);
+      if (command.kind === 'authorize') return authorizeGate;
+      return okData({}, command.id);
+    },
+    async handshake(): Promise<boolean> { return true; },
+  };
+  const auth = new ChromeProfileAuth({ now: () => now, randomId: ids() });
+  const adapter = new ChromeProfileAdapter({ auth, bridge, targetInstanceId: TEST_TARGET, bridgeToken: TEST_TOKEN, randomId: ids() });
+  const pending = adapter.authorize(60 * 1000, true, TEST_TARGET);
+  await new Promise((resolve) => setImmediate(resolve));
+  now += 60 * 1000 + 1;
+  releaseAuthorize(okData({}, 'auth-stale'));
+  assert.equal(errOf(await pending), 'chrome_revoked');
+  assert.equal(auth.status().state, 'locked');
+  const authorizeCmd = sends.find((c) => c.kind === 'authorize');
+  assert.ok(authorizeCmd !== undefined && authorizeCmd.kind === 'authorize');
+  const cleanup = sends.filter((c) => c.kind === 'revoke');
+  assert.equal(cleanup.length, 1);
+  assert.ok(cleanup[0] !== undefined && cleanup[0].kind === 'revoke');
+  if (authorizeCmd.kind === 'authorize' && cleanup[0] !== undefined && cleanup[0].kind === 'revoke') {
+    assert.equal(cleanup[0].sessionKey, authorizeCmd.sessionKey);
+    assert.equal(cleanup[0].grantId, authorizeCmd.grantId);
+  }
+});
 test('authorize nack leaves state locked; no live grant', async () => {
   const sends: ChromeBridgeCommand[] = [];
   const bridge = {

@@ -214,6 +214,28 @@ export class ChromeProfileAdapter {
     return { targetInstanceId: this.targetInstanceId, bridgeToken: token };
   }
 
+  /** Best-effort revoke of staged credentials after a post-ACK commit
+   *  failure; the companion acked them, so locked Pi-side must not strand
+   *  a live companion grant. Never throws. */
+  private async revokeStagedRemote(grant: { sessionKey: string; grantId: string }): Promise<void> {
+    if (this.bridge === null) return;
+    const stamp = this.commandStamp();
+    if (stamp === null) return;
+    const command: ChromeBridgeCommand = {
+      protocol: 1,
+      id: this.randomId(),
+      sessionKey: grant.sessionKey,
+      grantId: grant.grantId,
+      ...stamp,
+      kind: 'revoke',
+    };
+    try {
+      await this.sendWithTimeout(command, this.revokeTimeoutMs);
+    } catch {
+      // Intentionally ignored: local lock already holds; remote cleanup best-effort.
+    }
+  }
+
   status(): { state: 'locked'; reason?: string } | { state: 'authorized'; expiresAt: number | null } {
     return this.auth.status();
   }
@@ -294,9 +316,12 @@ export class ChromeProfileAdapter {
     }
     // Companion acked: go live. A revoke racing the handshake discarded the
     // staged grant, so commit throws and the late ack never resurrects it.
+    // A failed commit after ACK leaves an orphan companion grant behind, so
+    // revoke the staged credentials best-effort before reporting locked.
     try {
       this.auth.commitAuthorize();
     } catch (error) {
+      await this.revokeStagedRemote(grant);
       this.purgeIfLocked();
       return chromeErrorResult('chrome_revoked', safeChromeProfileErrorMessage(error instanceof Error ? error.message : String(error)));
     }
