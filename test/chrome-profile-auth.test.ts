@@ -64,6 +64,16 @@ test('indefinite lasts until revoke/shutdown; lease stays bounded at 60s', () =>
   assert.deepEqual(auth.status(), { state: 'locked', reason: 'revoked' });
 });
 
+test('commit recomputes companion lease after delayed handshake', () => {
+  const clock = fakeClock();
+  const auth = new ChromeProfileAuth({ now: clock.now, randomId: ids() });
+  auth.stageAuthorize(15 * 60 * 1000, true);
+  clock.advance(61_000);
+  auth.commitAuthorize();
+  assert.equal(auth.isLeaseLive(), true);
+  assert.equal(auth.msUntilLeaseExpiry(), CHROME_LEASE_MAX_MS);
+});
+
 test('revoke and shutdown lock synchronously for every reason', () => {
   const auth = new ChromeProfileAuth({ now: fakeClock().now, randomId: ids() });
   auth.authorize(15 * 60 * 1000, true);

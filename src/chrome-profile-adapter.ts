@@ -190,6 +190,12 @@ export class ChromeProfileAdapter {
     this.typedMemory.length = 0;
   }
 
+  /** Purge only when no live grant remains: a failed re-authorize must not
+   *  wipe the session secrets of the grant that is still live. */
+  private purgeIfLocked(): void {
+    if (this.auth.currentGrant() === null) this.purgeSessionSecrets();
+  }
+
   /** Bound companion target for the live grant; null until authorize binds it. */
   boundTarget(): string | null {
     return this.targetInstanceId;
@@ -217,9 +223,12 @@ export class ChromeProfileAdapter {
   }
 
   async authorize(ttlMs: number | null, confirmed: boolean, targetInstanceId?: string): Promise<BackendCallResult> {
+    // Two-phase: stage the grant (inactive, Pi-side lock held) and go live
+    // only after the companion authorize ack. Concurrent execute() during
+    // the await observes locked and sends zero commands.
     let grant: { sessionKey: string; grantId: string; leaseExpiresAt: number };
     try {
-      grant = this.auth.authorize(ttlMs, confirmed);
+      grant = this.auth.stageAuthorize(ttlMs, confirmed);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return chromeErrorResult('chrome_locked', safeChromeProfileErrorMessage(message));
@@ -228,14 +237,14 @@ export class ChromeProfileAdapter {
     // a target the authorize would be consumable by whichever instance polls first.
     const target = targetInstanceId ?? this.targetInstanceId;
     if (this.bridge !== null && (typeof target !== 'string' || target.length === 0)) {
-      this.auth.revoke('user');
-      this.purgeSessionSecrets();
+      this.auth.abortAuthorize();
+      this.purgeIfLocked();
       return chromeErrorResult('chrome_locked', 'authorization requires a selected companion instance');
     }
     const token = this.resolveBridgeToken();
     if (this.bridge !== null && token === undefined) {
-      this.auth.revoke('user');
-      this.purgeSessionSecrets();
+      this.auth.abortAuthorize();
+      this.purgeIfLocked();
       return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge token unavailable', true);
     }
     if (this.bridge !== null) {
@@ -253,8 +262,8 @@ export class ChromeProfileAdapter {
       try {
         const result = await this.bridge.send(command);
         if (!result.ok) {
-          this.auth.revoke('user');
-          this.purgeSessionSecrets();
+          this.auth.abortAuthorize();
+          this.purgeIfLocked();
           return chromeErrorResult(
             result.error.code,
             safeChromeProfileErrorMessage(result.error.message),
@@ -262,9 +271,9 @@ export class ChromeProfileAdapter {
           );
         }
       } catch (error) {
-        // Failed handshake leaves state locked.
-        this.auth.revoke('user');
-        this.purgeSessionSecrets();
+        // Failed handshake discards the staged grant; a live grant survives.
+        this.auth.abortAuthorize();
+        this.purgeIfLocked();
         if (error instanceof ChromeBridgeError) {
           return chromeErrorResult(error.code, safeChromeProfileErrorMessage(error.message), error.retryable);
         }
@@ -276,11 +285,20 @@ export class ChromeProfileAdapter {
       }
     }
     if (this.bridge === null) {
-      // Fail closed: no companion transport means no grant. Revoke the local
-      // grant so /chrome status cannot report authorized for an unusable backend.
-      this.auth.revoke('user');
-      this.purgeSessionSecrets();
+      // Fail closed: no companion transport means no grant. Discard the
+      // staged grant so /chrome status cannot report authorized for an
+      // unusable backend.
+      this.auth.abortAuthorize();
+      this.purgeIfLocked();
       return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge unavailable', true);
+    }
+    // Companion acked: go live. A revoke racing the handshake discarded the
+    // staged grant, so commit throws and the late ack never resurrects it.
+    try {
+      this.auth.commitAuthorize();
+    } catch (error) {
+      this.purgeIfLocked();
+      return chromeErrorResult('chrome_revoked', safeChromeProfileErrorMessage(error instanceof Error ? error.message : String(error)));
     }
     this.purgeSessionSecrets();
     const state = this.auth.status();

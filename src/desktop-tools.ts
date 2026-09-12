@@ -1,14 +1,14 @@
 import { CuaClient } from './cua-client.js';
 import { ObservationStore, isMutation, resourceKey, timeoutFor, fingerprintData, OBSERVATION_TTL_MS, COORDINATE_MUTATION_FRESHNESS_MS, type DesktopRequest, type DesktopResult, MAX_AX_DEPTH, MAX_AX_NODES, MAX_SCREENSHOT_BYTES, MAX_DIMENSION } from './desktop-contract.js';
 import { guardText } from './tool-output.js';
-import { validatePolicy } from './desktop-policy.js';
+import { validatePolicy, requiresConfirmation } from './desktop-policy.js';
 
 const MAP: Record<string, string> = { status: 'health_report', list_apps: 'list_apps', list_windows: 'list_windows', observe_window: 'get_window_state', click: 'click', type_text: 'type_text', press_key: 'press_key', scroll: 'scroll' };
 
-// Product truth: no confirmation gate exists — requiresConfirmation() in
-// desktop-policy.ts returns false for every action, including mutations.
-// Operators are warned via the desktop promptGuidelines (AX trees may expose
-// PII/credentials). Adding a confirmation gate is a product decision, not taken here.
+// Confirmation tiers: type_text/press_key (free-text injection) require
+// explicit human confirmation through DesktopService's injected callback;
+// scroll/click stay ungated. Operators are additionally warned via the
+// desktop promptGuidelines (AX trees may expose PII/credentials).
 export function sanitizeDesktopErrorMessage(message: string): string {
   return message
     .replace(/Proxy-Authorization\s*[:=]\s*[^,\s}"']+/gi, 'Proxy-Authorization: ***')
@@ -31,9 +31,12 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 export class DesktopService {
   readonly observations = new ObservationStore(); private used = false;
-  constructor(private readonly client: CuaClient = new CuaClient(), private readonly env: Record<string, string | undefined> = process.env) {}
-  async execute(raw: Record<string, unknown>, signal?: AbortSignal): Promise<DesktopResult & { content?: unknown[] }> {
-    const request = validatePolicy(raw, this.env); this.used = true;
+  constructor(private readonly client: CuaClient = new CuaClient(), private readonly env: Record<string, string | undefined> = process.env, private readonly confirm?: (request: DesktopRequest) => Promise<boolean>) {}
+  async execute(raw: Record<string, unknown>, signal?: AbortSignal, confirm?: (request: DesktopRequest) => Promise<boolean>): Promise<DesktopResult & { content?: unknown[] }> {
+    const request = validatePolicy(raw, this.env);
+    const confirmation = confirm ?? this.confirm;
+    if (requiresConfirmation(request) && (!confirmation || !(await confirmation(request)))) throw new Error('CONFIRMATION_REQUIRED: type_text/press_key require explicit human confirmation in TUI');
+    this.used = true;
     const pid = request.pid ?? 0; const windowId = request.windowId ?? '';
     if (isMutation(request.action)) { if (!request.pid || !request.windowId || !request.stateId) throw new Error('STALE_OBSERVATION: mutation requires target and state'); const coordinate = request.x !== undefined || request.y !== undefined || request.deltaX !== undefined || request.deltaY !== undefined; const stored = this.observations.get(request.stateId!, request.pid, request.windowId, coordinate ? COORDINATE_MUTATION_FRESHNESS_MS : OBSERVATION_TTL_MS); await this.assertWindowFresh(request.pid, request.windowId, stored.fingerprint, stored.stateId, signal); }
     if (request.action === 'wait') return this.wait(request, signal);

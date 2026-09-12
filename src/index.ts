@@ -87,7 +87,7 @@ const graphSchemaViewEnum = ['types', 'fields', 'search', 'describe'] as const;
 export default function (pi: ExtensionAPI): void {
   const env = loadSearchMcpEnvironment(process.env, { allowLoginShellFallback: true });
   const client = createSearchBackend(env);
-  const desktop = desktopEnabled(env) ? new DesktopService(undefined, env) : undefined;
+  const desktop = desktopEnabled(env) ? new DesktopService(undefined, env, () => Promise.resolve(false)) : undefined;
   // Companion-lease renewal over the bridge (send-first: the adapter renews
   // the Pi-side lease only on companion ack). Best-effort; expiry surfaces
   // on status. The bridge server itself starts lazily on first /chrome use.
@@ -199,7 +199,7 @@ export default function (pi: ExtensionAPI): void {
   if (desktop) {
     pi.registerTool({
       name: 'desktop', label: 'Desktop',
-      description: 'Native desktop observation/interaction via manually installed Cua Driver (opt-in PI_SEARCH_DESKTOP_AUTOMATION=1). Use only for OS-window control fetch/browser cannot reach. Observe AX-only first; mutations need fresh stateId, never retried after dispatch. Closed actions; bounded AX/output; no confirmation gate; screenshots may expose PII.',
+      description: 'Native desktop observation/interaction via manually installed Cua Driver (opt-in PI_SEARCH_DESKTOP_AUTOMATION=1). Use only for OS-window control fetch/browser cannot reach. Observe AX-only first; mutations need fresh stateId, never retried after dispatch. Closed actions; bounded AX/output; type_text/press_key require explicit human TUI confirmation and fail closed headless; scroll/click ungated; screenshots may expose PII.',
       promptGuidelines: ['Use desktop to observe AX-only first; desktop screenshots may expose PII or credentials.', 'Desktop mutations require fresh stateId and are never retried after dispatch; OUTCOME_UNKNOWN needs fresh desktop observation.'],
       parameters: Type.Object({
         action: Type.Optional(StringEnum(DESKTOP_ACTIONS, { description: 'Closed desktop action to perform.' })),
@@ -216,7 +216,15 @@ export default function (pi: ExtensionAPI): void {
         deltaY: Type.Optional(Type.Number({ description: 'Vertical scroll delta.' })),
         timeoutMs: Type.Optional(Type.Number({ description: 'Wait budget, max 60000ms.' })),
       }),
-      async execute(_toolCallId, params, signal) { return await desktop.execute(params as Record<string, unknown>, signal) as never; },
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        return await desktop.execute(
+          params as Record<string, unknown>,
+          signal,
+          (request) => ctx?.hasUI
+            ? ctx.ui.confirm('Confirm desktop input?', `${request.action} on ${request.pid}:${request.windowId}`)
+            : Promise.resolve(false),
+        ) as never;
+      },
     });
   }
 }

@@ -77,6 +77,8 @@ export class ChromeProfileAuth {
   private expiresAt: number | null = null;
   private revokedReason: 'initial' | 'revoked' | 'expired' | 'shutdown' = 'initial';
   private grant: ChromeGrantRef | null = null;
+  /** Grant staged for a companion handshake: inactive until commitAuthorize(). */
+  private staged: ChromeGrantRef | null = null;
   private readonly now: () => number;
   private readonly randomId: () => string;
   private automationEnabled: boolean;
@@ -89,7 +91,10 @@ export class ChromeProfileAuth {
 
   setAutomationEnabled(enabled: boolean): void {
     this.automationEnabled = enabled;
-    if (!enabled) this.lockLocal('revoked');
+    if (!enabled) {
+      this.staged = null;
+      this.lockLocal('revoked');
+    }
   }
 
   isAutomationEnabled(): boolean {
@@ -116,28 +121,65 @@ export class ChromeProfileAuth {
   }
 
   /**
+   * Two-phase handshake: stage a grant (inactive: status() stays locked,
+   * canExecute()/currentGrant()/matchesGrant() all closed), then
+   * commitAuthorize() only after the companion authorize ack, or
+   * abortAuthorize() on failure. A concurrent execute() during staging
+   * observes locked and sends zero commands.
+   */
+  stageAuthorize(ttlMs: number | null, confirmed: boolean): ChromeGrantRef {
+    if (this.staged !== null) throw new Error('chrome_locked: authorization already in progress');
+    const grant = this.buildGrant(ttlMs, confirmed);
+    this.staged = grant;
+    return { ...grant };
+  }
+
+  /** Activate the staged grant. Throws chrome_revoked when nothing staged
+   *  (e.g. a revoke/shutdown raced the handshake and discarded it). */
+  commitAuthorize(): ChromeGrantRef {
+    const staged = this.staged;
+    if (staged === null) throw new Error('chrome_revoked: authorization superseded');
+    this.staged = null;
+    staged.leaseExpiresAt = this.now() + CHROME_LEASE_MAX_MS;
+    this.grant = staged;
+    this.expiresAt = staged.expiresAt;
+    this.revokedReason = 'initial';
+    return { ...staged };
+  }
+
+  /** Discard the staged grant; live grant (if any) untouched. */
+  abortAuthorize(): void {
+    this.staged = null;
+  }
+
+  /**
    * Authorize a new grant. Requires confirmed=true (ctx.ui.confirm).
-   * Failed handshake must leave state locked: callers create the grant via
-   * this method only after the companion authorize ack.
+   * Prefer stageAuthorize/commitAuthorize for bridged handshakes so the
+   * grant goes live only after the companion authorize ack; this immediate
+   * form is for local-only callers with no bridge round-trip.
    */
   authorize(ttlMs: number | null, confirmed: boolean): ChromeGrantRef {
+    const grant = this.buildGrant(ttlMs, confirmed);
+    this.grant = grant;
+    this.expiresAt = grant.expiresAt;
+    this.revokedReason = 'initial';
+    return { ...grant };
+  }
+
+  private buildGrant(ttlMs: number | null, confirmed: boolean): ChromeGrantRef {
     if (!this.automationEnabled) throw new Error('chrome_locked: browser automation is disabled');
     if (!confirmed) throw new Error('chrome_locked: authorization requires confirmation');
     if (ttlMs !== null && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
       throw new Error('chrome_locked: invalid TTL');
     }
     const now = this.now();
-    const grant: ChromeGrantRef = {
+    return {
       sessionKey: this.randomId(),
       grantId: this.randomId(),
       nonce: this.randomId(),
       expiresAt: ttlMs === null ? null : now + ttlMs,
       leaseExpiresAt: now + CHROME_LEASE_MAX_MS,
     };
-    this.grant = grant;
-    this.expiresAt = grant.expiresAt;
-    this.revokedReason = 'initial';
-    return { ...grant };
   }
 
   /** Dual-grant check: both sessionKey and grantId must match the live grant. */
@@ -201,6 +243,7 @@ export class ChromeProfileAuth {
 
   private lockLocal(reason: 'revoked' | 'expired' | 'shutdown' | 'initial'): void {
     this.grant = null;
+    this.staged = null;
     this.expiresAt = null;
     this.revokedReason = reason === 'initial' ? 'initial' : reason;
   }

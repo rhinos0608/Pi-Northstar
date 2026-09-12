@@ -14,12 +14,15 @@ test('assertAllowedAction: rejects unknown actions', () => {
   assert.throws(() => assertAllowedAction('eval'), /ACTION_DENIED/);
 });
 
-test('requiresConfirmation: always returns false (current impl)', () => {
-  // requiresConfirmation currently returns false unconditionally
+test('requiresConfirmation: gates free-text injection (type_text/press_key)', () => {
+  // Action-shape tiers: content tiers deliberately absent (text/key secret-handled).
   assert.equal(requiresConfirmation('click'), false);
-  assert.equal(requiresConfirmation('type_text'), false);
   assert.equal(requiresConfirmation('scroll'), false);
+  assert.equal(requiresConfirmation('type_text'), true);
+  assert.equal(requiresConfirmation('press_key'), true);
   assert.equal(requiresConfirmation('status'), false);
+  assert.equal(requiresConfirmation({ action: 'type_text' }), true);
+  assert.equal(requiresConfirmation({ action: 'click' }), false);
 });
 
 test('requiresConfirmation: returns false for non-mutations', () => {
@@ -133,9 +136,22 @@ test('DENIED_DESKTOP_ACTIONS: contains upstream-only tools', () => {
   assert.ok(!(DENIED_DESKTOP_ACTIONS as readonly string[]).includes('status'));
 });
 
-test('requiresConfirmation: no gate by product decision (PII covered by promptGuidelines)', () => {
-  // Mutations run without a confirmation gate; adding one needs product approval.
-  for (const a of ['status','list_apps','list_windows','observe_window','wait','click','type_text','press_key','scroll'] as const) assert.equal(requiresConfirmation(a), false);
+test('requiresConfirmation: tiers across all actions', () => {
+  const gated = ['type_text','press_key'] as const;
+  const ungated = ['status','list_apps','list_windows','observe_window','wait','click','scroll'] as const;
+  for (const a of gated) assert.equal(requiresConfirmation(a), true, a);
+  for (const a of ungated) assert.equal(requiresConfirmation(a), false, a);
+});
+test('validatePolicy: gated actions defer human confirmation to service', () => {
+  const env = { PI_SEARCH_DESKTOP_AUTOMATION: '1' };
+  const typeText = validatePolicy({ action: 'type_text', stateId: 's1', text: 'hi' }, env);
+  assert.equal(typeText.action, 'type_text');
+  const pressKey = validatePolicy({ action: 'press_key', stateId: 's1', key: 'Enter' }, env);
+  assert.equal(pressKey.action, 'press_key');
+  assert.throws(() => validatePolicy({ action: 'type_text', stateId: 's1', text: 'hi', confirmed: true }, env), /unknown field confirmed/);
+  // Ungated mutations unaffected.
+  const click = validatePolicy({ action: 'click', stateId: 's1' }, env);
+  assert.equal(click.action, 'click');
 });
 test('validatePolicy: rejects oversized ids, predicate text, and out-of-range coords', () => {
   const env = { PI_SEARCH_DESKTOP_AUTOMATION: '1' };

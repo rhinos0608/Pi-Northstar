@@ -111,15 +111,32 @@ test('revoke/shutdown/kill-switch purge typed values', async () => {
   assert.equal(typedMemoryOf(third.controller.adapter).length, 0);
 });
 
-test('failed authorize purges typed values and stays locked', async () => {
+test('failed authorize purges staged grant and stays locked', async () => {
+  const bridge = fakeBridge((command) => okData({}, command.id));
+  const controller = createUserChromeController({
+    bridge,
+    targetInstanceId: 'inst-test-001',
+    bridgeToken: 'tok-test-session',
+    now: fakeClock().now,
+    randomId: ids(),
+    dnsLookup: publicDns(),
+  });
+  bridge.fail = new ChromeBridgeError('chrome_extension_unavailable', 'bridge down', true, 503);
+  const result = await controller.adapter.authorize(15 * 60 * 1000, true, 'inst-test-001');
+  assert.equal((detailsOf(result)['chromeError'] as { code: string }).code, 'chrome_extension_unavailable');
+  assert.equal(controller.adapter.status().state, 'locked');
+  assert.equal(controller.auth.currentGrant(), null);
+});
+test('failed re-authorize preserves the live grant (no downgrade)', async () => {
   const { controller, bridge } = await authorizedController();
   await controller.adapter.execute({ action: 'type', selector: '@e1', text: 'typed-before-failure' });
   assert.ok(typedMemoryOf(controller.adapter).length > 0);
   bridge.fail = new ChromeBridgeError('chrome_extension_unavailable', 'bridge down', true, 503);
   const result = await controller.adapter.authorize(15 * 60 * 1000, true, 'inst-test-001');
   assert.equal((detailsOf(result)['chromeError'] as { code: string }).code, 'chrome_extension_unavailable');
-  assert.equal(controller.adapter.status().state, 'locked');
-  assert.equal(typedMemoryOf(controller.adapter).length, 0);
+  // Staged grant discarded; live grant + typed memory untouched.
+  assert.equal(controller.adapter.status().state, 'authorized');
+  assert.ok(typedMemoryOf(controller.adapter).length > 0);
 });
 
 test('renewLease sends renew first; bridge failure keeps local lease', async () => {

@@ -1,0 +1,3 @@
+# Normalize line endings: tests compare text output, CRLF on Windows
+# checkouts would break string assertions. LF everywhere.
+* text=auto eol=lf

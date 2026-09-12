@@ -769,7 +769,7 @@ Permissions are user-owned and persist across sessions. Session shutdown cannot 
 - Observation is AX-only by default; screenshots require explicit opt-in
 - Screenshots and AX trees can expose sensitive information — only use with trusted applications
 - Mutations are serialized per window; transport loss is not retried
-- No confirmation gate: requiresConfirmation() always returns false; PII/screenshot warnings are advisory only — operator must close sensitive apps
+- Confirmation tiers: type_text/press_key require explicit human confirmation in TUI and fail closed headless; scroll/click ungated — operator must close sensitive apps
 - Redaction is applied to output (passwords, tokens, paths removed before AI sees them)
 
 ## Package contract
