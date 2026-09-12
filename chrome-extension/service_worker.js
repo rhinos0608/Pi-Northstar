@@ -24,6 +24,7 @@
   var POLL_MS = 25_000;
   var INSTANCE_KEY = 'atlasInstance';
   var OWNED_KEY = 'atlasOwnedTab';
+  var RULEBASE_KEY = 'atlasRuleBase';
   var COMMAND_TIMEOUT_MS = 25_000;
   // Shared effective maximum for waitMs (mirrors CHROME_PROFILE_WAIT_MAX_MS
   // in src/chrome-profile-contract.ts). Keep in sync; a wait must fit inside
@@ -123,11 +124,52 @@
   }
 
   /** Collision-free DNR base per owned tab (two consecutive ids: deny+allow).
-   * Distinct tabs map to distinct bases; same tab reuses its base so reinstall
-   * overwrites instead of leaking. Stays inside the dynamic-rule id range. */
+   * Monotonic counter with a tabId map: distinct tabs get distinct bases
+   * (modulo hashing collides, e.g. tab 11 vs 2011); same tab reuses its
+   * base so reinstall overwrites instead of leaking. */
+  var ruleBaseNext = 1000;
+  var ruleBaseByTab = {};
+  /** Best-effort persist of DNR base allocation so a restart reuses bases
+   * instead of colliding with live dynamic rules. */
+  function persistRuleBase(chrome) {
+    try {
+      if (chrome && chrome.storage && chrome.storage.session && typeof chrome.storage.session.set === 'function') {
+        var put = {};
+        put[RULEBASE_KEY] = { next: ruleBaseNext, byTab: ruleBaseByTab };
+        var p = chrome.storage.session.set(put);
+        if (p && typeof p.catch === 'function') p.catch(function () {});
+      }
+    } catch (e) {}
+  }
+  /** Restore DNR base allocation on startup; malformed entries fail closed
+   * to the compiled default. */
+  async function restoreRuleBase(chrome) {
+    try {
+      if (!chrome || !chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== 'function') return;
+      var got = await chrome.storage.session.get(RULEBASE_KEY);
+      var cur = got && got[RULEBASE_KEY];
+      if (!cur || typeof cur.next !== 'number' || !Number.isFinite(cur.next)) return;
+      if (!cur.byTab || typeof cur.byTab !== 'object' || Array.isArray(cur.byTab)) return;
+      var next = Math.trunc(cur.next);
+      if (next < 1000) return;
+      var map = {};
+      for (var k in cur.byTab) {
+        if (!Object.prototype.hasOwnProperty.call(cur.byTab, k)) continue;
+        var v = cur.byTab[k];
+        if (typeof v === 'number' && Number.isFinite(v)) map[k] = Math.trunc(v);
+      }
+      ruleBaseNext = next;
+      ruleBaseByTab = map;
+    } catch (e) {}
+  }
   function ruleBaseForTab(tabId) {
-    var n = typeof tabId === 'number' && Number.isFinite(tabId) ? Math.abs(Math.trunc(tabId)) : 0;
-    return 1000 + ((n % 2000) * 2);
+    var key = typeof tabId === 'number' && Number.isFinite(tabId) ? String(Math.trunc(tabId)) : '0';
+    if (Object.prototype.hasOwnProperty.call(ruleBaseByTab, key)) return ruleBaseByTab[key];
+    var base = ruleBaseNext;
+    ruleBaseNext += 2;
+    ruleBaseByTab[key] = base;
+    persistRuleBase(globalThis.chrome);
+    return base;
   }
 
   function navData() {
@@ -181,7 +223,7 @@
   /** Pair the bridge session token via origin-pinned POST /register.
    *  Best-effort: pollLoop retries while unpaired; commands fail closed
    *  against a foreign token once paired. Never logged. */
-  async function registerCompanion(fetchImpl, chrome, inst) {
+  async function registerCompanion(fetchImpl, chrome, inst, opts) {
     state.lastRegisterAttempt = now();
     var record = inst || null;
     try {
@@ -192,10 +234,31 @@
       record = null;
     }
     if (record === null) return null;
+    var timeoutMs = opts && typeof opts.timeoutMs === 'number' && Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 10_000;
+    var outerSignal = opts && opts.signal ? opts.signal : null;
+    var ctrl = null;
+    var timer = null;
+    var onOuterAbort = null;
+    try {
+      if (typeof AbortController !== 'undefined') {
+        ctrl = new AbortController();
+        if (outerSignal) {
+          if (outerSignal.aborted === true) ctrl.abort();
+          else if (typeof outerSignal.addEventListener === 'function') {
+            onOuterAbort = function () { try { ctrl.abort(); } catch (e) {} };
+            outerSignal.addEventListener('abort', onOuterAbort, { once: true });
+          }
+        }
+        timer = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, timeoutMs);
+      }
+    } catch (e) {
+      ctrl = null;
+    }
     try {
       var res = await fetchImpl(registerUrl(), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        signal: ctrl ? ctrl.signal : (outerSignal || undefined),
         body: JSON.stringify({
           instanceId: record.instanceId,
           family: record.family,
@@ -212,6 +275,13 @@
       return null;
     } catch (e) {
       return null;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      try {
+        if (outerSignal && onOuterAbort && typeof outerSignal.removeEventListener === 'function') {
+          outerSignal.removeEventListener('abort', onOuterAbort);
+        }
+      } catch (e) {}
     }
   }
 
@@ -260,8 +330,9 @@
   }
 
   function grantMatches(cmd) {
+    if (state.grant === null || !cmd) return false;
+    if (!isNonEmptyString(cmd.sessionKey) || !isNonEmptyString(cmd.grantId)) return false;
     return (
-      state.grant !== null &&
       cmd.sessionKey === state.grant.sessionKey &&
       cmd.grantId === state.grant.grantId
     );
@@ -390,7 +461,9 @@
     }
     state.owned = { tabId: tab.id, frozenHostname: frozenHostname, sessionKey: sessionKey, grantId: grantId };
     try {
-      await chrome.storage.session.set({ atlasOwnedTab: state.owned });
+      var ownedPut = {};
+      ownedPut[OWNED_KEY] = state.owned;
+      await chrome.storage.session.set(ownedPut);
     } catch (e) {
       // storage best-effort; ownership lives in memory regardless.
     }
@@ -523,7 +596,7 @@
       await removeDnrRules(chrome, [ruleBase, ruleBase + 1]);
       state.owned = null;
       try {
-        await chrome.storage.session.remove('atlasOwnedTab');
+        await chrome.storage.session.remove(OWNED_KEY);
       } catch (e) {}
       return { closed: true };
     }
@@ -551,12 +624,15 @@
     tabId = state.owned.tabId;
     switch (op.kind) {
       case 'snapshot': {
-        var injected = await chrome.scripting.executeScript({
-          target: { tabId: tabId },
-          world: 'ISOLATED',
-          files: ['snapshot_injected.js'],
-        }).catch(function () { return null; });
-        void injected;
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            world: 'ISOLATED',
+            files: ['snapshot_injected.js'],
+          });
+        } catch (e) {
+          throw new Error('chrome_invalid_result: snapshot injector failed: ' + String((e && e.message) || e).slice(0, 200));
+        }
         var results = await chrome.scripting.executeScript({
           target: { tabId: tabId },
           world: 'ISOLATED',
@@ -740,7 +816,7 @@
         await removeAllowRules(chrome, base);
       }
       try {
-        await chrome.storage.session.remove('atlasOwnedTab');
+        await chrome.storage.session.remove(OWNED_KEY);
       } catch (e) {}
     }
   }
@@ -750,7 +826,7 @@
   }
 
   function errorEnvelope(cmdOrId, e) {
-    var id = typeof cmdOrId === 'string' ? cmdOrId : cmdOrId.id;
+    var id = typeof cmdOrId === 'string' ? cmdOrId : (cmdOrId && typeof cmdOrId.id === 'string' && cmdOrId.id ? cmdOrId.id : 'unknown');
     var message = String((e && e.message) || e || 'failed');
     var code = 'chrome_invalid_result';
     var m = /^([a-z_]+):/.exec(message);
@@ -830,14 +906,33 @@
         // Pair the session token before polling so routed commands verify.
         // Re-pair when unpaired or the last attempt is stale: a bridge restart
         // rotates the session token and orphans a token-paired companion.
-        if ((state.bridgeToken === null || now() - state.lastRegisterAttempt > REGISTER_RETRY_MS) && typeof fetch === 'function') {
-          try { await registerCompanion(fetchImpl, chrome, inst); } catch (e) {}
+        if ((state.bridgeToken === null || now() - state.lastRegisterAttempt > REGISTER_RETRY_MS) && typeof fetchImpl === 'function') {
+          try { await registerCompanion(fetchImpl, chrome, inst, { signal: deps.signal }); } catch (e) {}
         }
         try {
-          var res = await fetchImpl(buildNextUrl(COMMAND_TIMEOUT_MS, inst), {
-            method: 'GET',
-            signal: deps.signal,
-          });
+          var pollCtrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+          var pollTimer = null;
+          var pollOnAbort = null;
+          if (pollCtrl) {
+            if (deps.signal && deps.signal.aborted === true) pollCtrl.abort();
+            else {
+              pollTimer = setTimeout(function () { try { pollCtrl.abort(); } catch (e) {} }, COMMAND_TIMEOUT_MS + 5000);
+              if (deps.signal && typeof deps.signal.addEventListener === 'function') {
+                pollOnAbort = function () { try { pollCtrl.abort(); } catch (e) {} };
+                deps.signal.addEventListener('abort', pollOnAbort, { once: true });
+              }
+            }
+          }
+          var res;
+          try {
+            res = await fetchImpl(buildNextUrl(COMMAND_TIMEOUT_MS, inst), {
+              method: 'GET',
+              signal: pollCtrl ? pollCtrl.signal : deps.signal,
+            });
+          } finally {
+            if (pollTimer !== null) clearTimeout(pollTimer);
+            if (deps.signal && pollOnAbort && typeof deps.signal.removeEventListener === 'function') deps.signal.removeEventListener('abort', pollOnAbort);
+          }
           if (res.status === 204) {
             next = null;
           } else if (!res.ok) {
@@ -954,9 +1049,13 @@
     revokeLocal: revokeLocal,
     removeDnrRules: removeDnrRules,
     ruleBaseForTab: ruleBaseForTab,
+    persistRuleBase: persistRuleBase,
+    restoreRuleBase: restoreRuleBase,
+    RULEBASE_KEY: RULEBASE_KEY,
     normalizeVersion: normalizeVersion,
     ownExtensionId: ownExtensionId,
     INSTANCE_KEY: INSTANCE_KEY,
+    OWNED_KEY: OWNED_KEY,
     POLL_MS: POLL_MS,
     COMMAND_TIMEOUT_MS: COMMAND_TIMEOUT_MS,
     WAIT_MAX_MS: WAIT_MAX_MS,
@@ -978,6 +1077,8 @@
       state.polling = false;
       state.bridgeToken = null;
       state.lastRegisterAttempt = 0;
+      ruleBaseNext = 1000;
+      ruleBaseByTab = {};
     },
   };
 
@@ -1004,11 +1105,12 @@
         // Ephemeral session state only (cleared on browser/extension restart).
         try {
           if (c.storage && c.storage.session && typeof c.storage.session.get === 'function') {
-            c.storage.session.get('atlasOwnedTab').then(function (v) {
-              if (v && v.atlasOwnedTab && typeof v.atlasOwnedTab.tabId === 'number') {
-                state.owned = v.atlasOwnedTab;
+            c.storage.session.get(OWNED_KEY).then(function (v) {
+              if (v && v[OWNED_KEY] && typeof v[OWNED_KEY].tabId === 'number') {
+                state.owned = v[OWNED_KEY];
               }
             }).catch(function () {});
+            restoreRuleBase(c).catch(function () {});
           }
         } catch (e) {}
         try { startPolling(c); } catch (e) {}
@@ -1017,6 +1119,7 @@
     if (c && c.runtime && c.runtime.onStartup && typeof c.runtime.onStartup.addListener === 'function') {
       c.runtime.onStartup.addListener(function () {
         // storage.session is empty after restart: poll loop registers a fresh ephemeral instance.
+        try { restoreRuleBase(c).catch(function () {}); } catch (e) {}
         try { startPolling(c); } catch (e) {}
       });
     }

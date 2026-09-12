@@ -27,7 +27,6 @@ function loadCompanion(chromeMock: Record<string, unknown>) {
     chrome: chromeMock,
   };
   sandbox.globalThis = sandbox;
-  sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(swSrc, sandbox, { filename: 'service_worker.js' });
   const companion = sandbox.__atlasCompanion as Record<string, (...args: never[]) => unknown> & {
@@ -159,7 +158,7 @@ test('snapshot_injected: redacts form values, assigns @e refs, bounds output', (
 
 test('fixture page carries secrets the injected script must redact', () => {
   const html = readFileSync(join(root, 'test', 'fixtures', 'chrome-profile-extension-page.html'), 'utf8');
-  assert.ok(html.includes('S3cr3tP@ssw0rd!'), 'fixture has typed-secret sentinel');
+  assert.ok(html.includes('S3cr3tP@ssw0rd'), 'fixture has typed-secret sentinel');
   assert.ok(html.includes('csrf-token-abc123'));
   assert.ok(html.includes('<input'), 'fixture has form fields');
   // Run the real collector against fixture-modeled DOM: secrets redacted at source.
@@ -174,8 +173,8 @@ test('fixture page carries secrets the injected script must redact', () => {
   const elements = [
     { tagName: 'A', ...attrsOf({}), innerText: 'Docs', textContent: 'Docs' },
     { tagName: 'BUTTON', ...attrsOf({ 'aria-label': 'Continue' }), innerText: 'Continue', textContent: 'Continue' },
-    { tagName: 'INPUT', ...attrsOf({ type: 'text', name: 'username' }), innerText: '', textContent: '' },
-    { tagName: 'INPUT', ...attrsOf({ type: 'password', name: 'password' }), innerText: '', textContent: '' },
+    { tagName: 'INPUT', ...attrsOf({ type: 'text', name: 'username', value: 'alice@example.com' }), value: 'alice@example.com', innerText: '', textContent: '' },
+    { tagName: 'INPUT', ...attrsOf({ type: 'password', name: 'password', value: 'S3cr3tP@ssw0rd' }), value: 'S3cr3tP@ssw0rd', innerText: '', textContent: '' },
     { tagName: 'INPUT', ...attrsOf({ type: 'hidden', name: 'csrf' }), innerText: '', textContent: '' },
     { tagName: 'TEXTAREA', ...attrsOf({ name: 'notes' }), innerText: 'typed secret notes', textContent: 'typed secret notes' },
     { tagName: 'SELECT', ...attrsOf({ name: 'role' }), innerText: 'Admin', textContent: 'Admin' },
@@ -184,7 +183,8 @@ test('fixture page carries secrets the injected script must redact', () => {
   sandbox.document = { title: 'Atlas Companion Fixture', querySelectorAll: () => elements };
   vm.runInContext(snapshotSrc + '\nglobalThis.__atlasFixtureResult = globalThis.__atlasSnapshot(true);', sandbox);
   const out = String(sandbox.__atlasFixtureResult);
-  assert.equal(out.includes('S3cr3tP@ssw0rd!'), false, 'typed password value never echoed');
+  assert.equal(out.includes('S3cr3tP@ssw0rd'), false, 'typed password value never echoed');
+  assert.equal(out.includes('alice@example.com'), false, 'username value never echoed');
   assert.equal(out.includes('csrf-token-abc123'), false, 'csrf value never echoed');
   assert.ok(out.includes('[redacted]'), 'form values redacted at source');
   assert.equal((out.match(/value=\[redacted\]/g) ?? []).length, 4, 'username/password/textarea/select redacted, hidden input skipped');

@@ -7,6 +7,7 @@
   "background": {
     "service_worker": "service_worker.js"
   },
+  "_note_debugger": "debugger drives CDP ops (screenshot, click, type, fill, select, scroll, wait, semantic_action); chrome.scripting covers snapshot/text only and cannot issue CDP Input/DOM/Page commands.",
   "permissions": [
     "tabs",
     "scripting",

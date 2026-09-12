@@ -87,21 +87,25 @@
     var count = 0;
     for (var i = 0; i < list.length; i++) {
       if (count >= MAX_NODES) break;
-      var el = list[i];
-      if (!isVisible(el)) continue;
-      ref += 1;
-      count += 1;
-      var role = roleOf(el);
-      var label = labelOf(el);
-      // Form values are never echoed: value always redacted for value-bearing nodes.
-      var tag = (el.tagName || '').toLowerCase();
-      var suffix = '';
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
-        suffix = ' value=' + REDACTED;
+      try {
+        var el = list[i];
+        if (!isVisible(el)) continue;
+        ref += 1;
+        count += 1;
+        var role = roleOf(el);
+        var label = labelOf(el);
+        // Form values are never echoed: value always redacted for value-bearing nodes.
+        var tag = (el.tagName || '').toLowerCase();
+        var suffix = '';
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+          suffix = ' value=' + REDACTED;
+        }
+        var line = '@e' + ref + ' ' + role + (label ? ' ' + JSON.stringify(label) : '') + suffix;
+        lines.push(line);
+        if (compact && count >= 80) break;
+      } catch (e) {
+        continue;
       }
-      var line = '@e' + ref + ' ' + role + (label ? ' ' + JSON.stringify(label) : '') + suffix;
-      lines.push(line);
-      if (compact && count >= 80) break;
     }
     var title = '';
     try {
