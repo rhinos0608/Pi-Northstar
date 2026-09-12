@@ -32,6 +32,9 @@ import {
   type SocialPlatformWorker,
   type SocialPostV1,
 } from '../src/social-contract.js';
+import * as facade from '../src/social-contract.js';
+import * as socialCore from '../src/social-core.js';
+import * as socialEntityContract from '../src/social-entity-contract.js';
 
 function socialError(code: string, run: () => unknown): SocialError {
   try {
@@ -674,5 +677,68 @@ test('entity kinds and platforms are disjoint closed sets', () => {
   assert.equal(SOCIAL_PLATFORMS.length, 7);
   for (const kind of SOCIAL_ENTITY_KINDS) {
     assert.ok(!SOCIAL_PLATFORMS.includes(kind as never));
+  }
+});
+// ── Seam4 split: vocabulary/error in social-core, entities in social-entity-contract ──
+
+test('social-core owns vocabulary, capability registry, and error contract', () => {
+  assert.equal(socialCore.SOCIAL_PLATFORMS, SOCIAL_PLATFORMS);
+  assert.equal(socialCore.SOCIAL_ACTIONS, SOCIAL_ACTIONS);
+  assert.equal(socialCore.SOCIAL_ENTITY_KINDS, SOCIAL_ENTITY_KINDS);
+  assert.equal(socialCore.SOCIAL_CANONICAL_ACTIONS, SOCIAL_CANONICAL_ACTIONS);
+  assert.equal(socialCore.SocialError, SocialError);
+  assert.equal(socialCore.isSocialPlatform, facade.isSocialPlatform);
+  assert.equal(socialCore.isSocialAction, facade.isSocialAction);
+  assert.equal(socialCore.canonicalActionsFor, canonicalActionsFor);
+  assert.equal(socialCore.isAdvertisedAction, isAdvertisedAction);
+  assert.equal(socialCore.resolveSocialAction, resolveSocialAction);
+});
+
+test('social-entity-contract owns entity types, validators, and rendering', () => {
+  assert.equal(socialEntityContract.validateSocialEntity, validateSocialEntity);
+  assert.equal(socialEntityContract.validateSocialPage, validateSocialPage);
+  assert.equal(socialEntityContract.renderSocialEntity, renderSocialEntity);
+  assert.equal(socialEntityContract.renderSocialPage, renderSocialPage);
+  assert.equal(socialEntityContract.socialEntityId, socialEntityId);
+  assert.equal(socialEntityContract.parseSocialDate, parseSocialDate);
+});
+
+test('facade re-exports the full 63-export surface without drift', () => {
+  const coreOwned: readonly (keyof typeof facade)[] = [
+    'SOCIAL_PLATFORMS', 'SOCIAL_ACTIONS', 'SOCIAL_ENTITY_KINDS', 'SOCIAL_CANONICAL_ACTIONS',
+    'SocialError', 'isSocialPlatform', 'isSocialAction', 'canonicalActionsFor',
+    'isAdvertisedAction', 'resolveSocialAction',
+  ];
+  for (const name of coreOwned) {
+    assert.equal(
+      (facade as Record<string, unknown>)[name],
+      (socialCore as Record<string, unknown>)[name],
+      `facade.${name} drifts from social-core`,
+    );
+  }
+  const entityOwned: readonly (keyof typeof facade)[] = [
+    'validateSocialEntity', 'validateSocialPage', 'renderSocialEntity', 'renderSocialPage',
+    'socialEntityId', 'parseSocialDate',
+  ];
+  for (const name of entityOwned) {
+    assert.equal(
+      (facade as Record<string, unknown>)[name],
+      (socialEntityContract as Record<string, unknown>)[name],
+      `facade.${name} drifts from social-entity-contract`,
+    );
+  }
+  // 27 runtime values: 7 consts + 19 functions + SocialError.
+  const runtimeNames = [
+    'DEFAULT_SOCIAL_LIMIT', 'SOCIAL_ACTIONS', 'SOCIAL_CANONICAL_ACTIONS', 'SOCIAL_ENTITY_KINDS',
+    'SOCIAL_MAX_CURSOR_LENGTH', 'SOCIAL_MAX_LIMIT', 'SOCIAL_PLATFORMS',
+    'SocialError', 'backendSupportsAction', 'canonicalActionsFor', 'decodeSocialCursor',
+    'encodeSocialCursor', 'extractSelectorsFromUrl', 'isAdvertisedAction', 'isSocialAction',
+    'isSocialPlatform', 'parseSocialDate', 'renderSocialEntity', 'renderSocialPage',
+    'resolveSocialAction', 'resolveSocialLimit', 'selectorSpecFor', 'socialCursorFingerprint',
+    'socialEntityId', 'validateSocialEntity', 'validateSocialPage', 'validateSocialRequest',
+  ];
+  assert.equal(Object.keys(facade).length, runtimeNames.length);
+  for (const name of runtimeNames) {
+    assert.ok(name in facade, `facade missing runtime export ${name}`);
   }
 });
