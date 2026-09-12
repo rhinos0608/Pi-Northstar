@@ -11,30 +11,7 @@ import {
 const SENTINEL = 'jina-sentinel-key-abc123';
 const ENV = { JINA_API_KEY: SENTINEL } as Record<string, string | undefined>;
 
-interface CapturedCall {
-  url: string;
-  init: RequestInit;
-}
-
-function mockFetch(handler: (url: string, init: RequestInit) => Response | Promise<Response>): {
-  calls: CapturedCall[];
-  restore: () => void;
-} {
-  const calls: CapturedCall[] = [];
-  const original = globalThis.fetch;
-  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-    calls.push({ url: String(url), init: init ?? {} });
-    return handler(String(url), init ?? {});
-  }) as typeof fetch;
-  return { calls, restore: () => { globalThis.fetch = original; } };
-}
-
-function jsonResponse(payload: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { 'content-type': 'application/json', ...extraHeaders },
-  });
-}
+import { jsonResponse, mockFetch } from './web-provider-test-utils.js';
 
 function searchRow(i: number): Record<string, unknown> {
   return {
