@@ -197,7 +197,7 @@ async function runSingleQuery(
   const settled = await Promise.all(
     selection.runnable.map(async (adapter) => {
       try {
-        return { ok: true as const, response: await adapter.search(adapterRequest, options.env) };
+        return { ok: true as const, response: await adapter.search({ ...adapterRequest, ...(adapterRequest.domainFilter ? { domainFilter: [...adapterRequest.domainFilter] } : {}) }, options.env) };
       } catch (error) {
         // Cancellation is never a provider failure: rethrow so callers
         // observe the abort instead of a synthetic upstream_error entry.

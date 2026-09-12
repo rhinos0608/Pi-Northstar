@@ -116,7 +116,7 @@ export function buildWebAccessErrorPlan(
     for (const line of extras.slice(0, 2)) collapsed.push(truncatePlanText(line, 100));
   }
 
-  const hiddenLines = Math.max(0, expanded.length - (1 + collapsed.length));
+  const hiddenLines = Math.max(0, expanded.length - 1 - collapsed.length);
   const expandHint =
     hiddenLines > 0 ? `... (${hiddenLines} more lines, ${expanded.length} total, ctrl+o to expand)` : null;
 

@@ -90,12 +90,29 @@ function redditOAuthConfigured(env: Record<string, string | undefined>): boolean
   return Boolean(env.REDDIT_CLIENT_ID?.trim() && env.REDDIT_CLIENT_SECRET?.trim() && env.REDDIT_USER_AGENT?.trim());
 }
 
+/** Bright Data needs key + zone; key alone must not count as configured. */
+function brightdataConfigured(env: Record<string, string | undefined>): boolean {
+  return Boolean(env.BRIGHTDATA_API_KEY?.trim() && env.BRIGHTDATA_SERP_ZONE?.trim());
+}
+
+/** Ollama search needs a base URL; API key alone must not count as configured. */
+function ollamaSearchConfigured(env: Record<string, string | undefined>): boolean {
+  return Boolean(env.OLLAMA_SEARCH_BASE_URL?.trim() || env.SEARCH_OLLAMA_BASE_URL?.trim());
+}
+
+function providerConfigured(provider: string, desc: { envKeys: string[]; loginFlow: string }, env: Record<string, string | undefined>): boolean {
+  if (provider === 'reddit') return redditOAuthConfigured(env);
+  if (provider === 'brightdata') return brightdataConfigured(env);
+  if (provider === 'ollama-search') return ollamaSearchConfigured(env);
+  const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
+  return present.length > 0 || desc.loginFlow === 'none';
+}
+
 export function liveAuthSnapshot(env: Record<string, string | undefined>): Record<string, { configured: boolean; keyNames: string[] }> {
   const result: Record<string, { configured: boolean; keyNames: string[] }> = {};
   for (const desc of PROVIDER_DESCRIPTORS) {
     const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
-    let configured = present.length > 0 || desc.loginFlow === 'none';
-    if (desc.provider === 'reddit') configured = redditOAuthConfigured(env);
+    let configured = providerConfigured(desc.provider, desc, env);
     if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
     result[desc.provider] = { configured, keyNames: present };
   }
@@ -117,8 +134,7 @@ export function authForChannel(channelName: string, env: Record<string, string |
     ?? PROVIDER_DESCRIPTORS.find(d => d.channels?.includes(channelName));
   if (!desc) return undefined;
   const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
-  let configured = present.length > 0 || desc.loginFlow === 'none';
-  if (desc.provider === 'reddit') configured = redditOAuthConfigured(env);
+  let configured = providerConfigured(desc.provider, desc, env);
   if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
   return {
     configured,

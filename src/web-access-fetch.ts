@@ -16,6 +16,7 @@ import {
   type WebAccessPageReader,
 } from './web-access-contract.js';
 import { extractWebAccessPdfText, isPdfUrl, type WebAccessPdfExtractor } from './web-access-pdf.js';
+import { selectWebAccessReaderKind } from './web-access-specialization.js';
 
 export type WebAccessFetchMode = 'readable' | 'raw';
 
@@ -90,19 +91,20 @@ export async function fetchWebAccessContent(
       continue;
     }
     try {
-      const routed = await options.githubMediaReader?.read(url, options.signal);
+      const kind = selectWebAccessReaderKind(url);
+      const routed = (kind === 'github' || kind === 'media') ? await options.githubMediaReader?.read(url, options.signal) : undefined;
       if (routed) {
         const sliced = sliceContent(routed.content);
         out.push({ url, title: routed.title, content: sliced.content, mode, source: 'github-media', truncated: sliced.truncated });
         continue;
       }
-      const feed = await options.feedReader?.read(url, options.signal);
+      const feed = kind === 'feed' ? await options.feedReader?.read(url, options.signal) : undefined;
       if (feed) {
         const sliced = sliceContent(feed.content);
         out.push({ url, title: feed.title, content: sliced.content, mode, source: 'feed', truncated: sliced.truncated });
         continue;
       }
-      if (isPdfUrl(url) && options.fetchPdfBytes && options.pdfExtractor) {
+      if (kind === 'pdf' && isPdfUrl(url) && options.fetchPdfBytes && options.pdfExtractor) {
         const bytes = await options.fetchPdfBytes(url, options.signal);
         const pdf = await extractWebAccessPdfText(bytes, { extractor: options.pdfExtractor, signal: options.signal });
         const sliced = sliceContent(pdf.text);

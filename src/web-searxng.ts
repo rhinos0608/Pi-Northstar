@@ -13,6 +13,10 @@ import type {
   WebSearchHit,
 } from './web-search-types.js';
 
+function isHttpUrl(value: string): boolean {
+  try { const protocol = new URL(value).protocol; return protocol === 'http:' || protocol === 'https:'; } catch { return false; }
+}
+
 function stringField(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value : fallback;
 }
@@ -29,10 +33,10 @@ export const searxngSearchAdapter: WebSearchAdapter = {
     url.searchParams.set('q', input.query);
     url.searchParams.set('format', 'json');
     url.searchParams.set('safesearch', '1');
-    const data = (await unsafeFetchJson(url.href, { Accept: 'application/json' }, input.signal)) as {
-      results?: Array<Record<string, unknown>>;
-    };
-    const hits: WebSearchHit[] = (data.results ?? [])
+    const data = (await unsafeFetchJson(url.href, { Accept: 'application/json' }, input.signal)) as unknown;
+    if (typeof data !== 'object' || data === null || Array.isArray(data)) return { backend: 'searxng', hits: [], generatedText: [] };
+    const envelope = data as { results?: unknown };
+    const hits: WebSearchHit[] = (Array.isArray(envelope.results) ? envelope.results : [])
       .slice(0, input.limit)
       .map((result) => ({
         title: stringField(result.title, 'Untitled'),
@@ -40,7 +44,7 @@ export const searxngSearchAdapter: WebSearchAdapter = {
         snippet: stringField(result.content, ''),
         backend: 'searxng' as const,
       }))
-      .filter((hit) => hit.url);
+      .filter((hit) => hit.url && isHttpUrl(hit.url));
     return { backend: 'searxng', hits, generatedText: [] };
   },
 };

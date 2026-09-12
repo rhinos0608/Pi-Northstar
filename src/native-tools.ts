@@ -165,12 +165,13 @@ async function dispatchNativeTool(
               }, options);
               const body = resultToSingleText(chunked);
               out.push(`## ${single}\n${body}`);
-              cached.push({ title: single, url: single, snippet: body.slice(0, 500), content: body });
+              cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
             } else {
-              const singleResult = await agenticBrowse({ url: single, ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}) }, options);
+              const specialized = await dispatchSpecializedUrl(single, options);
+              const singleResult = specialized ?? await agenticBrowse({ url: single, ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}) }, options);
               const body = resultToSingleText(singleResult);
               out.push(body);
-              cached.push({ title: single, url: single, snippet: body.slice(0, 500), content: body });
+              cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
             }
           } catch (error) {
             out.push(`## ${single}\nError: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`);
@@ -188,20 +189,8 @@ async function dispatchNativeTool(
       // Every specialist fails closed to undefined so unsupported shapes
       // fall through to the page reader. No format/provider input exists.
       if (typeof args.url === 'string' && args.query === undefined && args.searchQuery === undefined) {
-        const kind = selectWebAccessReaderKind(args.url);
-        if (kind === 'pdf') {
-          const pdf = await tryLocalPdfFetch(args.url as string, options);
-          if (pdf) return pdf;
-        } else if (kind === 'github') {
-          const gh = await tryGithubUrlFetch(args.url as string, options);
-          if (gh) return gh;
-        } else if (kind === 'media') {
-          const media = await tryMediaUrlFetch(args.url as string, options);
-          if (media) return media;
-        } else if (kind === 'feed') {
-          const feed = await tryFeedUrlFetch(args.url as string, options);
-          if (feed) return feed;
-        }
+        const specialized = await dispatchSpecializedUrl(args.url, options);
+        if (specialized) return specialized;
       }
       // Contract-first routing: query-less fetch is read, fetch with a query
       // is crawl. resolveWebActionForTool validates before dispatch.
@@ -221,7 +210,7 @@ async function dispatchNativeTool(
         query: crawlLabel,
         title: crawlUrl,
         url: crawlUrl,
-        snippet: crawlBody.slice(0, 500),
+        snippet: snippetOf(crawlBody),
         content: crawlBody,
       }));
     }
@@ -244,6 +233,19 @@ async function dispatchNativeTool(
 
 
 
+
+function snippetOf(body: string): string {
+  return body.slice(0, 500);
+}
+
+async function dispatchSpecializedUrl(url: string, options: NativeToolOptions): Promise<BackendCallResult | undefined> {
+  const kind = selectWebAccessReaderKind(url);
+  if (kind === 'pdf') return tryLocalPdfFetch(url, options);
+  if (kind === 'github') return tryGithubUrlFetch(url, options);
+  if (kind === 'media') return tryMediaUrlFetch(url, options);
+  if (kind === 'feed') return tryFeedUrlFetch(url, options);
+  return undefined;
+}
 
 function resultToSingleText(result: BackendCallResult): string {
   const content = (result as { content?: Array<{ type?: string; text?: string }> }).content;
@@ -435,11 +437,17 @@ async function tryLocalPdfFetch(url: string, options: NativeToolOptions): Promis
       }
       current = next;
     }
-    if (!response || !response.ok) return undefined;
+    if (!response || !response.ok) {
+      if (response) { try { await response.body?.cancel(); } catch { /* cancel best-effort */ } }
+      return undefined;
+    }
     const announced = response.headers.get('content-length');
     if (announced !== null) {
       const size = Number(announced);
-      if (Number.isFinite(size) && size > WEB_ACCESS_PDF_MAX_BYTES) return undefined;
+      if (Number.isFinite(size) && size > WEB_ACCESS_PDF_MAX_BYTES) {
+        try { await response.body?.cancel(); } catch { /* cancel best-effort */ }
+        return undefined;
+      }
     }
     let buffer: Uint8Array;
     if (response.body !== null) {
@@ -474,7 +482,7 @@ async function tryLocalPdfFetch(url: string, options: NativeToolOptions): Promis
         query: url,
         title: url.split('/').pop() || url,
         url,
-        snippet: pdf.text.slice(0, 500),
+        snippet: snippetOf(pdf.text),
         content: pdf.text,
       }),
     );
@@ -554,7 +562,7 @@ async function agenticBrowse(args: Record<string, unknown>, options: NativeToolO
       query: url,
       title: page.title || page.url,
       url: page.url,
-      snippet: bounded.shown.slice(0, 500),
+      snippet: snippetOf(bounded.shown),
       content,
     });
     return northstarTextResult(content, {

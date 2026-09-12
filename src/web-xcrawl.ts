@@ -63,9 +63,8 @@ export const xcrawlSearchAdapter: WebSearchAdapter = {
     if (!Array.isArray(data.organic_results)) throw new Error('XCrawl search returned an invalid response');
     const hits: WebSearchHit[] = [];
     const rows = data.organic_results as unknown[];
-    for (let index = 0; index < rows.length; index++) {
+    for (const row of rows) {
       if (hits.length >= count) break;
-      const row = rows[index];
       if (typeof row !== 'object' || row === null || Array.isArray(row)) continue;
       const record = row as Record<string, unknown>;
       // Skip rows without a usable http(s) link; well-formed siblings map in order.

@@ -21,7 +21,7 @@ function hostnameOf(url: string): string | undefined {
 export function selectWebAccessReaderKind(url: string): WebAccessReaderKind {
   const host = hostnameOf(url);
   if (host !== undefined) {
-    if (host === 'github.com' || host.endsWith('.github.com')) return 'github';
+    if (host === 'github.com' || host.endsWith('.github.com') || host === 'githubusercontent.com' || host.endsWith('.githubusercontent.com')) return 'github';
     if (host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com')) return 'media';
   }
   let path = '';
@@ -37,7 +37,7 @@ export function selectWebAccessReaderKind(url: string): WebAccessReaderKind {
     path.endsWith('/rss.xml') ||
     path.endsWith('.rss') ||
     path.endsWith('.atom') ||
-    path.endsWith('.xml') ||
+    (!path.endsWith('sitemap.xml') && path.endsWith('.xml')) ||
     path.includes('/rss') ||
     path.includes('/atom') ||
     path.includes('/feed/')

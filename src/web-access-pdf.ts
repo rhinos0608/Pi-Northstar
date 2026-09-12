@@ -53,17 +53,17 @@ export function isPdfUrl(url: string, contentType?: string | undefined): boolean
   }
 }
 
-function cleanPageText(value: unknown): string {
-  return typeof value === 'string' ? value.replace(/\r\n/g, '\n').trim().slice(0, WEB_ACCESS_PDF_MAX_CHARS) : '';
+function cleanPageText(value: unknown, maxChars: number): string {
+  return typeof value === 'string' ? value.replace(/\r\n/g, '\n').trim().slice(0, maxChars) : '';
 }
 
-function withTimeout<T>(task: Promise<T>, ms: number): Promise<T> {
+function withTimeout<T>(task: Promise<T>, ms: number, controller?: AbortController): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   // Attach a no-op catch so a late task rejection after the timeout wins
   // the race cannot surface as an unhandled rejection (throw mode kills process).
   task.catch(() => {});
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`PDF extraction timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => { controller?.abort(); reject(new Error(`PDF extraction timed out after ${ms}ms`)); }, ms);
   });
   return Promise.race([task, timeout]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
@@ -82,9 +82,11 @@ export async function extractWebAccessPdfText(
   const maxPages = options.maxPages ?? WEB_ACCESS_PDF_MAX_PAGES;
   const maxChars = options.maxChars ?? WEB_ACCESS_PDF_MAX_CHARS;
   const timeoutMs = options.timeoutMs ?? WEB_ACCESS_PDF_TIMEOUT_MS;
-  const raw = await withTimeout(options.extractor(data, { signal: options.signal }), timeoutMs);
+  const controller = new AbortController();
+  if (options.signal) options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  const raw = await withTimeout(options.extractor(data, { signal: controller.signal }), timeoutMs, controller);
   const totalPages = Number.isInteger(raw.totalPages) && raw.totalPages >= 0 ? raw.totalPages : raw.pages.length;
-  const kept = raw.pages.slice(0, maxPages).map((text, index) => ({ page: index + 1, text: cleanPageText(text) }));
+  const kept = raw.pages.slice(0, maxPages).map((text, index) => ({ page: index + 1, text: cleanPageText(text, maxChars) }));
   const citations = kept.map((p) => ({ page: p.page, cite: `[p. ${p.page}]` }));
   // Page-cited body: `[p. N]` marker then page text. Char cap keeps citations.
   let text = '';

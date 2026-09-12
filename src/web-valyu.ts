@@ -38,7 +38,7 @@ function isHttpUrl(value: string): boolean {
 }
 
 function stringField(value: unknown, fallback: string): string {
-  return typeof value === 'string' && value.trim() ? value : fallback;
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
 export const valyuSearchAdapter: WebSearchAdapter = {

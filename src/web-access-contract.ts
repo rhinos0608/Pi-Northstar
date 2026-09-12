@@ -494,6 +494,10 @@ export function validateWebAccessProviderResponse(value: unknown): { ok: boolean
     }
   }
   if (record.answer !== undefined && typeof record.answer !== 'string') issues.push('answer must be a string');
+  if (record.inlineContent !== undefined) {
+    if (typeof record.inlineContent !== 'string') issues.push('inlineContent must be a string');
+    else if (record.inlineContent.length > WEB_ACCESS_RETRIEVAL_MAX_CHARS) issues.push(`inlineContent exceeds maximum of ${WEB_ACCESS_RETRIEVAL_MAX_CHARS} chars`);
+  }
   return { ok: issues.length === 0, issues };
 }
 
@@ -624,8 +628,11 @@ function parseNormalFetch(raw: Record<string, unknown>): WebAccessFetchNormalReq
 }
 
 function parseRetrieveFetch(raw: Record<string, unknown>): WebAccessFetchRetrieveRequest {
-  const responseId = cleanQuery(raw.responseId);
-  if (responseId === undefined) throw new WebAccessContractError('retrieve requires responseId');
+  if (typeof raw.responseId !== 'string' || raw.responseId.trim().length === 0) throw new WebAccessContractError('retrieve requires responseId');
+  const responseId = raw.responseId.trim();
+  if (responseId.length > WEB_ACCESS_MAX_QUERY_LENGTH) {
+    throw new WebAccessContractError(`responseId exceeds maximum length of ${WEB_ACCESS_MAX_QUERY_LENGTH}`);
+  }
   const out: WebAccessFetchRetrieveRequest = { action: 'retrieve', responseId };
   const sourceIds = parseSourceIds(raw.sourceIds);
   if (sourceIds !== undefined) out.sourceIds = sourceIds;
@@ -660,17 +667,23 @@ function parseRetrieveFetch(raw: Record<string, unknown>): WebAccessFetchRetriev
 }
 
 function parseSourceCheckFetch(raw: Record<string, unknown>): WebAccessFetchSourceCheckRequest {
-  const responseId = cleanQuery(raw.responseId);
-  if (responseId === undefined) throw new WebAccessContractError('source_check requires responseId');
+  if (typeof raw.responseId !== 'string' || raw.responseId.trim().length === 0) throw new WebAccessContractError('source_check requires responseId');
+  const responseId = raw.responseId.trim();
+  if (responseId.length > WEB_ACCESS_MAX_QUERY_LENGTH) {
+    throw new WebAccessContractError(`responseId exceeds maximum length of ${WEB_ACCESS_MAX_QUERY_LENGTH}`);
+  }
   if (!Array.isArray(raw.claims)) throw new WebAccessContractError('source_check requires claims[1..20]');
   if (raw.claims.length < 1 || raw.claims.length > WEB_ACCESS_MAX_CLAIMS) {
     throw new WebAccessContractError(`claims must contain 1-${WEB_ACCESS_MAX_CLAIMS} entries`);
   }
   const claims: string[] = [];
   for (const entry of raw.claims) {
-    const c = cleanQuery(entry);
-    if (c === undefined) throw new WebAccessContractError('claims entries must be non-empty strings');
-    claims.push(c);
+    if (typeof entry !== 'string' || entry.trim().length === 0) throw new WebAccessContractError('claims entries must be non-empty strings');
+    const claim = entry.trim();
+    if (claim.length > WEB_ACCESS_MAX_QUERY_LENGTH) {
+      throw new WebAccessContractError(`claims entries exceed maximum length of ${WEB_ACCESS_MAX_QUERY_LENGTH}`);
+    }
+    claims.push(claim);
   }
   const out: WebAccessFetchSourceCheckRequest = { action: 'source_check', responseId, claims };
   const sourceIds = parseSourceIds(raw.sourceIds);

@@ -137,6 +137,7 @@ function findIndices(haystack: string, needle: string, mode: WebAccessFindMode):
     for (;;) {
       const at = haystack.indexOf(needle, from);
       if (at < 0) return out;
+      if (out.length >= 20) return out;
       out.push(at);
       from = at + Math.max(1, needle.length);
     }
@@ -149,6 +150,7 @@ function findIndices(haystack: string, needle: string, mode: WebAccessFindMode):
     for (;;) {
       const at = lowerHay.indexOf(lowerNeedle, from);
       if (at < 0) return out;
+      if (out.length >= 20) return out;
       out.push(at);
       from = at + Math.max(1, lowerNeedle.length);
     }

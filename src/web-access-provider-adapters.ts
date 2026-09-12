@@ -1388,9 +1388,10 @@ const brightdataAdapter: WebAccessAdapter = {
       const { data } = await postJson('https://api.brightdata.com/request', {
         url: serp.toString(),
         zone,
-        format: 'raw',
+        format: 'parsed_light',
+        brd_json: 1,
       }, { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, options);
-      const organic = typeof data === 'object' && data !== null
+      const organic = typeof data === 'object' && data !== null && !Array.isArray(data)
         ? ((data as Record<string, unknown>).organic as unknown)
         : undefined;
       if (!Array.isArray(organic)) throw invalidShape('brightdata', label, `unexpected SERP shape for zone ${zone}`, apiKey);

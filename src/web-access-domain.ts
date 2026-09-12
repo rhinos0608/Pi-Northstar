@@ -24,7 +24,7 @@ export function extractWebAccessHostname(url: string): string | undefined {
 /** True on exact match or subdomain match (sub.a.test matches a.test). */
 export function hostnameMatchesWebAccessFilter(hostname: string, filter: string): boolean {
   const host = hostname.toLowerCase();
-  const want = filter.toLowerCase();
+  const want = filter.trim().toLowerCase().replace(/^\.+/, '');
   return host === want || host.endsWith(`.${want}`);
 }
 
@@ -38,7 +38,7 @@ export function passesWebAccessDomainFilter(hostname: string, domains: readonly 
   let included = false;
   let hasInclude = false;
   for (const raw of domains) {
-    const entry = raw.trim().toLowerCase();
+    const entry = raw.trim().toLowerCase().replace(/^(-?)\.+/, '$1');
     if (entry.startsWith('-')) {
       const blocked = entry.slice(1);
       if (blocked && hostnameMatchesWebAccessFilter(host, blocked)) return false;
