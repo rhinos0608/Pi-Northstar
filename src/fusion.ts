@@ -45,11 +45,12 @@ export function rrfMerge<T>(
         scores.set(key, { item, score, ranking: rankingIndex });
         return;
       }
+      // First-seen item wins. Rankings arrive in priority order (operator
+      // backend order in web-access-search.ts `mergeResponses`, per-provider
+      // rankings in knowledge-aggregate.ts `rrfRankKgEntities`), and both
+      // call sites document first-copy-wins; answer selection in
+      // `mergeResponses` is first-wins too. Scores still accumulate.
       existing.score += score;
-      if (existing.ranking < rankingIndex) {
-        existing.item = item;
-        existing.ranking = rankingIndex;
-      }
     });
   });
 

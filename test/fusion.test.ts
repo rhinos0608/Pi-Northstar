@@ -37,3 +37,19 @@ test('rrfMerge dedupes within rankings and boosts cross-ranking agreement', () =
   ]);
   assert.ok(fused[0]!.rrfScore > fused[2]!.rrfScore);
 });
+
+test('rrfMerge keeps the first-seen item version on cross-ranking key overlap', () => {
+  // Rankings arrive in priority order (operator backend order); the earliest
+  // copy wins while RRF scores still accumulate across rankings.
+  const fused = rrfMerge([
+    [{ url: 'https://a.test', title: 'First-priority copy' }],
+    [{ url: 'https://a.test/', title: 'Later copy' }],
+  ], { keyFn: (item) => normalizeUrl(item.url) });
+
+  assert.equal(fused.length, 1);
+  assert.equal(fused[0]!.item.title, 'First-priority copy');
+  const single = rrfMerge([
+    [{ url: 'https://a.test', title: 'Only copy' }],
+  ], { keyFn: (item) => normalizeUrl(item.url) });
+  assert.ok(fused[0]!.rrfScore > single[0]!.rrfScore, 'score accumulates across rankings');
+});
