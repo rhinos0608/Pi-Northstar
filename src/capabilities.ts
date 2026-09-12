@@ -521,8 +521,11 @@ export const CHANNEL_CAPABILITIES: readonly ChannelCapability[] = [
     description: 'Browser automation via CDP: navigate, evaluate, screenshot, click, type, scroll, tabs, cookies',
     tier: 0,
     domains: [],
-    // Browser verbs are owned by BROWSER_ACTIONS in browser-tools; the reach
-    // read-only action vocabulary does not apply to the automation channel.
+    // Browser verbs are owned by BROWSER_ACTIONS in browser-policy.ts (which
+    // also feeds the browser MCP schema and the adapters). The registry holds
+    // no browser-action truth: the read-only action vocabulary does not apply
+    // to the automation channel (it has mutations), so actions/backends stay
+    // empty and consumers must not treat them as supported/unsupported claims.
     actions: [],
     backends: [{ id: 'cdp', mode: 'native', quality: 'full', actions: [] }],
   },

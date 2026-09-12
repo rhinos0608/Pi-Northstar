@@ -233,6 +233,7 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'LC_ALL',
     'PYTHONIOENCODING',
     'GITHUB_TOKEN',
+    'GH_TOKEN',
     'SEARCH_BACKEND',
     'PI_SEARCH_BOOTSTRAP',
     'PI_SEARCH_ALLOW_INSTALL',

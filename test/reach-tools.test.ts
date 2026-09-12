@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { callNativeTool } from '../src/native-tools.js';
+import { callReachTool, externalEnvironment } from '../src/reach-tools.js';
 import { writeCookieState } from '../src/cookie-jar.js';
 import { openCliChildEnv } from '../src/social-opencli.js';
 
@@ -287,6 +288,15 @@ test('opencli child env never carries cookies, keys, or secrets', () => {
   assert.deepEqual(env, { PATH: '/x', HOME: '/h', OPENCLI_HOST: 'cli.example', OPENCLI_TOKEN: 'operator-token' });
 });
 
+test('reach_status never claims browser actions unsupported (registry is not browser-action truth)', async () => {
+  const result = await callReachTool('reach_status', { family: 'browser', action: 'click' }, { env: { PATH: '/usr/bin' } });
+  const channels = (result?.details as { channels?: Array<{ name?: string; status?: string; message?: string }> } | undefined)?.channels ?? [];
+  const browser = channels.find((channel) => channel.name === 'browser');
+  assert.ok(browser, 'browser channel must be reported');
+  assert.doesNotMatch(browser.message ?? '', /not a supported browser action/);
+  assert.match(browser.message ?? '', /BROWSER_ACTIONS/);
+});
+
 test('facebook stored cookies are never forwarded to any backend (unused credentials)', async () => {
   const dir = await withExecutableDir();
   try {
@@ -490,6 +500,36 @@ test('OPENCLI_* reach only the opencli child; Python CLIs get the sanitized envi
     assert.doesNotMatch(xhsEnv, /GITHUB_TOKEN/);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Probe env is capability-specific: only locale/path/proxy base plus the
+// probed command's own needs (OPENCLI_* for opencli, cookie keys for mapped
+// cookie consumers). Unrelated API keys never reach a probe subprocess. ──
+
+test('probe env is capability-specific per command', () => {
+  const parent = {
+    PATH: '/x', HOME: '/h',
+    OPENCLI_HOST: 'cli.example', OPENCLI_PORT: '9222', OPENCLI_TOKEN: 'opencli-secret',
+    GITHUB_TOKEN: 'github-secret', BRAVE_API_KEY: 'brave-secret', TAVILY_API_KEY: 'tavily-secret',
+    REDDIT_COOKIE: 'cookie-secret',
+  };
+  const twitterEnv = externalEnvironment('twitter', parent);
+  assert.equal(twitterEnv.PATH, '/x');
+  assert.equal(twitterEnv.HOME, '/h');
+  for (const key of ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN', 'GITHUB_TOKEN', 'BRAVE_API_KEY', 'TAVILY_API_KEY', 'REDDIT_COOKIE']) {
+    assert.equal(twitterEnv[key], undefined, `twitter probe must not receive ${key}`);
+  }
+  const opencliEnv = externalEnvironment('opencli', parent);
+  assert.equal(opencliEnv.OPENCLI_HOST, 'cli.example');
+  assert.equal(opencliEnv.OPENCLI_PORT, '9222');
+  assert.equal(opencliEnv.OPENCLI_TOKEN, 'opencli-secret');
+  for (const key of ['GITHUB_TOKEN', 'BRAVE_API_KEY', 'TAVILY_API_KEY', 'REDDIT_COOKIE']) {
+    assert.equal(opencliEnv[key], undefined, `opencli probe must not receive ${key}`);
+  }
+  const rdtEnv = externalEnvironment('rdt', parent);
+  for (const key of ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN', 'GITHUB_TOKEN', 'BRAVE_API_KEY', 'REDDIT_COOKIE']) {
+    assert.equal(rdtEnv[key], undefined, `rdt probe must not receive ${key}`);
   }
 });
 

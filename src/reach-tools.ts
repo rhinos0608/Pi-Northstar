@@ -134,6 +134,13 @@ async function inspectChannel(channel: ChannelDefinition, options: ReachToolOpti
   const env = options.env ?? process.env;
   try {
     const canonicalAction = requestedAction ? canonicalActionFor(channel.name, requestedAction) : undefined;
+    // Browser verbs are owned by BROWSER_ACTIONS (browser-policy.ts); the
+    // registry keeps no browser-action truth, so it must never declare a
+    // browser action supported or unsupported. Status stays 'off' (unchanged)
+    // with per-action validation deferred to the browser tool.
+    if (channel.name === 'browser' && canonicalAction) {
+      return { ...channel, status: 'off', active_backend: null, message: `Browser action "${requestedAction}" is validated by the browser tool (BROWSER_ACTIONS); the capability registry holds no browser-action truth` };
+    }
     if (canonicalAction && !canonicalActionsFor(channel.name).includes(canonicalAction)) {
       return { ...channel, status: 'off', active_backend: null, message: `Action "${requestedAction}" is not a supported ${channel.name} action` };
     }
@@ -427,18 +434,18 @@ function setupMessage(channel: ChannelDefinition): string {
   return channel.backends.map((backend) => `${backend.name}: ${backend.setup ?? 'built in'}`).join('; ');
 }
 
-function externalEnvironment(command: string, env: Record<string, string | undefined>): Record<string, string> {
-  // Cookie env vars derive from the cookie-jar single source of truth: only
-  // commands with a real cookie-consuming provider mapping receive them.
+export function externalEnvironment(command: string, env: Record<string, string | undefined>): Record<string, string> {
+  // Probe-only environment (reach_status installed/responding checks run
+  // --help/--version/status argv that need no credentials): locale, path,
+  // temp, and proxy base plus the probed command's own needs — OPENCLI_*
+  // for opencli, cookie keys for mapped cookie consumers. Unrelated API
+  // keys never reach a probe subprocess. Cookie env vars derive from the
+  // cookie-jar single source of truth: only commands with a real
+  // cookie-consuming provider mapping receive them.
   const cookieProvider = cookieProviderForCommand(command);
   const allowed = [
     'PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
     'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-    'GITHUB_TOKEN', 'GH_TOKEN', 'BRAVE_API_KEY', 'EXA_API_KEY', 'TAVILY_API_KEY',
-    'SEARXNG_BASE_URL', 'NITTER_BASE_URL', 'LISTENNOTES_API_KEY', 'PRODUCTHUNT_API_TOKEN',
-    'PATENTSVIEW_API_KEY', 'CRAWL4AI_BASE_URL', 'CRAWL4AI_API_TOKEN',
-    'DEEP_RESEARCH_BASE_URL', 'DEEP_RESEARCH_WORKER_BASE_URL', 'DEEP_RESEARCH_API_TOKEN',
-    'DEEP_RESEARCH_MODEL', 'DEEP_RESEARCH_WORKER_MODEL',
     ...(command === 'opencli' ? ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN'] : []),
     ...(cookieProvider ? cookieEnvKeysForProvider(cookieProvider) : []),
   ];

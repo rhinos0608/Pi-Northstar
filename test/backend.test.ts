@@ -120,6 +120,18 @@ test('buildCliEnvironment blocks TWITTER_COOKIE/TWITTER_AUTH_TOKEN like unrelate
   assert.equal(env.STRIPE_API_KEY, undefined);
 });
 
+test('buildCliEnvironment forwards GH_TOKEN alongside GITHUB_TOKEN (github auth parity)', () => {
+  // github-contract accepts GITHUB_TOKEN ?? GH_TOKEN; the CLI child must
+  // receive both spellings or GH_TOKEN-only operators lose auth in children.
+  const env = buildCliEnvironment({
+    PATH: '/usr/bin',
+    GITHUB_TOKEN: 'ghp-token',
+    GH_TOKEN: 'ghp-token-alias',
+  });
+  assert.equal(env.GITHUB_TOKEN, 'ghp-token');
+  assert.equal(env.GH_TOKEN, 'ghp-token-alias');
+});
+
 test('buildCliEnvironment drops PI_SEARCH_PLATFORM_WEB_FALLBACK and PI_SEARCH_AUTO_COOKIES', () => {
   const env = buildCliEnvironment({
     PATH: '/usr/bin',
