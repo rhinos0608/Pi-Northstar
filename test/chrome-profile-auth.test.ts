@@ -67,9 +67,9 @@ test('indefinite lasts until revoke/shutdown; lease stays bounded at 60s', () =>
 test('commit recomputes companion lease after delayed handshake', () => {
   const clock = fakeClock();
   const auth = new ChromeProfileAuth({ now: clock.now, randomId: ids() });
-  auth.stageAuthorize(15 * 60 * 1000, true);
+  const staged = auth.stageAuthorize(15 * 60 * 1000, true);
   clock.advance(61_000);
-  auth.commitAuthorize();
+  auth.commitAuthorize(staged.sessionKey, staged.grantId);
   assert.equal(auth.isLeaseLive(), true);
   assert.equal(auth.msUntilLeaseExpiry(), CHROME_LEASE_MAX_MS);
 });
@@ -77,13 +77,19 @@ test('commit recomputes companion lease after delayed handshake', () => {
 test('commit rejects a grant whose TTL lapsed mid-handshake', () => {
   const clock = fakeClock();
   const auth = new ChromeProfileAuth({ now: clock.now, randomId: ids() });
-  auth.stageAuthorize(60 * 1000, true);
+  const expired = auth.stageAuthorize(60 * 1000, true);
   clock.advance(60 * 1000 + 1);
-  assert.throws(() => auth.commitAuthorize(), /grant expired before activation/);
+  assert.throws(() => auth.commitAuthorize(expired.sessionKey, expired.grantId), /grant expired before activation/);
   assert.equal(auth.status().state, 'locked');
   assert.equal(auth.currentGrant(), null);
   // Staged grant discarded: a retry stages fresh instead of committing stale.
-  assert.throws(() => auth.commitAuthorize(), /superseded/);
+  assert.throws(() => auth.commitAuthorize(expired.sessionKey, expired.grantId), /superseded/);
+  // Stale identity never activates or clears another handshake's grant.
+  const live = auth.stageAuthorize(15 * 60 * 1000, true);
+  assert.throws(() => auth.commitAuthorize('wrong-session', live.grantId), /staged grant mismatch/);
+  assert.throws(() => auth.abortAuthorize(live.sessionKey, 'wrong-grant'), /staged grant mismatch/);
+  auth.commitAuthorize(live.sessionKey, live.grantId);
+  assert.equal(auth.status().state, 'authorized');
 });
 test('revoke and shutdown lock synchronously for every reason', () => {
   const auth = new ChromeProfileAuth({ now: fakeClock().now, randomId: ids() });

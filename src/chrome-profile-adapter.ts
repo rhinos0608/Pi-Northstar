@@ -259,13 +259,13 @@ export class ChromeProfileAdapter {
     // a target the authorize would be consumable by whichever instance polls first.
     const target = targetInstanceId ?? this.targetInstanceId;
     if (this.bridge !== null && (typeof target !== 'string' || target.length === 0)) {
-      this.auth.abortAuthorize();
+      this.auth.abortAuthorize(grant.sessionKey, grant.grantId);
       this.purgeIfLocked();
       return chromeErrorResult('chrome_locked', 'authorization requires a selected companion instance');
     }
     const token = this.resolveBridgeToken();
     if (this.bridge !== null && token === undefined) {
-      this.auth.abortAuthorize();
+      this.auth.abortAuthorize(grant.sessionKey, grant.grantId);
       this.purgeIfLocked();
       return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge token unavailable', true);
     }
@@ -284,7 +284,7 @@ export class ChromeProfileAdapter {
       try {
         const result = await this.bridge.send(command);
         if (!result.ok) {
-          this.auth.abortAuthorize();
+          this.auth.abortAuthorize(grant.sessionKey, grant.grantId);
           this.purgeIfLocked();
           return chromeErrorResult(
             result.error.code,
@@ -294,7 +294,7 @@ export class ChromeProfileAdapter {
         }
       } catch (error) {
         // Failed handshake discards the staged grant; a live grant survives.
-        this.auth.abortAuthorize();
+        this.auth.abortAuthorize(grant.sessionKey, grant.grantId);
         this.purgeIfLocked();
         if (error instanceof ChromeBridgeError) {
           return chromeErrorResult(error.code, safeChromeProfileErrorMessage(error.message), error.retryable);
@@ -310,7 +310,7 @@ export class ChromeProfileAdapter {
       // Fail closed: no companion transport means no grant. Discard the
       // staged grant so /chrome status cannot report authorized for an
       // unusable backend.
-      this.auth.abortAuthorize();
+      this.auth.abortAuthorize(grant.sessionKey, grant.grantId);
       this.purgeIfLocked();
       return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge unavailable', true);
     }
@@ -319,7 +319,7 @@ export class ChromeProfileAdapter {
     // A failed commit after ACK leaves an orphan companion grant behind, so
     // revoke the staged credentials best-effort before reporting locked.
     try {
-      this.auth.commitAuthorize();
+      this.auth.commitAuthorize(grant.sessionKey, grant.grantId);
     } catch (error) {
       await this.revokeStagedRemote(grant);
       this.purgeIfLocked();

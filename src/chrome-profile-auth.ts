@@ -134,12 +134,18 @@ export class ChromeProfileAuth {
     return { ...grant };
   }
 
-  /** Activate the staged grant. Throws chrome_revoked when nothing staged
-   *  (e.g. a revoke/shutdown raced the handshake and discarded it), or
-   *  when the TTL lapsed mid-handshake: an expired grant never goes live. */
-  commitAuthorize(): ChromeGrantRef {
+  /** Activate the staged grant. The caller passes back the staged identity
+   *  and only the matching grant activates: stale commits (superseded
+   *  handshakes) are rejected without touching the current staged grant.
+   *  Throws chrome_revoked when nothing staged (e.g. a revoke/shutdown
+   *  raced the handshake and discarded it), or when the TTL lapsed
+   *  mid-handshake: an expired grant never goes live. */
+  commitAuthorize(sessionKey: string, grantId: string): ChromeGrantRef {
     const staged = this.staged;
     if (staged === null) throw new Error('chrome_revoked: authorization superseded');
+    if (staged.sessionKey !== sessionKey || staged.grantId !== grantId) {
+      throw new Error('chrome_revoked: staged grant mismatch');
+    }
     if (staged.expiresAt !== null && this.now() >= staged.expiresAt) {
       this.staged = null;
       throw new Error('chrome_revoked: grant expired before activation');
@@ -152,8 +158,17 @@ export class ChromeProfileAuth {
     return { ...staged };
   }
 
-  /** Discard the staged grant; live grant (if any) untouched. */
-  abortAuthorize(): void {
+  /** Discard the staged grant; live grant (if any) untouched. Only the
+   *  matching staged grant is cleared; a null stage is a silent no-op so
+   *  failure paths stay idempotent after a racing revoke. A mismatched
+   *  stage is never cleared silently: it throws to surface the bug loudly
+   *  instead of wedging future handshakes behind the double-stage guard. */
+  abortAuthorize(sessionKey: string, grantId: string): void {
+    const staged = this.staged;
+    if (staged === null) return;
+    if (staged.sessionKey !== sessionKey || staged.grantId !== grantId) {
+      throw new Error('chrome_revoked: staged grant mismatch');
+    }
     this.staged = null;
   }
 
