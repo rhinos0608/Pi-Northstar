@@ -137,7 +137,12 @@ test('native feeds dedupes entries with identical links', async () => {
   );
 
   try {
-    const result = await callNativeTool('feeds', { url: 'https://example.com/feed.xml' });
+    // Offline DNS stub: the fetch helpers preflight DNS before the mocked
+    // fetch, and example.com does not resolve in sandboxes without public DNS.
+    const result = await callNativeTool('feeds', { url: 'https://example.com/feed.xml' }, {
+      env: {},
+      lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+    });
     const details = result.details as { items: Array<{ title: string; url: string }> };
 
     assert.deepEqual(details.items.map((item) => item.title), ['A', 'B']);

@@ -9,6 +9,7 @@ import {
   channelCapability,
   CHANNEL_CAPABILITIES,
 } from './capabilities.js';
+import type { DnsLookup } from './network-policy.js';
 import { guardResult, jsonTextResult } from './tool-output.js';
 import { executeMedia } from './media.js';
 import { executeSocial } from './social.js';
@@ -18,6 +19,7 @@ export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' 
 interface ReachToolOptions {
   signal?: AbortSignal;
   env?: Record<string, string | undefined>;
+  lookup?: DnsLookup;
 }
 
 interface CommandResult {

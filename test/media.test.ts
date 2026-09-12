@@ -7,6 +7,11 @@ function jsonResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { 'content-type': 'application/json' } });
 }
 
+// Offline DNS stub: example.com does not resolve in sandboxes without
+// public DNS, but the fetch helpers always run a DNS preflight before the
+// (mocked) fetch. Pin example.com to its documentation address instead.
+const offlineLookup = async () => [{ address: '93.184.216.34', family: 4 as const }];
+
 async function withFetch<T>(mock: (input: string | URL | Request, init?: RequestInit) => Response | Promise<Response>, fn: () => Promise<T>): Promise<T> {
   const saved = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => mock(input, init);
@@ -27,7 +32,7 @@ test('media tool routes rss platform to the native feed backend', async () => {
       { status: 200, headers: { 'content-type': 'application/rss+xml' } },
     );
   }, async () => {
-    const result = await callNativeTool('media', { platform: 'rss', action: 'feed', url: 'https://example.com/feed.xml' }, { env: {} });
+    const result = await callNativeTool('media', { platform: 'rss', action: 'feed', url: 'https://example.com/feed.xml' }, { env: {}, lookup: offlineLookup });
     const details = result.details as { backend?: string; items?: Array<{ kind?: string; title?: string }> };
     assert.equal(details.backend, 'native-rss-atom');
     assert.equal(details.items?.[0]?.kind, 'feed_entry');
@@ -42,7 +47,7 @@ test('feeds tool defaults to the rss channel without a platform', async () => {
       { status: 200, headers: { 'content-type': 'application/atom+xml' } },
     );
   }, async () => {
-    const result = await callNativeTool('feeds', { url: 'https://example.com/atom.xml' }, { env: {} });
+    const result = await callNativeTool('feeds', { url: 'https://example.com/atom.xml' }, { env: {}, lookup: offlineLookup });
     assert.equal((result.details as { backend?: string }).backend, 'native-rss-atom');
   });
 });
@@ -135,7 +140,7 @@ test('bilibili and rss report unsupported pagination (cursor rejected)', async (
   await withFetch(async () => {
     return new Response('<rss><channel></channel></rss>', { status: 200 });
   }, async () => {
-    const result = await callNativeTool('feeds', { url: 'https://example.com/f.xml' }, { env: {} });
+    const result = await callNativeTool('feeds', { url: 'https://example.com/f.xml' }, { env: {}, lookup: offlineLookup });
     assert.equal((result.details as { pagination?: { supported?: boolean } }).pagination?.supported, false);
   });
 });

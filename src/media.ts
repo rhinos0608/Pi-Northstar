@@ -50,6 +50,7 @@ import {
   type MediaRequestInput,
   type MediaVideoTranscriptV1,
 } from './media-contract.js';
+import type { DnsLookup } from './network-policy.js';
 import { buildPythonChildEnvironment } from './python-child-env.js';
 import { buildNorthstarResult, type NorthstarEntityV1 } from './result-contract.js';
 import { redactCliDiagnostics, requireCliPositional } from './social-cli-safety.js';
@@ -73,6 +74,7 @@ const MAX_PLAYER_JSON_CHARS = 1_000_000;
 export interface ExecuteMediaOptions {
   signal?: AbortSignal | undefined;
   env?: Record<string, string | undefined> | undefined;
+  lookup?: DnsLookup | undefined;
 }
 
 interface CliResult {
@@ -902,7 +904,7 @@ function cleanText(text: string): string {
 
 // ── Plan builders ──
 
-function youtubeDataApiPlan(request: MediaRequest, env: Record<string, string | undefined>): MediaBackendPlan {
+function youtubeDataApiPlan(request: MediaRequest, env: Record<string, string | undefined>, lookup?: DnsLookup): MediaBackendPlan {
   const backend = 'youtube-data-api';
   const key = youtubeKey(env);
   return {
@@ -924,7 +926,7 @@ function youtubeDataApiPlan(request: MediaRequest, env: Record<string, string | 
       // off the fixed Google host (credential-routing control).
       let data: unknown;
       try {
-        data = await fetchJsonNoRedirect(url, {}, signal);
+        data = await fetchJsonNoRedirect(url, {}, signal, undefined, lookup);
       } catch (err) {
         throw youtubeApiError(err, key, backend);
       }
@@ -942,7 +944,7 @@ function youtubeDataApiPlan(request: MediaRequest, env: Record<string, string | 
   };
 }
 
-function youtubeOEmbedPlan(request: MediaRequest): MediaBackendPlan {
+function youtubeOEmbedPlan(request: MediaRequest, lookup?: DnsLookup): MediaBackendPlan {
   const backend = 'youtube-oembed';
   return {
     backend,
@@ -954,7 +956,7 @@ function youtubeOEmbedPlan(request: MediaRequest): MediaBackendPlan {
       const target = canonicalYoutubeWatchUrl({ ...(request.id !== undefined ? { id: request.id } : {}), ...(request.url !== undefined ? { url: request.url } : {}) });
       const endpoint = `${YOUTUBE_OEMBED_URL}?${new URLSearchParams({ url: target, format: 'json' }).toString()}`;
       try {
-        const data = (await boundedFetchJson(endpoint, { 'User-Agent': USER_AGENT }, signal)) as Record<string, unknown>;
+        const data = (await boundedFetchJson(endpoint, { 'User-Agent': USER_AGENT }, signal, undefined, lookup)) as Record<string, unknown>;
         return { data, target };
       } catch (err) {
         if (isAbort(err)) throw err;
@@ -968,7 +970,7 @@ function youtubeOEmbedPlan(request: MediaRequest): MediaBackendPlan {
   };
 }
 
-function youtubeTranscriptPlan(request: MediaRequest, env: Record<string, string | undefined>): MediaBackendPlan {
+function youtubeTranscriptPlan(request: MediaRequest, env: Record<string, string | undefined>, lookup?: DnsLookup): MediaBackendPlan {
   const backend = YOUTUBE_TRANSCRIPT_BACKEND;
   return {
     backend,
@@ -989,6 +991,8 @@ function youtubeTranscriptPlan(request: MediaRequest, env: Record<string, string
           canonical,
           cookie !== undefined ? { 'User-Agent': USER_AGENT, Cookie: cookie } : { 'User-Agent': USER_AGENT },
           signal,
+          undefined,
+          lookup,
         );
       } catch (err) {
         if (isAbort(err)) throw err;
@@ -1021,7 +1025,7 @@ function youtubeTranscriptPlan(request: MediaRequest, env: Record<string, string
       let timedtext: string;
       try {
         // No Cookie header here: credentials never leave the watch origin.
-        timedtext = await boundedFetchText(validatePublicHttpUrl(track.baseUrl), { 'User-Agent': USER_AGENT }, signal);
+        timedtext = await boundedFetchText(validatePublicHttpUrl(track.baseUrl), { 'User-Agent': USER_AGENT }, signal, undefined, lookup);
       } catch (err) {
         if (isAbort(err)) throw err;
         const message = err instanceof Error ? err.message : String(err);
@@ -1135,7 +1139,7 @@ function biliOpenCliPlan(request: MediaRequest, env: Record<string, string | und
   };
 }
 
-function rssPlan(request: MediaRequest): MediaBackendPlan {
+function rssPlan(request: MediaRequest, lookup?: DnsLookup): MediaBackendPlan {
   const backend = 'native-rss-atom';
   return {
     backend,
@@ -1150,7 +1154,7 @@ function rssPlan(request: MediaRequest): MediaBackendPlan {
       const feedUrl = validatePublicHttpUrl(request.url);
       let xml: string;
       try {
-        xml = await boundedFetchText(feedUrl, { 'User-Agent': USER_AGENT }, signal);
+        xml = await boundedFetchText(feedUrl, { 'User-Agent': USER_AGENT }, signal, undefined, lookup);
       } catch (err) {
         if (isAbort(err)) throw err;
         const message = err instanceof Error ? err.message : String(err);
@@ -1165,20 +1169,20 @@ function rssPlan(request: MediaRequest): MediaBackendPlan {
   };
 }
 
-function plansFor(request: MediaRequest, env: Record<string, string | undefined>): MediaBackendPlan[] {
+function plansFor(request: MediaRequest, env: Record<string, string | undefined>, lookup?: DnsLookup): MediaBackendPlan[] {
   switch (request.channel) {
     case 'youtube': {
-      if (request.action === 'transcript') return [youtubeTranscriptPlan(request, env)];
+      if (request.action === 'transcript') return [youtubeTranscriptPlan(request, env, lookup)];
       if (request.action === 'details') {
-        return youtubeKey(env) ? [youtubeDataApiPlan(request, env), youtubeOEmbedPlan(request)] : [youtubeOEmbedPlan(request)];
+        return youtubeKey(env) ? [youtubeDataApiPlan(request, env, lookup), youtubeOEmbedPlan(request, lookup)] : [youtubeOEmbedPlan(request, lookup)];
       }
       // search/hot: keyed Data API only; keyless fails closed in execute (never scrape).
-      return [youtubeDataApiPlan(request, env)];
+      return [youtubeDataApiPlan(request, env, lookup)];
     }
     case 'bilibili':
       return request.action === 'transcript' ? [biliOpenCliPlan(request, env)] : [biliCliPlan(request, env)];
     case 'rss':
-      return [rssPlan(request)];
+      return [rssPlan(request, lookup)];
   }
 }
 
@@ -1500,7 +1504,7 @@ export async function executeMedia(
   const cursor = optionalString(args.cursor);
   if (cursor !== undefined) request.cursor = cursor;
 
-  const plans = plansFor(request, env);
+  const plans = plansFor(request, env, options.lookup);
   const eligible = plans.filter((plan) => mediaRegistrySupports(plan.backend, request.channel, request.action));
   if (eligible.length === 0) {
     if (plans.length > 0) {

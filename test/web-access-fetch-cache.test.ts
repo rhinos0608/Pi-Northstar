@@ -73,7 +73,12 @@ test('fetch routes feed urls through the feeds subsystem', async () => {
       { status: 200, headers: { 'content-type': 'application/rss+xml' } },
     )) as typeof fetch;
   try {
-    const out = await callNativeTool('fetch', { url: 'https://example.com/feed.xml' }, { env: {} });
+    // Offline DNS stub: feed routing preflights DNS before the mocked fetch,
+    // and example.com does not resolve in sandboxes without public DNS.
+    const out = await callNativeTool('fetch', { url: 'https://example.com/feed.xml' }, {
+      env: {},
+      lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+    });
     assert.match(JSON.stringify(out), /Feed Item Alpha/);
   } finally {
     globalThis.fetch = savedFetch;
