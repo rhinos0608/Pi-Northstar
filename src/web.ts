@@ -838,6 +838,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
       ...(followLinks ? { extractLinks: true } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.env?.PI_SEARCH_SCRAPLING_PROXY ? { proxy: options.env.PI_SEARCH_SCRAPLING_PROXY } : {}),
+      ...(options.lookup ? { lookup: options.lookup } : {}),
     });
     const health = await bridge.health();
     if (!health.available) {

@@ -133,8 +133,13 @@ function createBridge(
     spawnFn = m.mockSpawn;
   }
 
+  // Default stub DNS: unit hostnames (example.com, test.dev, a.com) have no
+  // real answers in sandboxes; resolve everything public unless the test
+  // passes its own lookup (e.g. the SSRF gating tests).
+  const stubLookup = async () => [{ address: '93.184.216.34', family: 4 as const }];
   return new ScraplingBridge({
     ...rest,
+    ...((rest as { lookup?: unknown }).lookup ? {} : { lookup: stubLookup }),
     ...(spawnFn ? ({ _spawn: spawnFn } as unknown as ScraplingBridgeOptions) : {}),
     ...(_fetchText ? ({ _fetchText } as unknown as ScraplingBridgeOptions) : {}),
   } as ScraplingBridgeOptions);
@@ -546,6 +551,70 @@ test('constructor respects env vars as fallback', () => {
 // ---------------------------------------------------------------------------
 // AbortSignal
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// SSRF dispatch gating (mirrors http.ts ordering: static + DNS preflight
+// before dispatch, final-URL revalidation after)
+// ---------------------------------------------------------------------------
+
+test('fetch(): rejects private/reserved IP literals before dispatch', async () => {
+  const { mockSpawn } = makeSpawn([
+    { ok: true, url: 'http://169.254.169.254/', title: 'x', content: 'x' },
+  ]);
+  const bridge = createBridge({ _spawn: mockSpawn });
+  spawnRecords.length = 0;
+
+  await assert.rejects(
+    () => bridge.fetch('http://169.254.169.254/latest/meta-data/'),
+    /Private\/reserved/,
+  );
+  await assert.rejects(
+    () => bridge.fetch('http://localhost:8080/admin'),
+    /Blocked hostname/,
+  );
+  assert.equal(spawnRecords.length, 0, 'no subprocess may dispatch to a blocked target');
+
+  await bridge.close();
+});
+
+test('fetch(): DNS preflight rejects hostnames resolving to private space', async () => {
+  const { mockSpawn } = makeSpawn([
+    { ok: true, url: 'https://example.com', title: 'x', content: 'x' },
+  ]);
+  const privateLookup = async (hostname: string) => {
+    assert.equal(hostname, 'evil.example');
+    return [{ address: '10.1.2.3', family: 4 as const }];
+  };
+  const bridge = createBridge({ _spawn: mockSpawn, lookup: privateLookup } as ScraplingBridgeOptions);
+  spawnRecords.length = 0;
+
+  await assert.rejects(
+    () => bridge.fetch('https://evil.example/page'),
+    /private\/reserved/,
+  );
+  assert.equal(spawnRecords.length, 0, 'no subprocess may dispatch past DNS preflight');
+
+  await bridge.close();
+});
+
+test('fetch(): rejects bridge final URL that escapes to private space', async () => {
+  const { mockSpawn } = makeSpawn([
+    { ok: true, url: 'http://10.0.0.5/internal', title: 'x', content: '<html>internal</html>' },
+    { ok: true, url: 'http://10.0.0.5/internal', title: 'x', content: '<html>internal</html>' },
+  ]);
+  const bridge = createBridge({
+    _spawn: mockSpawn,
+    _fetchText: async () => { throw new Error('fallback must not serve blocked content'); },
+  });
+  spawnRecords.length = 0;
+
+  await assert.rejects(
+    () => bridge.fetch('https://example.com'),
+    /blocked URL/,
+  );
+
+  await bridge.close();
+});
 
 test('AbortSignal: closes bridge when signal aborts', async () => {
   const ac = new AbortController();

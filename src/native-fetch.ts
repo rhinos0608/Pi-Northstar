@@ -296,6 +296,7 @@ export async function agenticBrowse(args: Record<string, unknown>, options: Nati
       solveCloudflare: true,
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.env?.PI_SEARCH_SCRAPLING_PROXY ? { proxy: options.env.PI_SEARCH_SCRAPLING_PROXY } : {}),
+      ...(options.lookup ? { lookup: options.lookup } : {}),
     });
   } catch { /* use fallback */ }
 

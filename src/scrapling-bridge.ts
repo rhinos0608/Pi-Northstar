@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { validatePublicHttpUrl, fetchText as realFetchText } from './http.js';
 import { buildPythonChildEnvironment } from './python-child-env.js';
+import { resolvePublicHostname, type DnsLookup } from './network-policy.js';
 
 // ── Constants ──
 
@@ -166,6 +167,7 @@ export interface ScraplingBridgeOptions {
   fetchTimeout?: number;
   signal?: AbortSignal;
   extractLinks?: boolean;
+  lookup?: DnsLookup;
 }
 
 export interface ScraplingFetchResult {
@@ -201,6 +203,7 @@ export class ScraplingBridge {
   };
   private readonly _enabled: boolean;
   private readonly _signal: AbortSignal | undefined;
+  private readonly _lookup: DnsLookup | undefined;
   private readonly _spawn: typeof spawn;
   private readonly _fetchTextFallback: typeof realFetchText;
 
@@ -234,6 +237,7 @@ export class ScraplingBridge {
     };
 
     this._signal = options?.signal;
+    this._lookup = options?.lookup;
     this._spawn = (options as Record<string, unknown>)?._spawn as typeof spawn | undefined ?? spawn;
     this._fetchTextFallback = (options as Record<string, unknown>)?._fetchText as typeof realFetchText | undefined ?? realFetchText;
 
@@ -260,6 +264,14 @@ export class ScraplingBridge {
     if (this._closed) throw new Error('ScraplingBridge is closed');
 
     const validatedUrl = validatePublicHttpUrl(url);
+    // SSRF dispatch gating (mirrors http.ts ordering): static validation
+    // above, DNS preflight here — before any subprocess spawns. Network
+    // enforcement semantics live in network-policy; this only wires it in.
+    // A pre-aborted signal dispatches nothing, so skip straight through and
+    // let the closed/abort path surface as before.
+    if (!this._signal?.aborted) {
+      await resolvePublicHostname(new URL(validatedUrl).hostname, this._signal, this._lookup);
+    }
 
     if (!this._enabled) {
       return this.fallbackFetch(validatedUrl);
@@ -288,8 +300,23 @@ export class ScraplingBridge {
           });
 
           if (response.ok === true) {
+            // Final-URL revalidation: the Python engine may already have
+            // followed redirects before Node sees the result. Fail closed
+            // with a fixed boundary message (never serve blocked content
+            // via return or fallback).
+            // Validate a normalized copy; return the engine URL verbatim
+            // to preserve the prior return shape (no normalization change).
+            const finalUrl = String(response.url ?? validatedUrl);
+            try {
+              const checked = validatePublicHttpUrl(finalUrl);
+              if (!this._signal?.aborted) {
+                await resolvePublicHostname(new URL(checked).hostname, this._signal, this._lookup);
+              }
+            } catch {
+              throw new Error('Scrapling bridge returned blocked URL');
+            }
             return {
-              url: String(response.url ?? validatedUrl),
+              url: finalUrl,
               title: String(response.title ?? ''),
               content: String(response.content ?? ''),
               ...(response.status_code !== undefined && response.status_code !== null
@@ -304,7 +331,10 @@ export class ScraplingBridge {
           // Error response from Python — restart and retry
           if (attempt === 2) break;
           await this.restartProcess(scriptPath);
-        } catch {
+        } catch (err) {
+          // Boundary violations fail closed: never restart into or fall
+          // back onto blocked content.
+          if (err instanceof Error && err.message === 'Scrapling bridge returned blocked URL') throw err;
           // If bridge was closed or aborted, don't restart
           if (this._closed || this._signal?.aborted) throw new Error('ScraplingBridge is closed');
           // Process error / crash — restart and retry
