@@ -666,6 +666,13 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
     pagination: { supported: false, limit, hasMore: false },
   });
 
+  // Freshness provenance: when recency/yearFrom was requested, every retained
+  // hit is labelled. Parseable dates passed the post-filter lower bound, so
+  // they are verified; missing/unparseable dates were retained without a
+  // freshness claim, so they are unverified rather than silently passing.
+  const freshnessBound = resolveWebAccessRecencyLowerBound({ recency: queryFields.recency, yearFrom: queryFields.yearFrom });
+  const freshnessOf = (publishedDate: string | undefined): 'verified' | 'unverified' =>
+    publishedDate !== undefined && !Number.isNaN(Date.parse(publishedDate)) ? 'verified' : 'unverified';
   return northstarTextResult(formatWebResults(query, fused), {
     query,
     effectiveQuery,
@@ -677,6 +684,8 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
       source: hit.backend,
       rrfScore: hit.rrfScore,
       contributors: hit.contributors.map((contributor) => ({ backend: contributor.backend, rank: contributor.rank })),
+      ...(hit.publishedDate !== undefined ? { publishedDate: hit.publishedDate } : {}),
+      ...(freshnessBound !== undefined ? { freshness: freshnessOf(hit.publishedDate) } : {}),
     })),
     fusion: {
       method: 'rrf',

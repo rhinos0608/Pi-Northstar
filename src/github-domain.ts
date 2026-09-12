@@ -97,6 +97,17 @@ function numberField(row: Record<string, unknown>, key: string): number | undefi
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function safePositiveIntField(row: Record<string, unknown>, key: string): number | undefined {
+  const value = row[key];
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 ? value : undefined;
+}
+
+// GitHub REST Issues endpoints return pull requests too; callers must check
+// the pull_request key (present as an object, even empty) to discriminate.
+function isPullRequestRow(row: Record<string, unknown>): boolean {
+  return 'pull_request' in row && isRecord(row.pull_request);
+}
+
 function loginOf(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
   const login = value.login;
@@ -165,19 +176,34 @@ function repoUrl(owner: string, repo: string): string {
   return `${API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 }
 
-function pageNumber(request: GithubRequest): number {
+export interface GithubCursorSelectors {
+  author?: string;
+  jobs?: boolean;
+}
+
+function fingerprintFor(request: GithubRequest, extra?: GithubCursorSelectors): string {
+  return githubCursorFingerprint({
+    action: request.action,
+    ...(request.owner !== undefined ? { owner: request.owner } : {}),
+    ...(request.repo !== undefined ? { repo: request.repo } : {}),
+    limit: request.limit,
+    ...(request.workflow !== undefined ? { workflow: request.workflow } : {}),
+    ...(request.ref !== undefined ? { ref: request.ref } : {}),
+    ...(request.status !== undefined ? { status: request.status } : {}),
+    ...(request.number !== undefined ? { number: request.number } : {}),
+    ...(extra?.author !== undefined ? { author: extra.author } : {}),
+    ...(extra?.jobs === true ? { jobs: true as const } : {}),
+  });
+}
+
+function pageNumber(request: GithubRequest, extra?: GithubCursorSelectors): number {
   if (request.cursor === undefined) return 1;
   let decoded: { state: Record<string, string | number | boolean> };
   try {
     decoded = decodeGithubCursor(request.cursor, {
       action: request.action,
       backend: BACKEND,
-      fingerprint: githubCursorFingerprint({
-        action: request.action,
-        ...(request.owner !== undefined ? { owner: request.owner } : {}),
-        ...(request.repo !== undefined ? { repo: request.repo } : {}),
-        limit: request.limit,
-      }),
+      fingerprint: fingerprintFor(request, extra),
     });
   } catch (error) {
     // Contract distinguishes malformed vs mismatched cursors; the domain
@@ -191,18 +217,13 @@ function pageNumber(request: GithubRequest): number {
   return typeof page === 'number' && Number.isInteger(page) && page >= 1 ? page : 1;
 }
 
-function nextCursor(request: GithubRequest, link: string | null, page: number): string | undefined {
+function nextCursor(request: GithubRequest, link: string | null, page: number, extra?: GithubCursorSelectors): string | undefined {
   if (!githubPaginationSupported(request.action)) return undefined;
   if (link === null || !/rel="next"/.test(link)) return undefined;
   return encodeGithubCursor({
     action: request.action,
     backend: BACKEND,
-    fingerprint: githubCursorFingerprint({
-      action: request.action,
-      ...(request.owner !== undefined ? { owner: request.owner } : {}),
-      ...(request.repo !== undefined ? { repo: request.repo } : {}),
-      limit: request.limit,
-    }),
+    fingerprint: fingerprintFor(request, extra),
     state: { page: page + 1 },
   });
 }
@@ -345,8 +366,9 @@ function normalizeCommit(row: Record<string, unknown>, owner: string, repo: stri
   return entity;
 }
 
-function normalizeWorkflow(row: Record<string, unknown>, owner: string, repo: string): GithubEntityV1 {
-  const workflowId = numberField(row, 'id') ?? 0;
+function normalizeWorkflow(row: Record<string, unknown>, owner: string, repo: string): GithubEntityV1 | null {
+  const workflowId = safePositiveIntField(row, 'id');
+  if (workflowId === undefined) return null;
   const entity: GithubEntityV1 = {
     version: 1,
     kind: 'workflow',
@@ -367,8 +389,9 @@ function normalizeWorkflow(row: Record<string, unknown>, owner: string, repo: st
   return entity;
 }
 
-function normalizeWorkflowRun(row: Record<string, unknown>, owner: string, repo: string): GithubEntityV1 {
-  const runId = numberField(row, 'id') ?? 0;
+function normalizeWorkflowRun(row: Record<string, unknown>, owner: string, repo: string): GithubEntityV1 | null {
+  const runId = safePositiveIntField(row, 'id');
+  if (runId === undefined) return null;
   const entity: GithubEntityV1 = {
     version: 1,
     kind: 'workflow_run',
@@ -376,7 +399,7 @@ function normalizeWorkflowRun(row: Record<string, unknown>, owner: string, repo:
     backend: BACKEND,
     run_id: runId,
   };
-  const runNumber = numberField(row, 'run_number');
+  const runNumber = safePositiveIntField(row, 'run_number');
   if (runNumber !== undefined) entity.run_number = runNumber;
   const name = stringField(row, 'name') ?? stringField(row, 'display_title');
   if (name !== undefined) entity.name = name;
@@ -399,8 +422,9 @@ function normalizeWorkflowRun(row: Record<string, unknown>, owner: string, repo:
   return entity;
 }
 
-function normalizeWorkflowJob(row: Record<string, unknown>, owner: string, repo: string, runId: number): GithubEntityV1 {
-  const jobId = numberField(row, 'id') ?? 0;
+function normalizeWorkflowJob(row: Record<string, unknown>, owner: string, repo: string, runId: number): GithubEntityV1 | null {
+  const jobId = safePositiveIntField(row, 'id');
+  if (jobId === undefined) return null;
   const entity: GithubEntityV1 = {
     version: 1,
     kind: 'workflow_job',
@@ -626,6 +650,9 @@ async function handleIssues(request: GithubRequest, env: Record<string, string |
   if (request.number !== undefined) {
     const { data } = await githubFetch(`${repoUrl(owner, repo)}/issues/${request.number}`, env, signal);
     if (!isRecord(data)) throw githubError('malformed_upstream', 'GitHub issue response was not an object');
+    if (isPullRequestRow(data)) {
+      throw githubError('invalid_request', `number ${request.number} is a pull request, use pulls action`);
+    }
     const page = checkPage({
       entities: [normalizeIssue(data, owner, repo)],
       pagination: { supported: true, limit: request.limit, returned: 1, hasMore: false },
@@ -642,10 +669,16 @@ async function handleIssues(request: GithubRequest, env: Record<string, string |
   url.searchParams.set('page', String(pageNum));
   const { data, link } = await githubFetch(url.href, env, signal);
   if (!Array.isArray(data)) throw githubError('malformed_upstream', 'GitHub issues response was not a list');
+  let excluded = 0;
   const entities = data.flatMap((item): GithubEntityV1[] => {
     if (!isRecord(item)) return [];
+    if (isPullRequestRow(item)) {
+      excluded += 1;
+      return [];
+    }
     return [normalizeIssue(item, owner, repo)];
   }).slice(0, request.limit);
+  const warnings: string[] = excluded > 0 ? [`${excluded} pull request${excluded === 1 ? '' : 's'} excluded from issues list`] : [];
   const cursor = nextCursor(request, link, pageNum);
   const page = checkPage({
     entities,
@@ -656,8 +689,8 @@ async function handleIssues(request: GithubRequest, env: Record<string, string |
       hasMore: cursor !== undefined,
       ...(cursor !== undefined ? { nextCursor: cursor } : {}),
     },
-    partial: false,
-    warnings: [],
+    partial: warnings.length > 0,
+    warnings,
   });
   return { page, degraded: false };
 }
@@ -794,10 +827,11 @@ async function handleCommits(request: GithubRequest, args: Record<string, unknow
     });
     return { page, degraded: false };
   }
-  const pageNum = pageNumber(request);
+  const author = optionalString(args.author);
+  const commitSelectors: GithubCursorSelectors | undefined = author !== undefined ? { author } : undefined;
+  const pageNum = pageNumber(request, commitSelectors);
   const url = new URL(`${repoUrl(owner, repo)}/commits`);
   if (request.path !== undefined) url.searchParams.set('path', request.path);
-  const author = optionalString(args.author);
   if (author !== undefined) url.searchParams.set('author', author);
   if (request.since !== undefined) url.searchParams.set('since', request.since);
   if (request.ref !== undefined) url.searchParams.set('sha', request.ref);
@@ -809,7 +843,7 @@ async function handleCommits(request: GithubRequest, args: Record<string, unknow
     if (!isRecord(item)) return [];
     return [normalizeCommit(item, owner, repo)];
   }).slice(0, request.limit);
-  const cursor = nextCursor(request, link, pageNum);
+  const cursor = nextCursor(request, link, pageNum, commitSelectors);
   const page = checkPage({
     entities,
     pagination: {
@@ -872,8 +906,10 @@ async function handleWorkflows(request: GithubRequest, env: Record<string, strin
   if (request.workflow !== undefined) {
     const { data } = await githubFetch(`${repoUrl(owner, repo)}/actions/workflows/${encodeURIComponent(request.workflow)}`, env, signal);
     if (!isRecord(data)) throw githubError('malformed_upstream', 'GitHub workflow response was not an object');
+    const workflow = normalizeWorkflow(data, owner, repo);
+    if (workflow === null) throw githubError('malformed_upstream', 'GitHub workflow response was missing its id');
     const page = checkPage({
-      entities: [normalizeWorkflow(data, owner, repo)],
+      entities: [workflow],
       pagination: { supported: false, limit: request.limit, returned: 1, hasMore: false },
       partial: false,
       warnings: [],
@@ -888,7 +924,8 @@ async function handleWorkflows(request: GithubRequest, env: Record<string, strin
   if (!isRecord(data) || !Array.isArray(data.workflows)) throw githubError('malformed_upstream', 'GitHub workflows response was not an object');
   const entities = (data.workflows as unknown[]).flatMap((item): GithubEntityV1[] => {
     if (!isRecord(item)) return [];
-    return [normalizeWorkflow(item, owner, repo)];
+    const entity = normalizeWorkflow(item, owner, repo);
+    return entity === null ? [] : [entity];
   }).slice(0, request.limit);
   const cursor = nextCursor(request, link, pageNum);
   const page = checkPage({
@@ -914,16 +951,28 @@ async function handleRuns(request: GithubRequest, args: Record<string, unknown>,
   }
   if (request.number !== undefined) {
     if (args.jobs === true) {
-      const { data } = await githubFetch(`${repoUrl(owner, repo)}/actions/runs/${request.number}/jobs`, env, signal);
+      const pageNum = pageNumber(request, { jobs: true });
+      const jobsUrl = new URL(`${repoUrl(owner, repo)}/actions/runs/${request.number}/jobs`);
+      jobsUrl.searchParams.set('per_page', String(request.limit));
+      jobsUrl.searchParams.set('page', String(pageNum));
+      const { data, link } = await githubFetch(jobsUrl.href, env, signal);
       if (!isRecord(data) || !Array.isArray(data.jobs)) throw githubError('malformed_upstream', 'GitHub jobs response was not an object');
       const runId = request.number;
       const entities = (data.jobs as unknown[]).flatMap((item): GithubEntityV1[] => {
         if (!isRecord(item)) return [];
-        return [normalizeWorkflowJob(item, owner, repo, runId)];
+        const entity = normalizeWorkflowJob(item, owner, repo, runId);
+        return entity === null ? [] : [entity];
       }).slice(0, request.limit);
+      const cursor = nextCursor(request, link, pageNum, { jobs: true });
       const page = checkPage({
         entities,
-        pagination: { supported: true, limit: request.limit, returned: entities.length, hasMore: false },
+        pagination: {
+          supported: true,
+          limit: request.limit,
+          returned: entities.length,
+          hasMore: cursor !== undefined,
+          ...(cursor !== undefined ? { nextCursor: cursor } : {}),
+        },
         partial: false,
         warnings: [],
       });
@@ -931,32 +980,36 @@ async function handleRuns(request: GithubRequest, args: Record<string, unknown>,
     }
     const { data } = await githubFetch(`${repoUrl(owner, repo)}/actions/runs/${request.number}`, env, signal);
     if (!isRecord(data)) throw githubError('malformed_upstream', 'GitHub run response was not an object');
+    const run = normalizeWorkflowRun(data, owner, repo);
+    if (run === null) throw githubError('malformed_upstream', 'GitHub run response was missing its id');
     const page = checkPage({
-      entities: [normalizeWorkflowRun(data, owner, repo)],
+      entities: [run],
       pagination: { supported: true, limit: request.limit, returned: 1, hasMore: false },
       partial: false,
       warnings: [],
     });
     return { page, degraded: false };
   }
-  const pageNum = pageNumber(request);
+  const runAuthor = optionalString(args.author);
+  const runSelectors: GithubCursorSelectors | undefined = runAuthor !== undefined ? { author: runAuthor } : undefined;
+  const pageNum = pageNumber(request, runSelectors);
   const base = request.workflow !== undefined
     ? `${repoUrl(owner, repo)}/actions/workflows/${encodeURIComponent(request.workflow)}/runs`
     : `${repoUrl(owner, repo)}/actions/runs`;
   const url = new URL(base);
   if (request.ref !== undefined) url.searchParams.set('branch', request.ref);
   if (request.status !== undefined) url.searchParams.set('status', request.status);
-  const author = optionalString(args.author);
-  if (author !== undefined) url.searchParams.set('actor', author);
+  if (runAuthor !== undefined) url.searchParams.set('actor', runAuthor);
   url.searchParams.set('per_page', String(request.limit));
   url.searchParams.set('page', String(pageNum));
   const { data, link } = await githubFetch(url.href, env, signal);
   if (!isRecord(data) || !Array.isArray(data.workflow_runs)) throw githubError('malformed_upstream', 'GitHub runs response was not an object');
   const entities = (data.workflow_runs as unknown[]).flatMap((item): GithubEntityV1[] => {
     if (!isRecord(item)) return [];
-    return [normalizeWorkflowRun(item, owner, repo)];
+    const entity = normalizeWorkflowRun(item, owner, repo);
+    return entity === null ? [] : [entity];
   }).slice(0, request.limit);
-  const cursor = nextCursor(request, link, pageNum);
+  const cursor = nextCursor(request, link, pageNum, runSelectors);
   const page = checkPage({
     entities,
     pagination: {

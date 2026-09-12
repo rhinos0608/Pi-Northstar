@@ -251,6 +251,62 @@ test('tavily abort propagates', async () => {
   }
 });
 
+test('tavily pushes recency/domains/freshness to time_range/dates/domain lists', async () => {
+  const { calls, restore } = mockFetch(async () => jsonResponse({ results: [] }));
+  try {
+    await tavilySearchAdapter.search(
+      input({
+        recency: 'week',
+        domains: ['example.com', '-blocked.example'],
+        freshnessLowerBoundMs: Date.UTC(2024, 0, 10),
+      }),
+    );
+    assert.equal(calls.length, 1);
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+    assert.equal(body.time_range, 'week');
+    assert.equal(body.start_date, '2024-01-10');
+    assert.equal('end_date' in body, false);
+    assert.deepEqual(body.include_domains, ['example.com']);
+    assert.deepEqual(body.exclude_domains, ['blocked.example']);
+  } finally {
+    restore();
+  }
+});
+
+test('tavily omits freshness keys when no recency/domains/bound given', async () => {
+  const { calls, restore } = mockFetch(async () => jsonResponse({ results: [] }));
+  try {
+    await tavilySearchAdapter.search(input());
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+    assert.equal('time_range' in body, false);
+    assert.equal('start_date' in body, false);
+    assert.equal('end_date' in body, false);
+    assert.equal('include_domains' in body, false);
+    assert.equal('exclude_domains' in body, false);
+  } finally {
+    restore();
+  }
+});
+
+test('tavily preserves publishedDate from published_date, omits when absent', async () => {
+  const { restore } = mockFetch(async () =>
+    jsonResponse({
+      results: [
+        { title: 'A', url: 'https://example.com/a', content: 'x', published_date: '2024-02-20T00:00:00Z' },
+        { title: 'B', url: 'https://example.com/b', content: 'y' },
+      ],
+    }),
+  );
+  try {
+    const out = await tavilySearchAdapter.search(input());
+    assert.equal(out.hits.length, 2);
+    assert.equal(out.hits[0]!.publishedDate, '2024-02-20T00:00:00Z');
+    assert.equal(out.hits[1]!.publishedDate, undefined);
+  } finally {
+    restore();
+  }
+});
+
 function sseResponse(chunks: Array<string | Uint8Array>, status = 200): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({

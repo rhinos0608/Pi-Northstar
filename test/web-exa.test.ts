@@ -224,6 +224,60 @@ test('exa without signal still applies bounded 15s standalone default', async ()
   }
 });
 
+test('exa pushes domains + freshnessLowerBoundMs to startPublishedDate/includeDomains/excludeDomains', async () => {
+  const { calls, restore } = mockFetch(async () => jsonResponse({ results: [] }));
+  try {
+    await exaSearchAdapter.search(
+      input({ domains: ['example.com', '-blocked.example'], freshnessLowerBoundMs: Date.UTC(2024, 5, 15) }),
+    );
+    assert.equal(calls.length, 1);
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+    assert.deepEqual(body.includeDomains, ['example.com']);
+    assert.deepEqual(body.excludeDomains, ['blocked.example']);
+    assert.equal(body.startPublishedDate, '2024-06-15T00:00:00.000Z');
+  } finally {
+    restore();
+  }
+});
+
+test('exa derives startPublishedDate from yearFrom/recency when no explicit bound', async () => {
+  const m1 = mockFetch(async () => jsonResponse({ results: [] }));
+  try {
+    await exaSearchAdapter.search(input({ yearFrom: 2021 }));
+    const body = JSON.parse(String(m1.calls[0]!.init?.body)) as Record<string, unknown>;
+    assert.equal(body.startPublishedDate, '2021-01-01T00:00:00.000Z');
+  } finally {
+    m1.restore();
+  }
+  const m2 = mockFetch(async () => jsonResponse({ results: [] }));
+  try {
+    await exaSearchAdapter.search(input({ recency: 'day' }));
+    const body = JSON.parse(String(m2.calls[0]!.init?.body)) as Record<string, unknown>;
+    assert.match(String(body.startPublishedDate), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  } finally {
+    m2.restore();
+  }
+});
+
+test('exa preserves publishedDate from provider date fields, omits when absent', async () => {
+  const { restore } = mockFetch(async () =>
+    jsonResponse({
+      results: [
+        { title: 'A', url: 'https://example.com/a', text: 'x', published_date: '2024-03-01T00:00:00Z' },
+        { title: 'B', url: 'https://example.com/b', text: 'y' },
+      ],
+    }),
+  );
+  try {
+    const out = await exaSearchAdapter.search(input());
+    assert.equal(out.hits.length, 2);
+    assert.equal(out.hits[0]!.publishedDate, '2024-03-01T00:00:00Z');
+    assert.equal(out.hits[1]!.publishedDate, undefined);
+  } finally {
+    restore();
+  }
+});
+
 test('exa abort propagates', async () => {
   const { restore } = mockFetch(async () => {
     throw new DOMException('This operation was aborted', 'AbortError');

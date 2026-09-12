@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
-import { resolveCliCommand } from '../src/cli-command.js';
+import { quoteCmdArg, resolveCliCommand } from '../src/cli-command.js';
 
 const WIN = { platform: 'win32' as const };
 
@@ -56,4 +56,12 @@ test('win32 misses and explicit paths return the command unchanged', () => {
     resolveCliCommand('./local/bili', { ...WIN, exists: () => { throw new Error('must not consult fs'); } }),
     './local/bili',
   );
+});
+
+test('quoteCmdArg always quotes so cmd metacharacters stay literal', () => {
+  assert.equal(quoteCmdArg('a&b'), '"a&b"');
+  assert.equal(quoteCmdArg('C:\\tools\\opencli.cmd'), '"C:\\tools\\opencli.cmd"');
+  assert.equal(quoteCmdArg('say "hi"'), '"say ""hi"""');
+  assert.equal(quoteCmdArg('trail\\'), '"trail\\\\"');
+  assert.equal(quoteCmdArg(''), '""');
 });

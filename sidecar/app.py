@@ -45,15 +45,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="embedding-sidecar", lifespan=lifespan)
 
 
+MAX_TEXTS_PER_REQUEST = 100
+# Matches EmbeddingClient.MAX_INPUT_CHARS so client-truncated input is never 413'd.
+MAX_CHARS_PER_TEXT = 8192
+
+
 @app.exception_handler(Exception)
 async def global_exc_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}")
+    logger.error(f"Unhandled exception: {type(exc).__name__}: {exc}")
     return JSONResponse(
         status_code=500,
         content={
             "error": {
-                "message": str(exc),
-                "type": type(exc).__name__,
+                "message": "internal server error",
+                "type": "internal_error",
                 "code": 500,
             }
         },
@@ -123,17 +128,41 @@ async def embeddings(req: EmbeddingRequest):
             },
         )
 
+    if len(texts) > MAX_TEXTS_PER_REQUEST:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "message": f"too many texts: maximum {MAX_TEXTS_PER_REQUEST} per request",
+                    "type": "request_too_large",
+                    "code": 413,
+                }
+            },
+        )
+    for text in texts:
+        if len(text) > MAX_CHARS_PER_TEXT:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": {
+                        "message": f"text too long: maximum {MAX_CHARS_PER_TEXT} chars per text",
+                        "type": "request_too_large",
+                        "code": 413,
+                    }
+                },
+            )
+
     try:
         loop = asyncio.get_event_loop()
         embeddings = (await loop.run_in_executor(None, model.encode, texts)).tolist()
     except Exception as e:
-        logger.error(f"Encoding failed: {e}")
+        logger.error(f"Encoding failed: {type(e).__name__}: {e}")
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
-                    "message": str(e),
-                    "type": type(e).__name__,
+                    "message": "embedding failed",
+                    "type": "internal_error",
                     "code": 500,
                 }
             },

@@ -637,7 +637,9 @@ test('video: stored bilibili cookies derive BILIBILI_* vars for the bili child',
       { name: 'bili_jct', value: 'csrf-value', domain: '.bilibili.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
     ], { PI_SEARCH_STATE_DIR: dir }, 'fixture');
     await writeShim(dir, 'bili', `#!/bin/sh\n/usr/bin/env | /usr/bin/sort > ${join(dir, 'bili.env')}\necho '{"items":[]}'\n`);
-    await callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
+    // Hermetic on Windows: resolveCliCommand reads process.env.PATH (not the
+    // child env), so the shim dir must be on the real PATH during the call.
+    await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } }));
     const captured = await readFile(join(dir, 'bili.env'), 'utf8');
     assert.match(captured, /BILIBILI_SESSDATA=sess-secret-value/);
     assert.match(captured, /BILIBILI_CSRF=csrf-value/);
@@ -656,7 +658,11 @@ test('video: bilibili transcript runs opencli with OPENCLI_* and no secrets', as
       PATH: dir, OPENCLI_HOST: 'cli.example', OPENCLI_PORT: '9222', OPENCLI_TOKEN: 'opencli-secret',
       REDDIT_COOKIE: 'cookie-secret', GITHUB_TOKEN: 'github-secret',
     };
-    const result = await callNativeTool('video', { platform: 'bilibili', action: 'transcript', id: 'BV1xx411c7mD' }, { env });
+    // Hermetic on Windows: resolveCliCommand reads process.env.PATH (not the
+    // child env), so the shim dir must be on the real PATH during the call.
+    // Secret-leakage assertions below are unchanged and still meaningful: the
+    // .cmd twin dumps the real child env via `set`.
+    const result = await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'transcript', id: 'BV1xx411c7mD' }, { env }));
     assert.equal((result.details as { backend?: string }).backend, 'OpenCLI');
     const items = (result.details as { items?: Array<{ kind?: string; segments?: unknown[] }> }).items;
     assert.equal(items?.[0]?.kind, 'video_transcript');

@@ -338,6 +338,14 @@ function checkBoundedText(entity: Record<string, unknown>, field: string, issues
   }
 }
 
+function checkSafePositiveInt(entity: Record<string, unknown>, field: string, issues: string[]): void {
+  const value = entity[field];
+  if (value === undefined) return;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    issues.push(`${field} must be a safe positive integer`);
+  }
+}
+
 function checkFiniteNumber(entity: Record<string, unknown>, field: string, issues: string[]): void {
   const value = entity[field];
   if (value === undefined) return;
@@ -485,7 +493,7 @@ export function validateGithubEntity(value: unknown): { ok: boolean; issues: str
       break;
     }
     case 'workflow': {
-      checkFiniteNumber(entity, 'workflow_id', issues);
+      checkSafePositiveInt(entity, 'workflow_id', issues);
       if (entity.workflow_id === undefined) issues.push('workflow_id is required');
       checkStringField(entity, 'name', issues);
       checkStringField(entity, 'path', issues);
@@ -495,9 +503,9 @@ export function validateGithubEntity(value: unknown): { ok: boolean; issues: str
       break;
     }
     case 'workflow_run': {
-      checkFiniteNumber(entity, 'run_id', issues);
+      checkSafePositiveInt(entity, 'run_id', issues);
       if (entity.run_id === undefined) issues.push('run_id is required');
-      checkFiniteNumber(entity, 'run_number', issues);
+      checkSafePositiveInt(entity, 'run_number', issues);
       checkStringField(entity, 'name', issues);
       checkStringField(entity, 'status', issues);
       checkStringField(entity, 'conclusion', issues);
@@ -510,9 +518,9 @@ export function validateGithubEntity(value: unknown): { ok: boolean; issues: str
       break;
     }
     case 'workflow_job': {
-      checkFiniteNumber(entity, 'job_id', issues);
+      checkSafePositiveInt(entity, 'job_id', issues);
       if (entity.job_id === undefined) issues.push('job_id is required');
-      checkFiniteNumber(entity, 'run_id', issues);
+      checkSafePositiveInt(entity, 'run_id', issues);
       if (entity.run_id === undefined) issues.push('run_id is required');
       if (typeof entity.name !== 'string' || entity.name.length === 0) issues.push('name is required');
       checkStringField(entity, 'status', issues);
@@ -686,11 +694,30 @@ export interface GithubCursorFingerprintInput {
   owner?: string;
   repo?: string;
   limit: number;
+  workflow?: string;
+  ref?: string;
+  status?: string;
+  number?: number;
+  author?: string;
+  jobs?: boolean;
 }
 
-/** SHA-256 fingerprint pinning owner/repo/action/limit. */
+/** SHA-256 fingerprint pinning action/owner/repo/limit plus every
+ * result-shaping selector (workflow, ref, status, number, author, jobs), so a
+ * cursor cannot be reused with a different query. */
 export function githubCursorFingerprint(input: GithubCursorFingerprintInput): string {
-  const parts: string[] = [input.action, input.owner ?? '', input.repo ?? '', String(input.limit)];
+  const parts: string[] = [
+    input.action,
+    input.owner ?? '',
+    input.repo ?? '',
+    String(input.limit),
+    input.workflow ?? '',
+    input.ref ?? '',
+    input.status ?? '',
+    input.number !== undefined ? String(input.number) : '',
+    input.author ?? '',
+    input.jobs === true ? 'jobs' : '',
+  ];
   return createHash('sha256').update(parts.join('|'), 'utf8').digest('hex');
 }
 

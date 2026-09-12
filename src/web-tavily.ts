@@ -249,6 +249,66 @@ function stringField(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback;
 }
 
+function splitTavilyDomains(domains: string[] | undefined): { include: string[]; exclude: string[] } {
+  const include: string[] = [];
+  const exclude: string[] = [];
+  for (const raw of domains ?? []) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('-')) {
+      const value = trimmed.slice(1).replace(/^\.+/, '');
+      if (value) exclude.push(value);
+    } else {
+      const value = trimmed.replace(/^\.+/, '');
+      if (value) include.push(value);
+    }
+  }
+  return { include, exclude };
+}
+
+function tavilyDateRangeOf(input: WebProviderSearchInput): { start_date: string } | Record<string, never> {
+  let bound = input.freshnessLowerBoundMs;
+  if ((bound === undefined || !Number.isFinite(bound)) && (input.recency !== undefined || input.yearFrom !== undefined)) {
+    let derived: number | undefined;
+    if (input.recency !== undefined) {
+      const now = Date.now();
+      const date = new Date(now);
+      switch (input.recency) {
+        case 'day': derived = now - 24 * 60 * 60 * 1000; break;
+        case 'week': derived = now - 7 * 24 * 60 * 60 * 1000; break;
+        case 'month':
+          derived = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, date.getUTCDate(), 0, 0, 0, 0);
+          break;
+        case 'year':
+          derived = Date.UTC(date.getUTCFullYear() - 1, date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0);
+          break;
+      }
+    }
+    if (input.yearFrom !== undefined) {
+      const yearBound = Date.UTC(input.yearFrom, 0, 1, 0, 0, 0, 0);
+      derived = derived === undefined ? yearBound : Math.max(derived, yearBound);
+    }
+    bound = derived;
+  }
+  if (bound === undefined || !Number.isFinite(bound)) return {};
+  // Lower bound only: an end_date of today would exclude current-day results
+  // under Tavily's "before end_date" semantics. time_range (when recency is
+  // set) carries the relative window alongside this explicit start_date.
+  return {
+    start_date: new Date(bound).toISOString().slice(0, 10),
+  };
+}
+
+function tavilyPublishedDateOf(record: Record<string, unknown>): string | undefined {
+  for (const key of ['published_date', 'publishedDate', 'date'] as const) {
+    const value = record[key];
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const trimmed = value.trim();
+    if (!Number.isNaN(Date.parse(trimmed))) return trimmed;
+  }
+  return undefined;
+}
+
 export const tavilySearchAdapter: WebSearchAdapter = {
   id: 'tavily',
   configured(env: Record<string, string | undefined>): boolean {
@@ -265,6 +325,7 @@ export const tavilySearchAdapter: WebSearchAdapter = {
       { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       undefined,
     );
+    const { include, exclude } = splitTavilyDomains(input.domains);
     const response = await fetch(TAVILY_SEARCH_ENDPOINT, {
       method: 'POST',
       body: JSON.stringify({
@@ -274,6 +335,10 @@ export const tavilySearchAdapter: WebSearchAdapter = {
         include_answer: input.nativeAi.answers ? 'basic' : false,
         include_raw_content: false,
         include_images: false,
+        ...(input.recency !== undefined ? { time_range: input.recency } : {}),
+        ...tavilyDateRangeOf(input),
+        ...(include.length > 0 ? { include_domains: include } : {}),
+        ...(exclude.length > 0 ? { exclude_domains: exclude } : {}),
       }),
       ...validated,
       ...(input.signal !== undefined ? { signal: input.signal } : {}),
@@ -296,11 +361,13 @@ export const tavilySearchAdapter: WebSearchAdapter = {
       const record = row as Record<string, unknown>;
       const url = stringField(record.url, '');
       if (!isHttpUrl(url)) continue;
+      const publishedDate = tavilyPublishedDateOf(record);
       hits.push({
         title: stringField(record.title, 'Untitled'),
         url,
         snippet: stringField(record.content, '').trim().slice(0, WEB_GENERATED_TEXT_MAX_CHARS),
         backend: 'tavily',
+        ...(publishedDate !== undefined ? { publishedDate } : {}),
       });
     }
     const generatedText: WebGeneratedText[] = [];

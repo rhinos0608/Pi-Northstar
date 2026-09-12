@@ -25,8 +25,7 @@
 // fallback here; only capability-declared backends run (plus the single
 // documented unofficial youtube-transcript plan).
 
-import { spawn } from 'node:child_process';
-import { resolveCliCommand } from './cli-command.js';
+import { spawnCliCommand } from './cli-command.js';
 import type { BackendCallResult } from './backend.js';
 import { backendCapability, inferPlatformFromUrl } from './capabilities.js';
 import { cookieAuthEnvironment, cookieHeaderForUrl } from './cookie-jar.js';
@@ -370,10 +369,9 @@ function runCli(command: string, args: string[], env: Record<string, string>, si
     let stderr = '';
     let aborted = false;
     let timedOut = false;
-    // win32: CreateProcess skips PATHEXT lookup, so resolve bare commands to
-    // their on-disk .cmd/.exe path first. Spawn stays shell:false — argv must
-    // never reach cmd.exe parsing (shell:true concatenates args unescaped).
-    const child = spawn(resolveCliCommand(command), args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Portable spawn: .cmd/.bat shims run via cmd.exe with pre-quoted argv
+    // (shell:false cannot execute them — spawn EINVAL); see cli-command.ts.
+    const child = spawnCliCommand(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let killTimer: NodeJS.Timeout | undefined;
     const terminate = () => {
       child.kill('SIGTERM');

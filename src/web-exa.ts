@@ -25,6 +25,58 @@ function stringField(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback;
 }
 
+function splitDomains(domains: string[] | undefined): { include: string[]; exclude: string[] } {
+  const include: string[] = [];
+  const exclude: string[] = [];
+  for (const raw of domains ?? []) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('-')) {
+      const value = trimmed.slice(1).replace(/^\.+/, '');
+      if (value) exclude.push(value);
+    } else {
+      const value = trimmed.replace(/^\.+/, '');
+      if (value) include.push(value);
+    }
+  }
+  return { include, exclude };
+}
+
+function startPublishedDateOf(input: WebProviderSearchInput): string | undefined {
+  if (input.freshnessLowerBoundMs !== undefined && Number.isFinite(input.freshnessLowerBoundMs)) {
+    return new Date(input.freshnessLowerBoundMs).toISOString();
+  }
+  let bound: number | undefined;
+  if (input.recency !== undefined) {
+    const now = Date.now();
+    const date = new Date(now);
+    switch (input.recency) {
+      case 'day': bound = now - 24 * 60 * 60 * 1000; break;
+      case 'week': bound = now - 7 * 24 * 60 * 60 * 1000; break;
+      case 'month':
+        bound = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, date.getUTCDate(), 0, 0, 0, 0);
+        break;
+      case 'year':
+        bound = Date.UTC(date.getUTCFullYear() - 1, date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0);
+        break;
+    }
+  }
+  if (input.yearFrom !== undefined) {
+    const yearBound = Date.UTC(input.yearFrom, 0, 1, 0, 0, 0, 0);
+    bound = bound === undefined ? yearBound : Math.max(bound, yearBound);
+  }
+  return bound === undefined ? undefined : new Date(bound).toISOString();
+}
+
+function publishedDateOf(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const trimmed = value.trim();
+    if (!Number.isNaN(Date.parse(trimmed))) return trimmed;
+  }
+  return undefined;
+}
+
 function excerptFromRow(row: Record<string, unknown>): string {
   const highlights = row.highlights;
   if (Array.isArray(highlights)) {
@@ -48,6 +100,8 @@ export const exaSearchAdapter: WebSearchAdapter = {
     const contents = input.nativeAi.summaries
       ? { text: true, highlights: true, summary: true }
       : { text: true, highlights: true };
+    const { include, exclude } = splitDomains(input.domains);
+    const startPublishedDate = startPublishedDateOf(input);
     // Deadline comes from the runtime-composed policy signal (already bounded
     // by PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS). Pass it through unwrapped; only
     // standalone calls without a signal get the bounded fetchInit default.
@@ -62,6 +116,9 @@ export const exaSearchAdapter: WebSearchAdapter = {
         numResults,
         type: 'auto',
         contents,
+        ...(include.length > 0 ? { includeDomains: include } : {}),
+        ...(exclude.length > 0 ? { excludeDomains: exclude } : {}),
+        ...(startPublishedDate !== undefined ? { startPublishedDate } : {}),
       }),
       ...validated,
       ...(input.signal !== undefined ? { signal: input.signal } : {}),
@@ -84,11 +141,13 @@ export const exaSearchAdapter: WebSearchAdapter = {
       const record = row as Record<string, unknown>;
       const url = stringField(record.url, '');
       if (!isHttpUrl(url)) continue;
+      const publishedDate = publishedDateOf(record.publishedDate, record.published_date, record.date);
       hits.push({
         title: stringField(record.title, 'Untitled'),
         url,
         snippet: excerptFromRow(record),
         backend: 'exa',
+        ...(publishedDate !== undefined ? { publishedDate } : {}),
       });
       if (input.nativeAi.summaries && generatedText.length < WEB_GENERATED_TEXT_MAX_ITEMS) {
         const summary = stringField(record.summary, '').trim();

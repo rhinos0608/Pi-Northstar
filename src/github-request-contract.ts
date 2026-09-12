@@ -401,11 +401,17 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   }
   const workflow = workflowRaw !== undefined ? validateGithubPath(workflowRaw) : undefined;
 
+  if (workflowRaw !== undefined && action !== 'workflows' && action !== 'runs') {
+    throw githubError('invalid_request', `workflow is only supported for github workflows and runs: ${echo(workflowRaw)}`);
+  }
   const status = cleanField(input.status);
   if (typeof input.status === 'string' && status === undefined) {
     throw githubError('invalid_request', 'status must be a non-empty string when provided');
   }
-  if (status !== undefined && action === 'runs' && !GITHUB_RUN_STATUS_SET.has(status)) {
+  if (status !== undefined && action !== 'runs') {
+    throw githubError('invalid_request', `status is only supported for github runs: ${echo(status)}`);
+  }
+  if (status !== undefined && !GITHUB_RUN_STATUS_SET.has(status)) {
     throw githubError('invalid_request', `status must be one of ${GITHUB_RUN_STATUSES.join(', ')}: ${echo(status)}`);
   }
 

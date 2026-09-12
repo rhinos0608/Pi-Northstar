@@ -36,42 +36,153 @@ const DEFAULT_STOPWORDS = new Set([
   'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'don', 'now',
 ]);
 
-// Doubled consonants collapsed after -ing/-ed stripping. `ll`, `ss`, and
-// `zz` are excluded: called -> call, passed -> pass, buzzing -> buzz must
-// keep their double letter, while running -> runn -> run collapses.
-const COLLAPSE_DOUBLES = new Set(['bb', 'cc', 'dd', 'ff', 'gg', 'mm', 'nn', 'pp', 'rr', 'tt']);
-
 /**
- * Minimal dependency-free suffix stemmer for English verb/noun inflections.
- * Assumes lowercase input (tokenize lowercases by default). Conservative by
- * design: short tokens (length <= 3) pass through untouched, and derivational
- * suffixes like -er/-or/-ly are never stripped, so agent nouns (`runner`)
- * keep their form while inflections (`running`, `runs`) fold to `run`.
+ * Porter stemmer (Martin Porter, 1980; public-domain algorithm) for English.
+ * Assumes lowercase input (tokenize lowercases by default). Dependency-free.
+ * Normalizes inflections to a shared base (`movies`/`movie` -> `movi`,
+ * `cases`/`case` -> `case`, `running`/`runs` -> `run`) while leaving base
+ * words alone (`string` stays `string` via the vowel-in-stem guard; `bus`,
+ * `class` keep their form via the `us`/`ss` guard; agent nouns like `runner`
+ * are never stripped to `run`). Non-ASCII tokens pass through untouched.
  */
 export function stem(token: string): string {
-  if (token.length <= 3) return token;
-  // -ies -> -y (stories -> story). Length guard keeps `ties` on the -s path.
-  if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
-  // -ing / -ed with doubled-consonant collapse (running -> run, stopped -> stop).
-  // Base-length guard keeps short words (`aging`, `seed`, `red`) intact.
-  if (token.endsWith('ing') || token.endsWith('ed')) {
-    const suffixLength = token.endsWith('ing') ? 3 : 2;
-    const base = token.slice(0, -suffixLength);
-    if (base.length >= 3) {
-      const lastTwo = base.slice(-2);
-      if (COLLAPSE_DOUBLES.has(lastTwo)) return base.slice(0, -1);
-      return base;
+  if (token.length <= 2) return token;
+  if (!/^[a-z]+$/.test(token)) return token;
+  return porter(token);
+}
+
+function isConsonant(word: string, i: number): boolean {
+  const ch = word[i]!;
+  if (ch === 'a' || ch === 'e' || ch === 'i' || ch === 'o' || ch === 'u') return false;
+  if (ch === 'y') return i === 0 ? true : !isConsonant(word, i - 1);
+  return true;
+}
+
+function measure(word: string): number {
+  let m = 0;
+  let i = 0;
+  const n = word.length;
+  while (i < n && isConsonant(word, i)) i++;
+  while (i < n) {
+    while (i < n && !isConsonant(word, i)) i++;
+    if (i >= n) break;
+    m++;
+    while (i < n && isConsonant(word, i)) i++;
+  }
+  return m;
+}
+
+function hasVowel(word: string): boolean {
+  for (let i = 0; i < word.length; i++) if (!isConsonant(word, i)) return true;
+  return false;
+}
+
+function endsDoubleConsonant(word: string): boolean {
+  if (word.length < 2) return false;
+  const a = word[word.length - 1]!;
+  const b = word[word.length - 2]!;
+  return a === b && isConsonant(word, word.length - 1);
+}
+
+function endsCvc(word: string): boolean {
+  if (word.length < 3) return false;
+  const c = word[word.length - 1]!;
+  if (c === 'w' || c === 'x' || c === 'y') return false;
+  return (
+    isConsonant(word, word.length - 1) &&
+    !isConsonant(word, word.length - 2) &&
+    isConsonant(word, word.length - 3)
+  );
+}
+
+function porter(input: string): string {
+  let word = input;
+  // Step 1a: plurals. `us`/`ss` guard keeps `bus`/`class` intact.
+  if (word.endsWith('sses')) word = `${word.slice(0, -2)}`;
+  else if (word.endsWith('ies')) word = `${word.slice(0, -2)}`;
+  else if (word.endsWith('ss')) { /* keep */ } else if (word.endsWith('us')) { /* keep base words like `bus` */ } else if (word.endsWith('s')) word = word.slice(0, -1);
+  // Step 1b
+  let flag = false;
+  if (word.endsWith('eed')) {
+    const base = word.slice(0, -3);
+    if (measure(base) > 0) word = `${base}ee`;
+  } else if (word.endsWith('ed')) {
+    const base = word.slice(0, -2);
+    if (hasVowel(base)) {
+      word = base;
+      flag = true;
     }
-    return token;
+  } else if (word.endsWith('ing')) {
+    const base = word.slice(0, -3);
+    if (hasVowel(base)) {
+      word = base;
+      flag = true;
+    }
   }
-  // -es after sibilants (boxes -> box, watches -> watch, wishes -> wish).
-  if (/(?:s|x|z|ch|sh)es$/.test(token) && token.length > 4) return token.slice(0, -2);
-  // Plain plural -s (runs -> run, cats -> cat). `ss`/`us` guard keeps
-  // `class` and `bus` intact.
-  if (token.endsWith('s') && !token.endsWith('ss') && !token.endsWith('us') && token.length > 3) {
-    return token.slice(0, -1);
+  if (flag) {
+    if (word.endsWith('at') || word.endsWith('bl') || word.endsWith('iz')) word = `${word}e`;
+    else if (endsDoubleConsonant(word) && !word.endsWith('l') && !word.endsWith('s') && !word.endsWith('z')) {
+      word = word.slice(0, -1);
+    } else if (measure(word) === 1 && endsCvc(word)) word = `${word}e`;
   }
-  return token;
+  // Step 1c: trailing y -> i only after a consonant (`story` -> `stori`,
+  // but `play` stays `play`). The vowel guard keeps `string`-like bases intact.
+  if (word.endsWith('y')) {
+    const base = word.slice(0, -1);
+    if (base.length > 0 && isConsonant(base, base.length - 1) && hasVowel(base)) word = `${base}i`;
+  }
+  // Step 2
+  const step2: Array<[string, string]> = [
+    ['ational', 'ate'], ['tional', 'tion'], ['enci', 'ence'], ['anci', 'ance'],
+    ['izer', 'ize'], ['bli', 'ble'], ['alli', 'al'], ['entli', 'ent'],
+    ['eli', 'e'], ['ousli', 'ous'], ['ization', 'ize'], ['ation', 'ate'],
+    ['ator', 'ate'], ['alism', 'al'], ['iveness', 'ive'], ['fulness', 'ful'],
+    ['ousness', 'ous'], ['aliti', 'al'], ['iviti', 'ive'], ['biliti', 'ble'],
+    ['logi', 'log'],
+  ];
+  for (const [suffix, replacement] of step2) {
+    if (word.endsWith(suffix)) {
+      const base = word.slice(0, -suffix.length);
+      if (measure(base) > 0) word = `${base}${replacement}`;
+      break;
+    }
+  }
+  // Step 3
+  const step3: Array<[string, string]> = [
+    ['icate', 'ic'], ['ative', ''], ['alize', 'al'], ['iciti', 'ic'],
+    ['ical', 'ic'], ['ful', ''], ['ness', ''],
+  ];
+  for (const [suffix, replacement] of step3) {
+    if (word.endsWith(suffix)) {
+      const base = word.slice(0, -suffix.length);
+      if (measure(base) > 0) word = `${base}${replacement}`;
+      break;
+    }
+  }
+  // Step 4
+  const step4 = ['al', 'ance', 'ence', 'er', 'ic', 'able', 'ible', 'ant', 'ement', 'ment', 'ent', 'ion', 'ou', 'ism', 'ate', 'iti', 'ous', 'ive', 'ize'];
+  for (const suffix of step4) {
+    if (word.endsWith(suffix)) {
+      const base = word.slice(0, -suffix.length);
+      if (measure(base) > 1) {
+        if (suffix === 'ion') {
+          if (base.endsWith('s') || base.endsWith('t')) word = base;
+        } else {
+          word = base;
+        }
+      }
+      break;
+    }
+  }
+  // Step 5a
+  if (word.endsWith('e')) {
+    const base = word.slice(0, -1);
+    const m = measure(base);
+    if (m > 1 || (m === 1 && !endsCvc(base))) word = base;
+  }
+  // Step 5b
+  if (measure(word) > 1 && endsDoubleConsonant(word) && word.endsWith('l')) word = word.slice(0, -1);
+  return word;
 }
 
 export function tokenize(text: string, options?: TokenizerOptions): string[] {

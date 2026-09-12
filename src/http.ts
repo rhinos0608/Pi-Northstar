@@ -56,19 +56,45 @@ async function fetchFollowingRedirects(url: string, headersOrSignal: Record<stri
   if (!effectiveSignal?.aborted) {
     await resolvePublicHostname(new URL(currentUrl).hostname, dnsSignal, lookup);
   }
+  // Credential-class headers must never ride a cross-origin hop: a compromised
+  // upstream redirect target would otherwise exfiltrate API keys/cookies.
+  // Same-origin hops keep headers (session cookies stay functional).
+  let hopHeaders: Record<string, string> = { ...headers };
   for (let hop = 0; ; hop++) {
-    const response = await fetch(currentUrl, fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
+    const response = await fetch(currentUrl, fetchInit(hopHeaders, effectiveSignal, timeoutMs, 'manual'));
     if (response.status < 300 || response.status >= 400) return response;
     if (hop >= maxRedirects) throw new Error(`Too many redirects for ${url}`);
     const location = response.headers.get('location');
     if (!location) throw new Error(`Redirect without Location header for ${currentUrl}`);
     const nextUrl = validatePublicHttpUrl(new URL(location, currentUrl).href);
+    if (new URL(nextUrl).origin !== new URL(currentUrl).origin) {
+      hopHeaders = stripCredentialHeaders(hopHeaders);
+    }
     // DNS preflight every hop: static literal check above is not enough —
     // a redirect hostname can resolve to private/reserved space. Fail closed.
     // Residual TOCTOU remains (fetch resolves independently); container egress stays outer boundary.
     await resolvePublicHostname(new URL(nextUrl).hostname, dnsSignal, lookup);
     currentUrl = nextUrl;
   }
+}
+
+/** Credential-class headers stripped on cross-origin redirect hops
+ * (case-insensitive). Same-origin hops keep all headers. */
+const CREDENTIAL_HEADER_NAMES = new Set([
+  'authorization',
+  'x-subscription-token',
+  'x-api-key',
+  'cookie',
+  'set-cookie',
+  'proxy-authorization',
+]);
+
+function stripCredentialHeaders(headers: Record<string, string>): Record<string, string> {
+  const kept: Record<string, string> = {};
+  for (const name of Object.keys(headers)) {
+    if (!CREDENTIAL_HEADER_NAMES.has(name.toLowerCase())) kept[name] = headers[name]!;
+  }
+  return kept;
 }
 
 /**

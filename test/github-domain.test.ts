@@ -259,7 +259,9 @@ test('runs list scoped to workflow, get single run, and jobs normalize', async (
   assert.equal(((single.details as Record<string, unknown>).entities as Array<Record<string, unknown>>)[0]?.run_number, 562);
 
   const jobs = await withFetch(async (input) => {
-    assert.match(String(input), /\/actions\/runs\/30433642\/jobs$/);
+    assert.match(String(input), /\/actions\/runs\/30433642\/jobs\?/);
+    assert.match(String(input), /per_page=20/);
+    assert.match(String(input), /page=1/);
     return jsonResponse({
       total_count: 1,
       jobs: [{
@@ -308,6 +310,39 @@ test('tree normalizes entries', async () => {
   const entities = (result.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
   assert.equal(entities[0]?.kind, 'tree');
   assert.equal((entities[0]?.entries as unknown[]).length, 2);
+});
+
+test('issues list excludes pull_request rows; single PR number rejects', async () => {
+  const issue = {
+    id: 9, number: 12, title: 'bug', state: 'open',
+    user: { login: 'octo' }, html_url: 'https://github.com/o/r/issues/12',
+    body: 'details', labels: [{ name: 'bug' }], created_at: '2024-01-01T00:00:00Z',
+  };
+  const prRow = {
+    id: 10, number: 13, title: 'feat', state: 'open',
+    user: { login: 'dev' }, html_url: 'https://github.com/o/r/pull/13',
+    body: 'pr body', labels: [], created_at: '2024-01-02T00:00:00Z',
+    pull_request: {},
+  };
+  const list = await withFetch(async () => jsonResponse([issue, prRow]),
+    () => callGithubTool({ action: 'issues', owner: 'o', repo: 'r', state: 'open' }, { env: {} }));
+  const details = list.details as {
+    entities: Array<Record<string, unknown>>;
+    pagination: { returned: number };
+    partial: boolean; warnings: string[];
+  };
+  assert.equal(details.entities.length, 1);
+  assert.equal(details.entities[0]?.kind, 'issue');
+  assert.equal(details.entities[0]?.number, 12);
+  assert.equal(details.pagination.returned, 1);
+  assert.equal(details.partial, true);
+  assert.match(details.warnings.join('; '), /1 pull request excluded from issues list/);
+
+  const err = await expectGithubError('invalid_request', () => withFetch(async (input) => {
+    assert.match(String(input), /\/issues\/13$/);
+    return jsonResponse(prRow);
+  }, () => callGithubTool({ action: 'issues', owner: 'o', repo: 'r', number: 13 }, { env: {} })));
+  assert.match(err.message, /number 13 is a pull request, use pulls action/);
 });
 
 // ── Validation before fetch ──
@@ -480,6 +515,65 @@ test('cursor round-trips page state and pins action+owner/repo+limit', async () 
     return jsonResponse([]);
   }, () => callGithubTool({ action: 'issues', owner: 'o', repo: 'r', limit: 10, cursor }, { env: {} })));
   assert.equal(fetched, false, 'cursor mismatch must reject before fetch');
+});
+
+test('runs cursor pins workflow, status, and author selectors', async () => {
+  const run = {
+    id: 1, run_number: 1, name: 'Build', status: 'completed', conclusion: 'success',
+    head_branch: 'main', head_sha: 'abc1234', event: 'push',
+    html_url: 'https://github.com/o/r/actions/runs/1', created_at: '2024-01-01T00:00:00Z',
+  };
+  const mock: FetchMock = async () => jsonResponse({ total_count: 1, workflow_runs: [run] }, 200, {
+    Link: '<https://api.github.com/repos/o/r/actions/runs?per_page=20&page=2>; rel="next"',
+  });
+  const first = await withFetch(mock, () => callGithubTool(
+    { action: 'runs', owner: 'o', repo: 'r', workflow: 'ci.yml', status: 'completed', author: 'octo' }, { env: {} },
+  ));
+  const cursor = (first.details as { pagination: { nextCursor?: string } }).pagination.nextCursor;
+  assert.ok(typeof cursor === 'string' && cursor.length > 0);
+  for (const variant of [
+    { action: 'runs', owner: 'o', repo: 'r', status: 'completed', author: 'octo', cursor },
+    { action: 'runs', owner: 'o', repo: 'r', workflow: 'ci.yml', status: 'queued', author: 'octo', cursor },
+    { action: 'runs', owner: 'o', repo: 'r', workflow: 'ci.yml', status: 'completed', author: 'mallory', cursor },
+    { action: 'runs', owner: 'o', repo: 'r', workflow: 'ci.yml', status: 'completed', cursor },
+  ]) {
+    let fetched = false;
+    await expectGithubError('cursor_invalid', () => withFetch(async () => {
+      fetched = true;
+      return jsonResponse({});
+    }, () => callGithubTool(variant, { env: {} })));
+    assert.equal(fetched, false, `selector change must reject before fetch: ${JSON.stringify(variant)}`);
+  }
+});
+
+test('jobs pages carry per_page/page and Link-driven cursors', async () => {
+  const requested: string[] = [];
+  const mock: FetchMock = async (input) => {
+    requested.push(String(input));
+    const page = /[?&]page=2(?:&|$)/.test(String(input)) ? 2 : 1;
+    const jobs = page === 1
+      ? [{ id: 11, name: 'build', status: 'completed' }]
+      : [{ id: 12, name: 'test', status: 'completed' }];
+    return jsonResponse({ total_count: 2, jobs }, 200, page === 1 ? {
+      Link: '<https://api.github.com/repos/o/r/actions/runs/99/jobs?per_page=20&page=2>; rel="next"',
+    } : {});
+  };
+  const first = await withFetch(mock, () => callGithubTool(
+    { action: 'runs', owner: 'o', repo: 'r', number: 99, jobs: true }, { env: {} },
+  ));
+  assert.match(requested[0] ?? '', /per_page=20/);
+  assert.match(requested[0] ?? '', /page=1/);
+  const details = first.details as { pagination: { hasMore: boolean; nextCursor?: string } };
+  assert.equal(details.pagination.hasMore, true);
+  const cursor = details.pagination.nextCursor;
+  assert.ok(typeof cursor === 'string' && cursor.length > 0);
+  requested.length = 0;
+  const second = await withFetch(mock, () => callGithubTool(
+    { action: 'runs', owner: 'o', repo: 'r', number: 99, jobs: true, cursor }, { env: {} },
+  ));
+  assert.match(requested[0] ?? '', /page=2/);
+  const entities = (second.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
+  assert.equal(entities[0]?.job_id, 12);
 });
 
 // ── Trending degradation ──

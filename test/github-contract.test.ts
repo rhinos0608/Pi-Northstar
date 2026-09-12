@@ -210,6 +210,31 @@ test('validateGithubRequest validates run status enum for runs, reuses path vali
   githubError('invalid_request', () => validateGithubRequest({ action: 'workflows', owner: 'o', repo: 'r', workflow: '../secret' }));
 });
 
+test('validateGithubRequest accepts workflow only for workflows/runs, status only for runs', () => {
+  assert.equal(validateGithubRequest({ action: 'runs', owner: 'o', repo: 'r', workflow: 'ci.yml' }).request.workflow, 'ci.yml');
+  for (const action of ['issues', 'pulls', 'releases', 'commits', 'repo', 'file', 'tree'] as const) {
+    githubError('invalid_request', () => validateGithubRequest({ action, owner: 'o', repo: 'r', workflow: 'ci.yml' }));
+  }
+  for (const action of ['issues', 'pulls', 'workflows', 'releases', 'commits'] as const) {
+    githubError('invalid_request', () => validateGithubRequest({ action, owner: 'o', repo: 'r', status: 'success' }));
+  }
+});
+
+test('validateGithubEntity requires safe positive ints for workflow/run/job ids', () => {
+  for (const bad of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, '1'] as unknown[]) {
+    assert.equal(validateGithubEntity({ ...validEntity('workflow'), workflow_id: bad }).ok, false);
+    assert.equal(validateGithubEntity({ ...validEntity('workflow_run'), run_id: bad }).ok, false);
+    assert.equal(validateGithubEntity({ ...validEntity('workflow_run'), run_number: bad }).ok, false);
+    assert.equal(validateGithubEntity({ ...validEntity('workflow_job'), job_id: bad }).ok, false);
+    assert.equal(validateGithubEntity({ ...validEntity('workflow_job'), run_id: bad }).ok, false);
+  }
+  const { workflow_id: _w, ...noWorkflowId } = validEntity('workflow') as unknown as Record<string, unknown>;
+  void _w;
+  assert.equal(validateGithubEntity(noWorkflowId).ok, false);
+  assert.equal(validateGithubEntity({ ...validEntity('workflow_run'), run_id: undefined }).ok, false);
+  assert.equal(validateGithubEntity({ ...validEntity('workflow_job'), job_id: undefined }).ok, false);
+});
+
 // ── Limits reject-not-clamp ──
 
 test('resolveGithubLimit rejects out-of-range with field and cap named', () => {

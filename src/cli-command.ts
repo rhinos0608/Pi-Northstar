@@ -12,6 +12,8 @@
 //
 // Dependency-free except node builtins: importable from any CLI runner.
 
+import { spawn, type ChildProcessByStdio, type SpawnOptions } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 
@@ -52,4 +54,46 @@ export function resolveCliCommand(command: string, options: CliResolveOptions = 
     if (exists(bare)) return bare;
   }
   return command;
+}
+
+// ── Portable spawn ──
+//
+// `.cmd`/`.bat` shims are not CreateProcess images: spawning a resolved
+// `.cmd` path with shell:false fails on Windows with `spawn EINVAL`. Routing
+// through a shell instead would concatenate argv unescaped (a query like
+// `a&b` becomes command injection, and requireCliPositional deliberately
+// allows such text), so .cmd/.bat targets go through cmd.exe with every argv
+// element pre-quoted by quoteCmdArg — metacharacters inside double quotes
+// stay literal to cmd.exe parsing.
+//
+// Residual: `%NAME%` inside quotes still expands under cmd.exe. CLI argv
+// carries search text, never secrets, so the exposure is limited to the
+// operator's own environment values echoing into a query string.
+
+/** Quote one argv element for cmd.exe (always double-quoted). */
+export function quoteCmdArg(value: string): string {
+  return `"${value.replace(/(\\+)$/, '$1$1').replace(/"/g, '""')}"`;
+}
+
+/**
+ * Resolve `command` (resolveCliCommand) then spawn it portably: Windows
+ * `.cmd`/`.bat` targets run via `cmd.exe /d /s /c` with a pre-quoted command
+ * line (outer quotes preserve the inner per-arg quoting); everything else
+ * spawns directly with shell:false.
+ */
+export function spawnCliCommand(
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+): ChildProcessByStdio<null, Readable, Readable> {
+  const resolved = resolveCliCommand(command);
+  if (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(resolved)) {
+    const inner = [resolved, ...args].map(quoteCmdArg).join(' ');
+    return spawn('cmd.exe', ['/d', '/s', '/c', `"${inner}"`], options) as ChildProcessByStdio<
+      null,
+      Readable,
+      Readable
+    >;
+  }
+  return spawn(resolved, args, options) as ChildProcessByStdio<null, Readable, Readable>;
 }

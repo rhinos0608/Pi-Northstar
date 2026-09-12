@@ -102,6 +102,60 @@ test('fetchJsonNoRedirect preflights DNS and rejects private answers without fet
   }
 });
 
+test('fetchText strips credential headers on cross-origin hop, keeps them same-origin', async () => {
+  const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+  const originalFetch = globalThis.fetch;
+  (globalThis as Record<string, unknown>).fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    seen.push({ url, headers: { ...((init?.headers as Record<string, string>) ?? {}) } });
+    if (url === 'https://example.com/start') {
+      return new Response('', { status: 302, headers: { location: '/same' } });
+    }
+    if (url === 'https://example.com/same') {
+      return new Response('', { status: 302, headers: { location: 'https://other.example/cross' } });
+    }
+    return new Response('ok');
+  }) as typeof fetch;
+  try {
+    const publicLookup = async () => [{ address: '93.184.216.34', family: 4 as const }];
+    const text = await fetchText(
+      'https://example.com/start',
+      {
+        Accept: 'application/json',
+        Authorization: 'Bearer secret',
+        'X-Subscription-Token': 'token-secret',
+        'x-API-key': 'key-secret',
+        Cookie: 'session=secret',
+        'proxy-authorization': 'proxy-secret',
+        'Set-Cookie': 'a=secret',
+        'X-Custom': 'keep',
+      },
+      undefined,
+      undefined,
+      publicLookup,
+    );
+    assert.equal(text, 'ok');
+    assert.equal(seen.length, 3);
+    // Same-origin hop keeps everything.
+    assert.equal(seen[1]!.headers.Authorization, 'Bearer secret');
+    assert.equal(seen[1]!.headers.Cookie, 'session=secret');
+    // Cross-origin hop strips credential-class headers (case-insensitive), keeps the rest.
+    const cross = seen[2]!.headers;
+    assert.equal(cross.Accept, 'application/json');
+    assert.equal(cross['X-Custom'], 'keep');
+    for (const name of Object.keys(cross)) {
+      assert.ok(
+        !['authorization', 'x-subscription-token', 'x-api-key', 'cookie', 'set-cookie', 'proxy-authorization'].includes(
+          name.toLowerCase(),
+        ),
+        `credential header leaked cross-origin: ${name}`,
+      );
+    }
+  } finally {
+    (globalThis as Record<string, unknown>).fetch = originalFetch;
+  }
+});
+
 test('fetchJson propagates caller abort as AbortError without DNS preflight', async () => {
   let fetchCalls = 0;
   const originalFetch = globalThis.fetch;

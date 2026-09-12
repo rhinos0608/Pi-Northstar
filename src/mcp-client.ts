@@ -27,25 +27,32 @@ export function buildServerParameters(env: SearchMcpEnvironment): StdioServerPar
   };
 }
 
+const MAX_STDERR_BYTES = 4096;
+
 export class SearchMcpClient implements SearchBackend {
   private client: Client | undefined;
   private transport: StdioClientTransport | undefined;
   private connecting: Promise<Client> | undefined;
   private closed = false;
+  private stderrTail = '';
 
   constructor(private readonly serverParameters: StdioServerParameters) {}
 
   async callTool(name: string, args: Record<string, unknown>, options: SearchMcpCallOptions = {}): Promise<SearchMcpCallResult> {
     const client = await this.connect();
-    return client.callTool(
-      { name, arguments: args },
-      undefined,
-      {
-        ...(options.signal ? { signal: options.signal } : {}),
-        timeout: options.timeout ?? 120_000,
-        resetTimeoutOnProgress: true,
-      },
-    );
+    try {
+      return await client.callTool(
+        { name, arguments: args },
+        undefined,
+        {
+          ...(options.signal ? { signal: options.signal } : {}),
+          timeout: options.timeout ?? 120_000,
+          resetTimeoutOnProgress: true,
+        },
+      );
+    } catch (error) {
+      throw withStderr(error, this.stderrTail);
+    }
   }
 
   async close(): Promise<void> {
@@ -54,6 +61,7 @@ export class SearchMcpClient implements SearchBackend {
     this.client = undefined;
     this.transport = undefined;
     this.connecting = undefined;
+    this.stderrTail = '';
     await transport?.close();
   }
 
@@ -81,13 +89,15 @@ export class SearchMcpClient implements SearchBackend {
     const transport = new StdioClientTransport(this.serverParameters);
     const client = new Client({ name: 'search-mcp-pi-extension', version: '0.1.0' });
 
-    transport.stderr?.on('data', () => undefined);
+    transport.stderr?.on('data', (chunk) => {
+      this.stderrTail = appendBounded(this.stderrTail, chunk.toString());
+    });
 
     try {
       await client.connect(transport);
     } catch (error) {
       await transport.close().catch(() => undefined);
-      throw error;
+      throw withStderr(error, this.stderrTail);
     }
 
     const handleClose = transport.onclose;
@@ -102,6 +112,20 @@ export class SearchMcpClient implements SearchBackend {
     this.transport = transport;
     return client;
   }
+}
+
+function appendBounded(current: string, chunk: string): string {
+  const combined = current + chunk;
+  return combined.length > MAX_STDERR_BYTES ? combined.slice(-MAX_STDERR_BYTES) : combined;
+}
+
+function withStderr(error: unknown, stderrTail: string): Error {
+  const detail = stderrTail.trim();
+  if (!detail) return error instanceof Error ? error : new Error(String(error));
+  const message = error instanceof Error ? error.message : String(error);
+  const combined = new Error(`${message} (server stderr: ${detail})`);
+  if (error instanceof Error && error.cause !== undefined) (combined as { cause?: unknown }).cause = error.cause;
+  return combined;
 }
 
 function parseArgs(raw: string | undefined): string[] {

@@ -84,6 +84,34 @@ test('native web_search fans out configured backends and fuses duplicate URLs wi
   });
 });
 
+test('web_search with recency labels dated hits verified and undated unverified', async () => {
+  const now = new Date().toISOString();
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({
+        web: {
+          results: [
+            { title: 'Dated', url: 'https://example.com/dated', description: 'd', page_age: now },
+            { title: 'Undated', url: 'https://example.com/undated', description: 'u' },
+          ],
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5, recency: 'day' }, { env: { PI_SEARCH_WEB_BACKENDS: 'brave', BRAVE_API_KEY: 'key' } });
+    const details = result.details as { results: Array<{ url: string; freshness?: string; publishedDate?: string }> };
+    assert.equal(details.results.length, 2);
+    const dated = details.results.find((hit) => hit.url === 'https://example.com/dated')!;
+    assert.equal(dated.publishedDate, now);
+    assert.equal(dated.freshness, 'verified');
+    const undated = details.results.find((hit) => hit.url === 'https://example.com/undated')!;
+    assert.equal(undated.publishedDate, undefined);
+    assert.equal(undated.freshness, 'unverified');
+  });
+});
+
 test('native web_search sends auth headers for POST backends', async () => {
   const cases = [
     {

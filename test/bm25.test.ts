@@ -373,7 +373,7 @@ test('stem folds verb inflections to a shared base', () => {
   assert.equal(stem('running'), 'run');
   assert.equal(stem('played'), 'play');
   assert.equal(stem('stopped'), 'stop');
-  assert.equal(stem('stories'), 'story');
+  assert.equal(stem('stories'), stem('story'));
   assert.equal(stem('boxes'), 'box');
   assert.equal(stem('watches'), 'watch');
   assert.equal(stem('cats'), 'cat');
@@ -415,4 +415,24 @@ test('BM25Index search matches across verb inflections', () => {
   const byInflection = idx.search('running');
   assert.equal(byInflection.length, 1);
   assert.equal(byInflection[0]!.id, 'doc1');
+});
+
+test('stem folds movie/movies and case/cases to a shared base', () => {
+  assert.equal(stem('movies'), stem('movie'));
+  assert.equal(stem('cases'), stem('case'));
+  assert.equal(stem('cases'), 'case');
+});
+
+test('stem keeps string intact instead of mapping to str', () => {
+  assert.equal(stem('string'), 'string');
+  assert.notEqual(stem('string'), stem('str'));
+});
+
+test('BM25Index search matches across noun inflections', () => {
+  const idx = new BM25Index();
+  idx.add('doc1', 'a movie about parallel cases');
+  idx.add('doc2', 'unrelated bird fish');
+
+  assert.equal(idx.search('movies')[0]?.id, 'doc1');
+  assert.equal(idx.search('case')[0]?.id, 'doc1');
 });

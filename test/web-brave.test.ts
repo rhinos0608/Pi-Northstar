@@ -129,13 +129,22 @@ test('brave json error envelope resolves empty (fetchJson never gates on status)
   }
 });
 
-test('brave redirect without location rejects, oversize rejects, caller abort propagates', async () => {
+test('brave redirect rejects without following (key never rides a redirect), oversize rejects, caller abort propagates', async () => {
   const redirect = mockFetch(async () => new Response('', { status: 302 }));
   try {
-    await assert.rejects(() => braveSearchAdapter.search(input()), /Redirect without Location/i);
+    await assert.rejects(() => braveSearchAdapter.search(input()), /Redirect rejected for brave search/);
     assert.equal(redirect.calls.length, 1);
   } finally {
     redirect.restore();
+  }
+  const withLocation = mockFetch(
+    async () => new Response('', { status: 302, headers: { location: 'https://evil.example/loot' } }),
+  );
+  try {
+    await assert.rejects(() => braveSearchAdapter.search(input()), /Redirect rejected for brave search/);
+    assert.equal(withLocation.calls.length, 1, 'redirect target must never be fetched');
+  } finally {
+    withLocation.restore();
   }
   const big = mockFetch(async () => new Response('x', { status: 200, headers: { 'content-length': '2000000' } }));
   try {
@@ -155,6 +164,58 @@ test('brave redirect without location rejects, oversize rejects, caller abort pr
     await assert.rejects(() => braveSearchAdapter.search(input({ signal: controller.signal })));
   } finally {
     globalThis.fetch = saved;
+  }
+});
+
+test('brave maps recency to freshness param', async () => {
+  const expected: Record<string, string> = { day: 'pd', week: 'pw', month: 'pm', year: 'py' };
+  for (const [recency, freshness] of Object.entries(expected)) {
+    const { calls, restore } = mockFetch(async () => jsonResponse({ web: { results: [] } }));
+    try {
+      await braveSearchAdapter.search(input({ recency: recency as 'day' }));
+      assert.equal(new URL(calls[0]!.url).searchParams.get('freshness'), freshness);
+    } finally {
+      restore();
+    }
+  }
+  const { calls, restore } = mockFetch(async () => jsonResponse({ web: { results: [] } }));
+  try {
+    await braveSearchAdapter.search(input());
+    assert.equal(new URL(calls[0]!.url).searchParams.has('freshness'), false);
+  } finally {
+    restore();
+  }
+});
+
+test('brave maps explicit bound/yearFrom to custom date range', async () => {
+  const { calls, restore } = mockFetch(async () => jsonResponse({ web: { results: [] } }));
+  try {
+    await braveSearchAdapter.search(input({ freshnessLowerBoundMs: Date.UTC(2024, 0, 10) }));
+    const freshness = new URL(calls[0]!.url).searchParams.get('freshness');
+    assert.match(freshness ?? '', /^2024-01-10to\d{4}-\d{2}-\d{2}$/);
+  } finally {
+    restore();
+  }
+});
+
+test('brave preserves page_age/date as publishedDate, omits when absent', async () => {
+  const { restore } = mockFetch(async () =>
+    jsonResponse({
+      web: {
+        results: [
+          { title: 'A', url: 'https://example.com/a', description: 'x', page_age: '2024-04-01T00:00:00Z' },
+          { title: 'B', url: 'https://example.com/b', description: 'y' },
+        ],
+      },
+    }),
+  );
+  try {
+    const out = await braveSearchAdapter.search(input());
+    assert.equal(out.hits.length, 2);
+    assert.equal(out.hits[0]!.publishedDate, '2024-04-01T00:00:00Z');
+    assert.equal(out.hits[1]!.publishedDate, undefined);
+  } finally {
+    restore();
   }
 });
 
