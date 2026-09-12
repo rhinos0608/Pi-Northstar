@@ -24,6 +24,18 @@ import {
 } from '../src/github-contract.js';
 import { SocialError } from '../src/social-contract.js';
 import type { GithubRequestInput } from '../src/github-contract.js';
+import {
+  resolveGithubAction as resolveGithubActionDirect,
+  resolveGithubLimit as resolveGithubLimitDirect,
+  validateGithubPath as validateGithubPathDirect,
+  validateGithubRequest as validateGithubRequestDirect,
+} from '../src/github-request-contract.js';
+import {
+  resolveGithubAction as resolveGithubActionFacade,
+  resolveGithubLimit as resolveGithubLimitFacade,
+  validateGithubPath as validateGithubPathFacade,
+  validateGithubRequest as validateGithubRequestFacade,
+} from '../src/github-contract.js';
 
 function githubError(code: string, run: () => unknown): SocialError {
   try {
@@ -377,4 +389,13 @@ test('orderGithubPlans prefers complete, full, cursor, authenticated', () => {
       [true, 'cursor', 'env_var'],
     ],
   );
+});
+
+test('github-request-contract owns request validation; facade re-exports identical refs', () => {
+  assert.equal(validateGithubRequestFacade, validateGithubRequestDirect);
+  assert.equal(resolveGithubActionFacade, resolveGithubActionDirect);
+  assert.equal(resolveGithubLimitFacade, resolveGithubLimitDirect);
+  assert.equal(validateGithubPathFacade, validateGithubPathDirect);
+  assert.throws(() => resolveGithubLimitDirect(51, 'limit', 50, 20), /limit must be an integer in \[1, 50\]: 51/);
+  assert.throws(() => validateGithubRequestDirect({ action: 'list_dir' }), /Unsupported github action: list_dir/);
 });
