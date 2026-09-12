@@ -68,7 +68,8 @@ const installers: InstallerDefinition[] = [
     label: 'OpenCLI',
     channels: ['twitter', 'reddit', 'xiaohongshu', 'facebook', 'instagram', 'bilibili'],
     binaries: ['opencli'],
-    commands: [{ command: 'npm', args: ['install', '-g', '@jackwener/opencli'] }],
+    // Pinned to the verified version declared in social-opencli.ts (OPENCLI_VERSION).
+    commands: [{ command: 'npm', args: ['install', '-g', '@jackwener/opencli@1.8.6'] }],
   },
   {
     id: 'twitter-cli',
@@ -76,7 +77,8 @@ const installers: InstallerDefinition[] = [
     channels: ['twitter'],
     binaries: ['twitter'],
     core: true,
-    commands: pythonToolCommands('twitter-cli'),
+    // Pinned to the verified version declared in social-twitter.ts (0.8.5).
+    commands: pythonToolCommands('twitter-cli', '==0.8.5'),
   },
   {
     id: 'rdt-cli',
@@ -219,11 +221,12 @@ async function runInstaller(installer: InstallerDefinition, env: Record<string, 
   };
 }
 
-function pythonToolCommands(packageName: string): InstallCommand[] {
+function pythonToolCommands(packageName: string, versionPin = ''): InstallCommand[] {
+  const spec = `${packageName}${versionPin}`;
   return [
-    { command: 'pipx', args: ['install', packageName] },
-    { command: 'uv', args: ['tool', 'install', packageName] },
-    { command: 'python3', args: ['-m', 'pip', 'install', '--user', packageName] },
+    { command: 'pipx', args: ['install', spec] },
+    { command: 'uv', args: ['tool', 'install', spec] },
+    { command: 'python3', args: ['-m', 'pip', 'install', '--user', spec] },
   ];
 }
 

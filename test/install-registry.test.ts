@@ -71,3 +71,40 @@ test('installAllowed defaults to enabled', () => {
   assert.equal(installAllowed({}), true);
   assert.equal(installAllowed({ PI_SEARCH_ALLOW_INSTALL: 'off' }), false);
 });
+
+test('installer pins verified CLI versions (opencli 1.8.6, twitter-cli 0.8.5)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-pinned-'));
+  try {
+    // PATH offers only pipx (exit 0): twitter-cli installs via pipx with a
+    // pinned spec; the npm-only opencli installer skips without npm present.
+    const pipx = join(dir, 'pipx');
+    await writeFile(pipx, script);
+    await chmod(pipx, 0o700);
+
+    const result = await runSetupInstall('install_channels', { PATH: dir }, ['twitter']);
+    const twitterCli = result.installers.find((installer) => installer.id === 'twitter-cli');
+    assert.equal(twitterCli?.status, 'installed');
+    assert.ok(
+      twitterCli?.command?.some((part) => part.includes('twitter-cli==0.8.5')),
+      `twitter-cli install must pin 0.8.5, got ${JSON.stringify(twitterCli?.command)}`,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('installer pins opencli npm spec to verified 1.8.6', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-opencli-'));
+  try {
+    const npm = join(dir, 'npm');
+    await writeFile(npm, script);
+    await chmod(npm, 0o700);
+
+    const result = await runSetupInstall('install_channels', { PATH: dir }, ['facebook']);
+    const opencli = result.installers.find((installer) => installer.id === 'opencli');
+    assert.equal(opencli?.status, 'installed');
+    assert.deepEqual(opencli?.command, ['npm', 'install', '-g', '@jackwener/opencli@1.8.6']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
