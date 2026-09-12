@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { buildPythonChildEnvironment } from '../src/python-child-env.js';
 import {
@@ -475,8 +475,14 @@ test('opencli spawn receives OPENCLI_* without secret leakage', async () => {
   const probe = 'opencli-probe-env';
   writeFileSync(join(dir, probe), '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.env));\n');
   chmodSync(join(dir, probe), 0o755);
+  if (process.platform === 'win32') {
+    // Bare extensionless scripts are invisible to Windows spawn() (PATHEXT
+    // lookup), so provide a .cmd twin that runs the same probe via node.
+    writeFileSync(join(dir, `${probe}.cmd`), `@node "%~dp0${probe}.js" %*\r\n`);
+    writeFileSync(join(dir, `${probe}.js`), 'process.stdout.write(JSON.stringify(process.env));\n');
+  }
   const previousPath = process.env.PATH;
-  process.env.PATH = `${dir}:${previousPath ?? '/usr/bin:/bin'}`;
+  process.env.PATH = `${dir}${delimiter}${previousPath ?? '/usr/bin:/bin'}`;
   try {
     const payload = (await runRedditCli(probe, [], {}, {
       PATH: process.env.PATH,

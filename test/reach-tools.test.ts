@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { callNativeTool } from '../src/native-tools.js';
 import { callReachTool, externalEnvironment } from '../src/reach-tools.js';
@@ -37,6 +37,22 @@ async function writeShim(dir: string, name: string, body: string): Promise<void>
   const path = join(dir, name);
   await writeFile(path, body);
   await chmod(path, 0o700);
+  if (process.platform === 'win32') {
+    // Windows spawn() resolves bare commands via PATHEXT, so extensionless
+    // POSIX shims are invisible. Emit a .cmd twin with identical behavior:
+    // env-dump bodies record sorted `KEY=value` lines, echo bodies print
+    // their payload (without sh single-quotes), then exit with the same code.
+    const dumpMatch = />\s*(\S+)\s*$/.exec(body.split('\n').find((line) => line.includes('>')) ?? '');
+    const payloads = [...body.matchAll(/echo\s+'([^']*)'/g)].map((m) => m[1] ?? '');
+    const exitMatch = /exit\s+(\d+)/.exec(body);
+    const lines = ['@echo off'];
+    if (dumpMatch?.[1]) {
+      lines.push(`node -e "const fs=require('node:fs');const p=${JSON.stringify(dumpMatch[1])};const t=Object.keys(process.env).sort().map(k=>k+'='+process.env[k]).join('\n');fs.writeFileSync(p,t);"`);
+    }
+    for (const payload of payloads) lines.push(`echo ${payload}`);
+    lines.push(`exit /b ${exitMatch?.[1] ?? '0'}`);
+    await writeFile(`${path}.cmd`, `${lines.join('\r\n')}\r\n`);
+  }
 }
 
 /** Prepend a shim dir to the real process PATH (workers that sanitize from
@@ -44,7 +60,7 @@ async function writeShim(dir: string, name: string, body: string): Promise<void>
 async function withShimmedPath<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const key = 'PATH';
   const previous = process.env[key];
-  process.env[key] = `${dir}:${previous ?? ''}`;
+  process.env[key] = `${dir}${delimiter}${previous ?? ''}`;
   try {
     return await fn();
   } finally {
