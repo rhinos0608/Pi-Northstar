@@ -23,7 +23,7 @@
 
 import { createHash } from 'node:crypto';
 import { SocialError } from './social-contract.js';
-import type { WebKnowledgeRequest } from './web-search-types.js';
+import { WEB_PROVIDER_MIN_YEAR_FROM, type WebKnowledgeRequest, type WebProviderRecency } from './web-search-types.js';
 
 // ── Core vocabulary ──
 
@@ -106,12 +106,20 @@ export const DEFAULT_WEB_READ_MAX_CHARS = 30000;
 export const WEB_READ_MAX_CHARS_MAX = 50000;
 export const MAX_WEB_QUERY_LENGTH = 300;
 export const MAX_WEB_URL_LENGTH = 2048;
+export const WEB_SEARCH_MAX_BATCH_QUERIES = 8;
+export const WEB_SEARCH_MAX_DOMAINS = 32;
+const WEB_SEARCH_RECENCIES: readonly string[] = ['day', 'week', 'month', 'year'];
 
 export interface WebRequestInput {
   action: string;
   query?: string;
+  queries?: unknown;
   url?: string;
   limit?: number;
+  includeContent?: unknown;
+  recency?: unknown;
+  domains?: unknown;
+  yearFrom?: unknown;
   topK?: number;
   maxPages?: number;
   maxChars?: number;
@@ -132,6 +140,16 @@ export interface WebRequestInput {
 export interface WebRequest {
   action: WebAction;
   query?: string;
+  /** Normalized search queries (XOR query|queries, 1..8). Always set on search. */
+  queries: string[];
+  /** Cost-gated full content reuse; default false. Search-only. */
+  includeContent: boolean;
+  /** Optional recency filter; intersects with yearFrom. Search-only. */
+  recency?: WebProviderRecency;
+  /** Optional domain allow/exclude list ('-host' = exclude). Search-only. */
+  domains?: string[];
+  /** Optional earliest publication year. Search-only. */
+  yearFrom?: number;
   url?: string;
   limit: number;
   topK: number;
@@ -197,6 +215,79 @@ function parseWebKnowledge(input: unknown): WebKnowledgeRequest | undefined {
   return out;
 }
 
+/**
+ * Normalize the XOR query|queries selector. Search-only: non-search actions
+ * reject `queries`. Returns 1..8 trimmed queries; query+queries together
+ * reject. Length caps mirror single-query rules.
+ */
+function parseSearchQueries(input: WebRequestInput, action: WebAction, query: string | undefined): string[] {
+  const hasQueries = input.queries !== undefined;
+  if (action !== 'search') {
+    if (hasQueries) throw webError('invalid_request', 'queries is only supported on web search');
+    return query !== undefined ? [query] : [];
+  }
+  if (input.queries !== undefined && input.query !== undefined) {
+    throw webError('invalid_request', 'search accepts exactly one of query or queries, not both');
+  }
+  if (hasQueries) {
+    if (!Array.isArray(input.queries)) throw webError('invalid_request', 'queries must be an array of strings');
+    const out: string[] = [];
+    for (const entry of input.queries) {
+      if (typeof entry !== 'string' || entry.trim().length === 0) {
+        throw webError('invalid_request', 'queries entries must be non-empty strings');
+      }
+      const trimmed = entry.trim();
+      if (trimmed.length > MAX_WEB_QUERY_LENGTH) {
+        throw webError('invalid_request', `query exceeds maximum length of ${MAX_WEB_QUERY_LENGTH}`);
+      }
+      out.push(trimmed);
+    }
+    if (out.length < 1 || out.length > WEB_SEARCH_MAX_BATCH_QUERIES) {
+      throw webError('invalid_request', `queries must contain 1-${WEB_SEARCH_MAX_BATCH_QUERIES} entries`);
+    }
+    return out;
+  }
+  return query !== undefined ? [query] : [];
+}
+
+function parseSearchRecency(value: unknown): WebProviderRecency | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !WEB_SEARCH_RECENCIES.includes(value)) {
+    throw webError('invalid_request', 'recency must be one of: day, week, month, year');
+  }
+  return value as WebProviderRecency;
+}
+
+function parseSearchDomains(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw webError('invalid_request', 'domains must be an array of hostnames');
+  if (value.length > WEB_SEARCH_MAX_DOMAINS) {
+    throw webError('invalid_request', `domains must contain at most ${WEB_SEARCH_MAX_DOMAINS} entries`);
+  }
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim().length === 0) {
+      throw webError('invalid_request', 'domains entries must be non-empty strings');
+    }
+    const host = entry.trim().toLowerCase();
+    const bare = host.startsWith('-') ? host.slice(1) : host;
+    if (bare.length === 0 || bare.length > 253 || !/^[a-z0-9.-]+$/.test(bare)) {
+      throw webError('invalid_request', `invalid domains hostname: ${bare.slice(0, 64)}`);
+    }
+    out.push(host);
+  }
+  return out;
+}
+
+function parseSearchYearFrom(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  const currentYear = new Date().getUTCFullYear();
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < WEB_PROVIDER_MIN_YEAR_FROM || value > currentYear) {
+    throw webError('invalid_request', `yearFrom must be an integer in [${WEB_PROVIDER_MIN_YEAR_FROM}, ${currentYear}]`);
+  }
+  return value;
+}
+
 function resolveBoundedInt(
   raw: unknown,
   field: string,
@@ -229,7 +320,17 @@ export function validateWebRequest(input: WebRequestInput): { request: WebReques
   if (agentMode && researchCategory) {
     throw webError('invalid_request', 'mode "agent" is not supported with research categories');
   }
+  if (researchCategory && Array.isArray(input.queries) && input.queries.length > 1) {
+    throw webError('invalid_request', 'queries batch is not supported with category "research": pass a single query');
+  }
 
+  if (input.cursor !== undefined && input.cursor !== null && !(typeof input.cursor === 'string' && input.cursor.length === 0)) {
+    const rawQueries = Array.isArray(input.queries) ? input.queries : undefined;
+    const queryCount = rawQueries !== undefined ? rawQueries.length : 1;
+    if (queryCount !== 1) {
+      throw webError('invalid_request', 'cursor is only supported with a single query');
+    }
+  }
   assertNoWebCursor(input.cursor);
 
   const query = cleanField(input.query);
@@ -248,7 +349,8 @@ export function validateWebRequest(input: WebRequestInput): { request: WebReques
     throw webError('invalid_request', `url exceeds maximum length of ${MAX_WEB_URL_LENGTH}`);
   }
 
-  if (action === 'search' && query === undefined) {
+  const queries = parseSearchQueries(input, action, query);
+  if (action === 'search' && queries.length === 0) {
     throw webError('invalid_request', 'web search requires selector: query');
   }
   if (action === 'read' && url === undefined) {
@@ -265,14 +367,40 @@ export function validateWebRequest(input: WebRequestInput): { request: WebReques
   const searchCap = researchCategory ? RESEARCH_SEARCH_LIMIT_MAX : WEB_SEARCH_LIMIT_MAX;
   const limit = resolveBoundedInt(input.limit, 'limit', 1, searchCap, DEFAULT_WEB_SEARCH_LIMIT);
 
+  let includeContent = false;
+  if (input.includeContent !== undefined) {
+    if (action !== 'search') throw webError('invalid_request', 'includeContent is only supported on web search');
+    if (typeof input.includeContent !== 'boolean') {
+      throw webError('invalid_request', 'includeContent must be a boolean');
+    }
+    includeContent = input.includeContent;
+  }
+  let recency: WebProviderRecency | undefined;
+  if (input.recency !== undefined) {
+    if (action !== 'search') throw webError('invalid_request', 'recency is only supported on web search');
+    recency = parseSearchRecency(input.recency);
+  }
+  let domains: string[] | undefined;
+  if (input.domains !== undefined) {
+    if (action !== 'search') throw webError('invalid_request', 'domains is only supported on web search');
+    domains = parseSearchDomains(input.domains);
+  }
+  let yearFrom: number | undefined;
+  if (input.yearFrom !== undefined) {
+    if (action !== 'search') throw webError('invalid_request', 'yearFrom is only supported on web search');
+    yearFrom = parseSearchYearFrom(input.yearFrom);
+  }
   const rawKnowledge = (input as { knowledge?: unknown }).knowledge;
   if (rawKnowledge !== undefined && action !== 'search') {
     throw webError('invalid_request', 'knowledge is only supported on web search');
   }
   const knowledge = parseWebKnowledge(rawKnowledge);
-  const request: WebRequest = { action, limit, topK, maxPages, maxChars, researchCategory, agentMode };
+  const request: WebRequest = { action, queries, includeContent, limit, topK, maxPages, maxChars, researchCategory, agentMode };
   if (query !== undefined) request.query = query;
   if (url !== undefined) request.url = url;
+  if (recency !== undefined) request.recency = recency;
+  if (domains !== undefined) request.domains = domains;
+  if (yearFrom !== undefined) request.yearFrom = yearFrom;
   if (knowledge !== undefined) request.knowledge = knowledge;
   return { request, warnings };
 }

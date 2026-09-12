@@ -25,12 +25,12 @@ Each public tool validates input, calls into the shared services above, and shap
 
 | Tool | What it does |
 |---|---|
-| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). `mode: "agent"` returns a provider-generated research report as the tool text (untrusted evidence) with `details.report` carrying provider plus validated/capped sources (Tavily Research first provider; RRF/fusion bypassed; incompatible with `knowledge` and research categories). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
+| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). Exactly one of `query` or `queries[1..8]`: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional `includeContent`/`recency`/`domains` refine plain search; `yearFrom` is honored everywhere and intersects with `recency` (later bound wins). Cursors are single-query research-only. `mode: "agent"` returns a provider-generated research report as the tool text (untrusted evidence) with `details.report` carrying provider plus validated/capped sources (Tavily Research first provider; RRF/fusion bypassed; single query only; incompatible with `knowledge` and research categories). No provider selection input: backends are operator-owned (`PI_SEARCH_WEB_BACKENDS`). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
 | `fetch` | Canonical action `read` without a `query` (full readable text of one URL); canonical action `crawl` with a `query` (crawls pages, returns ranked relevant chunks). `maxChars` ≤ 50000 is honored on both paths (default 30000); crawl takes `topK` ≤ 20 and `maxPages` ≤ 25. `siteMap: true` lists discovered same-origin URLs under `url` (optional `query` ranks, `maxPages` caps at default 10/max 25; rejects `searchQuery`/`followLinks`/`topK`/`maxChars`). Out-of-range input is rejected, never silently clamped. |
 | `github` | Canonical actions `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits` (REST API only — GraphQL not offered). `GITHUB_TOKEN` or `GH_TOKEN` optional for public reads (harder rate limits without a token); unauthenticated `/search/code` is heavily rate-limited. `list_dir` and `code_search` legacy spellings rejected, never clamped. Results are normalized entities. |
 | `social` | Read-only lookup over canonical actions only (unknown/legacy spellings rejected before dispatch). Available: Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram (no verified post-detail adapter, no download; `get_post`/`get_thread`/`get_comments` unadvertised on Instagram), LinkedIn (read actions via verified OpenCLI Chrome session). Xueqiu/Xiaoyuzhou are absent — not available or planned providers. |
 | `media` | YouTube (official Data API for search/details/hot; keyless unofficial transcript) and Bilibili search, metadata, details, and subtitles. RSS/Atom feed reading. |
-| `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. |
+| `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. While `/chrome authorize` grants are live, the same `browser` tool routes allowlisted actions to the user-Chromium companion over the pinned bridge (`PI_SEARCH_CHROME_EXTENSION_ID`, 127.0.0.1:17319); revoke/expiry returns to the isolated backend. |
 | `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
 | `graph` | Native graph access: `query` executes DQL with provider-faithful JSON plus shape (`rows`/`facets`/`aggregate`/`scalar`/`object`); `probe` checks cardinality of countable queries; `schema` discovers ontology types/fields (24-hour cache, stale fallback marked `partial`). |
 
@@ -41,8 +41,8 @@ there is never DuckDuckGo/generic-web substitution: `semantic_scholar`,
 `openalex`, `pubmed`, `stackoverflow`, `datacite`, `ror`, `gdelt`, `wikipedia`,
 `wikidata`, `arxiv`, `crossref`, `hackernews` (`source: "all"` fans out over
 all in registry order). Unsupported or unknown sources return an explicit safe
-error instead of substituted results. `yearFrom` is the only model-facing filter (`web_search` param, research-only); `yearTo`/`author`/`doi`/`venue` are research-backend capabilities, not `web_search` params. An unsupported filter
-surfaces per-source rather than being silently dropped. `source`/`yearFrom` are ignored on plain (non-research) search by contract. Results carry a
+error instead of substituted results. `yearFrom` is the only model-facing filter (`web_search` param, honored on plain search and intersecting with `recency`); `yearTo`/`author`/`doi`/`venue` are research-backend capabilities, not `web_search` params. An unsupported filter
+surfaces per-source rather than being silently dropped. `source` is research-only; `yearFrom` is honored on plain search and intersects with `recency` (later bound wins). Results carry a
 canonical `details.northstar` envelope (schema `pi-northstar.result` v1)
 beside the legacy `{query, source, results}` fields; per-source failures
 surface as `partial`/`error` status with `errors[]`, not silent empty results.
@@ -351,6 +351,7 @@ export PI_SEARCH_BOOTSTRAP="off"         # Skip startup automation
 export PI_SEARCH_AUTO_INSTALL="0"        # Skip startup installs
 export PI_SEARCH_ALLOW_INSTALL="0"       # Disable all install execution
 export PI_SEARCH_BROWSER_AUTOMATION="0"  # Disable all browser features (kill switch for explicit import/login)
+export PI_SEARCH_CHROME_EXTENSION_ID="abcdefghijklmnopqrstuvwxyzabcdef"  # Companion extension id pinning the user-Chrome bridge origin (unset = user-chrome unavailable, isolated backend only)
 ```
 
 First start and bare `/reach-setup auto` never import browser cookies —

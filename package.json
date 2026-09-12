@@ -13,6 +13,7 @@
   "files": [
     "bin/",
     "src/*.ts",
+    "chrome-extension/",
     "sidecar/",
     "README.md",
     "SKILL.md"
@@ -24,7 +25,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "tsx": "^4.21.0"
+    "tsx": "^4.21.0",
+    "unpdf": "^1.8.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

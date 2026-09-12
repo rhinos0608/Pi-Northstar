@@ -16,10 +16,26 @@ export const WEB_SEARCH_PROVIDER_IDS = [
   'searxng',
   'ollama-search',
   'duckduckgo',
+  'parallel',
+  'parallel-mcp',
+  'tinyfish',
+  'querit',
+  'valyu',
+  'bocha',
+  'xcrawl',
+  'xai',
+  'mistral',
+  'brightdata',
+  'serpapi',
+  'serper',
   'codex',
 ] as const;
 
 export type WebSearchProviderId = (typeof WEB_SEARCH_PROVIDER_IDS)[number];
+
+export type WebProviderRecency = 'day' | 'week' | 'month' | 'year';
+
+export const WEB_PROVIDER_MIN_YEAR_FROM = 1900;
 
 export interface WebProviderSearchInput {
   query: string;
@@ -30,6 +46,16 @@ export interface WebProviderSearchInput {
     summaries: boolean;
     answers: boolean;
   };
+  /** Cost-gated full content reuse; default false. Matches web-access includeContent. */
+  includeContent?: boolean | undefined;
+  /** Optional recency filter; intersects with yearFrom via effective lower bound. */
+  recency?: WebProviderRecency | undefined;
+  /** Optional domain allow/exclude list (web-access domains form). */
+  domains?: string[] | undefined;
+  /** Optional earliest publication year (web-access yearFrom form). */
+  yearFrom?: number | undefined;
+  /** Effective intersect lower bound (epoch ms) of recency + yearFrom; coordinator-owned, adapters read-only. */
+  freshnessLowerBoundMs?: number | undefined;
 }
 
 export type WebSearchContentKind = 'snippet' | 'summary' | 'full';

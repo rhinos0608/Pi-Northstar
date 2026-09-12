@@ -115,3 +115,43 @@ test('buildCliEnvironment forwards TAVILY_RESEARCH_MODEL when set, omits when un
   assert.equal(buildCliEnvironment({ TAVILY_RESEARCH_MODEL: 'mini' }).TAVILY_RESEARCH_MODEL, 'mini');
   assert.equal(buildCliEnvironment({ PATH: '/usr/bin' }).TAVILY_RESEARCH_MODEL, undefined);
 });
+
+const NEW_PROVIDER_KEYS = [
+  'PARALLEL_API_KEY',
+  'TINYFISH_API_KEY',
+  'QUERIT_API_KEY',
+  'VALYU_API_KEY',
+  'BOCHA_API_KEY',
+  'XCRAWL_API_KEY',
+  'XAI_API_KEY',
+  'MISTRAL_API_KEY',
+  'BRIGHTDATA_API_KEY',
+  'BRIGHTDATA_SERP_ZONE',
+  'SERPAPI_KEY',
+  'SERPER_API_KEY',
+] as const;
+
+test('buildCliEnvironment forwards new provider keys when set (sentinel)', () => {
+  const parent: Record<string, string> = { PATH: '/usr/bin' };
+  for (const key of NEW_PROVIDER_KEYS) parent[key] = `SENTINEL_${key}_abc123xyz`;
+  const env = buildCliEnvironment(parent);
+  for (const key of NEW_PROVIDER_KEYS) {
+    assert.equal(env[key], `SENTINEL_${key}_abc123xyz`, `${key} must be forwarded to the CLI child`);
+  }
+});
+
+test('buildCliEnvironment omits new provider keys when unset', () => {
+  const env = buildCliEnvironment({ PATH: '/usr/bin' });
+  for (const key of NEW_PROVIDER_KEYS) {
+    assert.equal(env[key], undefined, `${key} must be absent when unset`);
+  }
+});
+
+test('sentinel: new provider keys never leak to the python child env', () => {
+  const parent: Record<string, string> = { PATH: '/usr/bin' };
+  for (const key of NEW_PROVIDER_KEYS) parent[key] = `SENTINEL_${key}_abc123xyz`;
+  const pythonEnv = buildPythonChildEnvironment(parent);
+  for (const key of NEW_PROVIDER_KEYS) {
+    assert.equal(pythonEnv[key], undefined, `python child env must not carry ${key}`);
+  }
+});

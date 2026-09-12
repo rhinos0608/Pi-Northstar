@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  WEB_PROVIDER_MIN_YEAR_FROM,
+  type WebProviderSearchInput,
   DEFAULT_WEB_SEARCH_PROVIDER_COUNT,
   DEFAULT_WEB_SEARCH_PROVIDER_ORDER,
   DEFAULT_WEB_SEARCH_PROVIDER_TIMEOUT_MS,
@@ -17,7 +19,7 @@ import {
 } from '../src/web-search-types.js';
 import { validateWebEntity, type WebArticleV1 } from '../src/web-contract.js';
 
-test('provider ids frozen: 10 ids, codex last, default order excludes codex', () => {
+test('provider ids frozen: 22 ids, 12 verified additions, codex last, default order excludes codex', () => {
   assert.deepEqual([...WEB_SEARCH_PROVIDER_IDS], [
     'tavily',
     'exa',
@@ -28,6 +30,18 @@ test('provider ids frozen: 10 ids, codex last, default order excludes codex', ()
     'searxng',
     'ollama-search',
     'duckduckgo',
+    'parallel',
+    'parallel-mcp',
+    'tinyfish',
+    'querit',
+    'valyu',
+    'bocha',
+    'xcrawl',
+    'xai',
+    'mistral',
+    'brightdata',
+    'serpapi',
+    'serper',
     'codex',
   ]);
   assert.deepEqual([...DEFAULT_WEB_SEARCH_PROVIDER_ORDER], [
@@ -106,6 +120,30 @@ test('adapter contracts structurally typecheck', () => {
   };
   assert.equal(adapter.id, 'duckduckgo');
   assert.equal(fetchAdapter.id, 'firecrawl');
+});
+
+test('provider search input accepts optional recency/domains/includeContent/yearFrom/effective lower bound', () => {
+  const input: WebProviderSearchInput = {
+    query: 'q',
+    limit: 5,
+    env: {},
+    nativeAi: { summaries: false, answers: false },
+    includeContent: false,
+    recency: 'week',
+    domains: ['example.com'],
+    yearFrom: 2020,
+    freshnessLowerBoundMs: Date.UTC(2020, 0, 1),
+  };
+  assert.equal(input.recency, 'week');
+  assert.equal(WEB_PROVIDER_MIN_YEAR_FROM, 1900);
+  const minimal: WebProviderSearchInput = {
+    query: 'q',
+    limit: 5,
+    env: {},
+    nativeAi: { summaries: false, answers: false },
+  };
+  assert.equal(minimal.includeContent, undefined);
+  assert.equal(minimal.freshnessLowerBoundMs, undefined);
 });
 
 test('canonical WebArticleV1 unchanged: rejects generated/contributor fields', () => {

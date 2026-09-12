@@ -243,11 +243,11 @@ test('buildFetchRoute whitespace-only query routes to agentic_browse', () => {
   assert.equal(route.timeout, 120_000);
 });
 
-test('buildSearchRoute non-research route omits source and yearFrom', () => {
+test('buildSearchRoute non-research route omits source but forwards yearFrom', () => {
   const route = buildSearchRoute({ query: 'test', category: 'news', source: 'arxiv', yearFrom: 2020 });
   assert.equal(route.tool, 'web_search');
   assert.equal(route.args.source, undefined);
-  assert.equal(route.args.yearFrom, undefined);
+  assert.equal(route.args.yearFrom, 2020);
 });
 
 test('buildSearchRoute research paper category routes to web_search', () => {
@@ -700,8 +700,8 @@ test('kg description requires user authorization before sensitive text submissio
 
 test('web_search exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
   const defs = await captureAllTools();
-  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'knowledge', 'limit', 'mode', 'query', 'source', 'yearFrom']);
-  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['followLinks', 'maxChars', 'maxPages', 'query', 'searchQuery', 'siteMap', 'topK', 'url']);
+  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom']);
+  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['action', 'claims', 'findText', 'followLinks', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'searchQuery', 'siteMap', 'sourceIds', 'topK', 'url', 'urls']);
   const knowledge = (defs.web_search!.parameters.properties as Record<string, { properties?: Record<string, unknown> }>).knowledge;
   assert.deepEqual(Object.keys(knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
 });
@@ -802,13 +802,16 @@ test('guidance: kg description carries DQL examples, cursor and privacy notes', 
   assert.ok(/email\/phone/i.test(description), 'kg description must note email/phone transmission');
 });
 
-test('guidance: web_search marks research-only params as ignored on plain search', async () => {
+test('guidance: web_search marks research-only params and honors yearFrom on plain search', async () => {
   const defs = await captureAllTools();
   const description = defs.web_search?.description ?? '';
-  assert.ok(/research.*only|ignored on plain/i.test(description), 'web_search description must flag research-only scope');
+  assert.ok(/No provider selection input/i.test(description), 'web_search description must forbid provider selection input');
+  assert.ok(/queries\[1\.\.8\]/i.test(description), 'web_search description must document the batch selector');
   const props = defs.web_search!.parameters.properties as Record<string, { description?: string }>;
   assert.ok(/research-only/i.test(props.source?.description ?? ''), 'source param must say research-only');
-  assert.ok(/research-only/i.test(props.yearFrom?.description ?? ''), 'yearFrom param must say research-only');
+  assert.ok(/research-only/i.test(props.cursor?.description ?? ''), 'cursor param must say research-only');
+  assert.ok(/intersects with recency/i.test(props.yearFrom?.description ?? ''), 'yearFrom param must document the recency intersect');
+  assert.ok(!/ignored on plain/i.test(props.yearFrom?.description ?? ''), 'yearFrom must no longer claim plain-search ignore');
 });
 
 test('guidance: fetch states url/searchQuery requirement', async () => {
@@ -881,8 +884,8 @@ test('graph description states native language, provenance, probe countability, 
 test('graph registration leaves kg, web_search, and fetch schemas unchanged', async () => {
   const defs = await captureAllTools();
   assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), ['action', 'confidenceThreshold', 'cursor', 'description', 'email', 'employer', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'fields', 'id', 'includeEvidence', 'includeRelationships', 'language', 'limit', 'location', 'maxEntities', 'maxProviders', 'name', 'phone', 'providers', 'query', 'school', 'text', 'title', 'type', 'url']);
-  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'knowledge', 'limit', 'mode', 'query', 'source', 'yearFrom']);
-  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['followLinks', 'maxChars', 'maxPages', 'query', 'searchQuery', 'siteMap', 'topK', 'url']);
+  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom']);
+  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['action', 'claims', 'findText', 'followLinks', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'searchQuery', 'siteMap', 'sourceIds', 'topK', 'url', 'urls']);
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
   assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');

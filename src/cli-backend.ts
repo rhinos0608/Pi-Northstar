@@ -2,6 +2,17 @@ import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BackendCallOptions, BackendCallResult, SearchBackend } from './backend.js';
+import { buildWebAccessStoredEntry, createWebAccessContentStore } from './web-access-content-store.js';
+import {
+  parseWebAccessFetchRequest,
+  WebAccessContractError,
+  type WebAccessContentStore,
+  type WebAccessQueryResult,
+} from './web-access-contract.js';
+import { retrieveWebAccessCorpus } from './web-access-retrieve.js';
+import { runWebAccessCachedSourceCheck } from './web-access-cached-source-check.js';
+import { formatWebAccessSourceCheck } from './web-access-presentation.js';
+import { textResult } from './tool-output.js';
 
 interface CliEnvelope {
   ok: boolean;
@@ -23,16 +34,24 @@ function cliAbortError(): Error {
 }
 
 export class CliSearchBackend implements SearchBackend {
+  private readonly corpus: WebAccessContentStore = createWebAccessContentStore();
   constructor(
     private readonly env: Record<string, string | undefined>,
     private readonly cliPath = join(dirname(fileURLToPath(import.meta.url)), 'cli.ts'),
   ) {}
 
   async callTool(name: string, args: Record<string, unknown>, options: BackendCallOptions = {}): Promise<BackendCallResult> {
+    // Parent-side corpus: one-shot children exit per call, so retrieve /
+    // source_check through the CLI runtime serve from this store (same
+    // 1h / 128-entry / 128MiB bounds, memory-only, no listing).
+    if (name === 'fetch' && typeof args.action === 'string') {
+      const served = tryServeCliCorpusAction(this.corpus, args);
+      if (served !== undefined) return served;
+    }
     const envelope = await this.run(['call', name, JSON.stringify(args)], options.signal, options.timeout);
     if (!envelope.ok) throw new Error(envelope.error?.message ?? 'CLI backend failed');
     if (!envelope.data) throw new Error('CLI backend returned no data.');
-    return envelope.data;
+    return populateCliCorpus(this.corpus, name, envelope.data);
   }
 
   async close(): Promise<void> {}
@@ -120,6 +139,76 @@ export class CliSearchBackend implements SearchBackend {
   }
 }
 
+export interface CliCorpusHit {
+  title: string;
+  url: string;
+  snippet?: string | undefined;
+  backend?: string | undefined;
+}
+
+/** Parent-side mirror of webSearchCached: stash web_search hits so a later
+ *  retrieve / source_check resolves without spawning a child. Best-effort:
+ *  returns the result unchanged when there is nothing worth caching. */
+export function populateCliCorpus(
+  store: WebAccessContentStore,
+  name: string,
+  result: BackendCallResult,
+): BackendCallResult {
+  try {
+    if (name !== 'web_search') return result;
+    const details = (result as { details?: { query?: unknown; results?: CliCorpusHit[]; responseId?: unknown } }).details;
+    if (!details || typeof details.query !== 'string' || !Array.isArray(details.results) || details.responseId !== undefined) {
+      return result;
+    }
+    const trimmed = details.query.trim();
+    if (!trimmed || details.results.length === 0) return result;
+    const byProvider = new Map<string, Array<{ title: string; url: string; snippet: string }>>();
+    for (const hit of details.results) {
+      if (typeof hit.url !== 'string' || !hit.url) continue;
+      const provider = typeof hit.backend === 'string' && hit.backend.length > 0 ? hit.backend : 'parallel';
+      const list = byProvider.get(provider) ?? [];
+      list.push({ title: typeof hit.title === 'string' ? hit.title : hit.url, url: hit.url, snippet: typeof hit.snippet === 'string' ? hit.snippet : '' });
+      byProvider.set(provider, list);
+    }
+    if (byProvider.size === 0) return result;
+    const results: WebAccessQueryResult[] = [...byProvider].map(([provider, hits], index) => ({
+      queryIndex: index,
+      query: trimmed,
+      response: { provider: provider as WebAccessQueryResult extends { response?: { provider: infer P } } ? P : never, results: hits },
+    }));
+    const entry = buildWebAccessStoredEntry({ queries: [trimmed], results });
+    store.put(entry);
+    return { ...result, details: { ...details, responseId: entry.responseId } };
+  } catch {
+    return result;
+  }
+}
+
+/** Serve cached-corpus fetch actions from the parent store (no child spawn).
+ *  Returns undefined when args are not a corpus action; throws Error (never
+ *  ContractError) for unknown responseIds, mirroring the in-process route. */
+export function tryServeCliCorpusAction(
+  store: WebAccessContentStore,
+  args: Record<string, unknown>,
+): BackendCallResult | undefined {
+  const parsed = parseWebAccessFetchRequest(args);
+  if (!parsed || typeof (parsed as { action?: string }).action !== 'string') return undefined;
+  const kind = (parsed as { action: string }).action;
+  try {
+    if (kind === 'retrieve') {
+      const req = parsed as { responseId: string; sourceIds?: string[]; offset?: number; limit?: number; findText?: string };
+      const out = retrieveWebAccessCorpus(store, req);
+      return textResult(out.text, { action: 'retrieve', responseId: out.responseId, sources: out.sources, ...(out.matches !== undefined ? { matches: out.matches } : {}), ...(out.nextOffset !== undefined ? { nextOffset: out.nextOffset } : {}) });
+    }
+    const req = parsed as { responseId: string; claims: string[]; sourceIds?: string[] };
+    const artifact = runWebAccessCachedSourceCheck(store, req);
+    return textResult(formatWebAccessSourceCheck(artifact as Parameters<typeof formatWebAccessSourceCheck>[0], null), { action: 'source_check', artifact });
+  } catch (error) {
+    if (error instanceof WebAccessContractError) throw new Error(error.message);
+    throw error;
+  }
+}
+
 export function buildCliEnvironment(env: Record<string, string | undefined>): Record<string, string> {
   const allowed = [
     'PATH',
@@ -147,6 +236,18 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'EXA_API_KEY',
     'TAVILY_API_KEY',
     'TAVILY_RESEARCH_MODEL',
+    'PARALLEL_API_KEY',
+    'TINYFISH_API_KEY',
+    'QUERIT_API_KEY',
+    'VALYU_API_KEY',
+    'BOCHA_API_KEY',
+    'XCRAWL_API_KEY',
+    'XAI_API_KEY',
+    'MISTRAL_API_KEY',
+    'BRIGHTDATA_API_KEY',
+    'BRIGHTDATA_SERP_ZONE',
+    'SERPAPI_KEY',
+    'SERPER_API_KEY',
     'CODEX_ACCESS_TOKEN',
     'CODEX_ACCOUNT_ID',
     'CODEX_HOME',
@@ -225,6 +326,7 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'PI_SEARCH_COOKIE_BROWSER',
     'PI_SEARCH_COOKIE_STALE_MS',
     'PI_SEARCH_STATE_DIR',
+    'PI_SEARCH_CHROME_BRIDGE_TOKEN',
     'PI_SEARCH_SCRAPLING_PROXY',
     'PI_SEARCH_EMBEDDING_ENABLED',
     'PI_SEARCH_EMBEDDING_MODEL',

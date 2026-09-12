@@ -30,7 +30,7 @@
 // production never sets it.
 
 import type { BackendCallResult } from './backend.js';
-import { fetchInit, fetchJson, fetchText, safeResponseJson, unsafeFetchJson, validateHttpUrl } from './http.js';
+import { fetchText, validateHttpUrl } from './http.js';
 import { normalizeUrl } from './fusion.js';
 import { chooseRepresentation } from './web-representation.js';
 import { dedupeBy, northstarTextResult } from './tool-output.js';
@@ -56,6 +56,29 @@ import {
 } from './web-contract.js';
 import { exaSearchAdapter } from './web-exa.js';
 import { tavilySearchAdapter } from './web-tavily.js';
+import { braveSearchAdapter } from './web-brave.js';
+import { searxngSearchAdapter } from './web-searxng.js';
+import { ollamaSearchAdapter } from './web-ollama.js';
+import { duckduckgoSearchAdapter } from './web-duckduckgo.js';
+import { parallelSearchAdapter } from './web-parallel.js';
+import { parallelMcpSearchAdapter } from './web-parallel-mcp.js';
+import { tinyfishSearchAdapter } from './web-tinyfish.js';
+import { queritSearchAdapter } from './web-querit.js';
+import { valyuSearchAdapter } from './web-valyu.js';
+import { bochaSearchAdapter } from './web-bocha.js';
+import { xcrawlSearchAdapter } from './web-xcrawl.js';
+import { xaiSearchAdapter } from './web-xai.js';
+import { mistralSearchAdapter } from './web-mistral.js';
+import { brightdataSearchAdapter } from './web-brightdata.js';
+import { serpapiSearchAdapter } from './web-serpapi.js';
+import { serperSearchAdapter } from './web-serper.js';
+import {
+  WEB_ACCESS_BATCH_CONCURRENCY,
+  passesWebAccessFreshness,
+  resolveWebAccessRecencyLowerBound,
+  type WebAccessRecency,
+} from './web-access-contract.js';
+import { passesWebAccessDomainFilter } from './web-access-domain.js';
 import { runAgentReport } from './web-agent-report.js';
 import { runSitemap } from './web-sitemap.js';
 import { firecrawlFetchAdapter, firecrawlSearchAdapter } from './firecrawl.js';
@@ -143,11 +166,6 @@ function legacyAdapter(
   };
 }
 
-const braveSearchAdapter: WebSearchAdapter = legacyAdapter(
-  'brave',
-  (env) => Boolean(env.BRAVE_API_KEY?.trim()),
-  searchBrave,
-);
 const diffbotSearchAdapter: WebSearchAdapter = legacyAdapter(
   'diffbot',
   (env) => diffbotConfigured(env),
@@ -155,21 +173,6 @@ const diffbotSearchAdapter: WebSearchAdapter = legacyAdapter(
     const rows = await searchDiffbot(query, limit, env, signal);
     return rows.map((row) => ({ title: row.title, url: row.url, ...(row.snippet !== undefined ? { snippet: row.snippet } : {}), source: 'diffbot' }));
   },
-);
-const searxngSearchAdapter: WebSearchAdapter = legacyAdapter(
-  'searxng',
-  (env) => Boolean(env.SEARXNG_BASE_URL?.trim()),
-  searchSearxng,
-);
-const ollamaSearchAdapter: WebSearchAdapter = legacyAdapter(
-  'ollama-search',
-  (env) => Boolean((env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim()),
-  searchOllama,
-);
-const duckduckgoSearchAdapter: WebSearchAdapter = legacyAdapter(
-  'duckduckgo',
-  () => true,
-  (query, limit, _env, signal) => searchDuckDuckGo(query, limit, signal),
 );
 const codexSearchAdapter: WebSearchAdapter = legacyAdapter(
   'codex',
@@ -192,6 +195,18 @@ const ALL_SEARCH_ADAPTERS: readonly WebSearchAdapter[] = [
   ollamaSearchAdapter,
   duckduckgoSearchAdapter,
   codexSearchAdapter,
+  parallelSearchAdapter,
+  parallelMcpSearchAdapter,
+  tinyfishSearchAdapter,
+  queritSearchAdapter,
+  valyuSearchAdapter,
+  bochaSearchAdapter,
+  xcrawlSearchAdapter,
+  xaiSearchAdapter,
+  mistralSearchAdapter,
+  brightdataSearchAdapter,
+  serpapiSearchAdapter,
+  serperSearchAdapter,
 ];
 
 const ALL_FETCH_ADAPTERS: readonly WebFetchAdapter[] = [firecrawlFetchAdapter, jinaFetchAdapter];
@@ -298,12 +313,51 @@ interface DispatchedSearch {
   servedBackends: string[];
 }
 
+export interface WebSearchQueryFields {
+  includeContent?: boolean | undefined;
+  recency?: WebAccessRecency | undefined;
+  domains?: string[] | undefined;
+  yearFrom?: number | undefined;
+}
+
+function hostnameOf(url: string): string | undefined {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.length > 0 ? host : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Defense-in-depth post-filter shared by every fused hit. Adapters already
+ * apply recency/domains provider-side; this keeps the runtime honest when a
+ * provider ignores a filter. Dated hits at or after the intersected
+ * recency+yearFrom lower bound pass; undated hits are retained without a
+ * freshness claim. Domain excludes always drop; with at least one include
+ * entry only matching hosts pass.
+ */
+export function applyWebQueryFieldFilters(hits: WebSearchHit[], fields: WebSearchQueryFields): WebSearchHit[] {
+  const domains = fields.domains;
+  const bound = resolveWebAccessRecencyLowerBound({ recency: fields.recency, yearFrom: fields.yearFrom });
+  if ((domains === undefined || domains.length === 0) && bound === undefined) return hits;
+  return hits.filter((hit) => {
+    if (domains !== undefined && domains.length > 0) {
+      const host = hostnameOf(hit.url);
+      if (host === undefined) return false;
+      if (!passesWebAccessDomainFilter(host, domains)) return false;
+    }
+    return passesWebAccessFreshness(hit.publishedDate, bound);
+  });
+}
+
 /** Resolve policy + native-AI flags, then run every runnable adapter once. No retries. */
 async function dispatchBoundedSearch(
   query: string,
   limit: number,
   env: Record<string, string | undefined>,
   callerSignal?: AbortSignal,
+  fields: WebSearchQueryFields = {},
 ): Promise<DispatchedSearch> {
   const nativeAi = resolveWebNativeAiPolicy(env);
   let policy: ReturnType<typeof resolveWebProviderPolicy>;
@@ -338,6 +392,14 @@ async function dispatchBoundedSearch(
         env,
         signal,
         nativeAi: { summaries: nativeAi.summaries, answers: nativeAi.answers },
+        ...(fields.includeContent === true ? { includeContent: true as const } : {}),
+        ...(fields.recency !== undefined ? { recency: fields.recency } : {}),
+        ...(fields.domains !== undefined ? { domains: [...fields.domains] } : {}),
+        ...(fields.yearFrom !== undefined ? { yearFrom: fields.yearFrom } : {}),
+        ...(() => {
+          const bound = resolveWebAccessRecencyLowerBound({ recency: fields.recency, yearFrom: fields.yearFrom });
+          return bound === undefined ? {} : { freshnessLowerBoundMs: bound };
+        })(),
       });
     }),
   );
@@ -349,7 +411,8 @@ async function dispatchBoundedSearch(
     const adapter = policy.runnable[index]!;
     if (item.status === 'fulfilled') {
       servedBackends.push(adapter.id);
-      if (item.value.hits.length > 0) rankings.push({ backend: adapter.id, hits: item.value.hits });
+      const filtered = applyWebQueryFieldFilters(item.value.hits, fields);
+      if (filtered.length > 0) rankings.push({ backend: adapter.id, hits: filtered });
       generatedRaw.push(...item.value.generatedText);
       return;
     }
@@ -427,9 +490,14 @@ const UNAVAILABLE_KNOWLEDGE: WebKnowledgeResult = {
 export async function webSearch(args: Record<string, unknown>, options: WebToolOptions = {}): Promise<BackendCallResult> {
   const action = resolveWebActionForTool('web_search', args);
   const category = typeof args.category === 'string' ? args.category : undefined;
-  const searchInput: { action: string; query?: string; limit?: number; category?: string; cursor?: string; topK?: number; maxPages?: number; maxChars?: number; knowledge?: unknown } = { action };
+  const searchInput: { action: string; query?: string; queries?: unknown; limit?: number; includeContent?: unknown; recency?: unknown; domains?: unknown; yearFrom?: unknown; category?: string; cursor?: string; topK?: number; maxPages?: number; maxChars?: number; knowledge?: unknown } = { action };
   if (typeof args.query === 'string') searchInput.query = args.query;
+  if (args.queries !== undefined) searchInput.queries = args.queries;
   if (typeof args.limit === 'number') searchInput.limit = args.limit;
+  if (args.includeContent !== undefined) searchInput.includeContent = args.includeContent;
+  if (args.recency !== undefined) searchInput.recency = args.recency;
+  if (args.domains !== undefined) searchInput.domains = args.domains;
+  if (args.yearFrom !== undefined) searchInput.yearFrom = args.yearFrom;
   if (category !== undefined) searchInput.category = category;
   if (typeof args.cursor === 'string') searchInput.cursor = args.cursor;
   if (typeof args.topK === 'number') searchInput.topK = args.topK;
@@ -438,9 +506,18 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   if (args.knowledge !== undefined) searchInput.knowledge = args.knowledge;
   if (args.mode !== undefined) (searchInput as { mode?: unknown }).mode = args.mode;
   const { request } = validateWebRequest(searchInput);
-  const query = request.query!;
+  const query = request.query ?? request.queries[0]!;
   const limit = request.limit;
   const env = options.env ?? process.env;
+  const queryFields: WebSearchQueryFields = {
+    ...(request.includeContent === true ? { includeContent: true as const } : {}),
+    ...(request.recency !== undefined ? { recency: request.recency } : {}),
+    ...(request.domains !== undefined ? { domains: request.domains } : {}),
+    ...(request.yearFrom !== undefined ? { yearFrom: request.yearFrom } : {}),
+  };
+  if (request.agentMode && request.queries.length > 1) {
+    throw new Error('mode "agent" supports a single query only');
+  }
   if (request.agentMode) {
     const result = await runAgentReport(query, env, options.signal);
     options.signal?.throwIfAborted();
@@ -469,7 +546,9 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
       report: { status: 'ok', provider: result.provider, sources: result.sources.map((source) => ({ url: source.url, title: source.title })) },
     }, agentEnvelope);
   }
-  const effectiveQuery = category && CATEGORY_HINTS[category] ? `${query} ${CATEGORY_HINTS[category]}` : query;
+  const withCategoryHint = (text: string): string =>
+    category && CATEGORY_HINTS[category] ? `${text} ${CATEGORY_HINTS[category]}` : text;
+  const effectiveQuery = withCategoryHint(query);
 
   // Research isolation: category research/academic never touches generic web
   // providers (buildSearchRoute already routes those to the research tool).
@@ -488,9 +567,64 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
     }, envelope);
   }
 
-  const dispatched = await dispatchBoundedSearch(effectiveQuery, limit, env, options.signal);
+  const dispatchedQueries: Array<{ entry: string; dispatched: Awaited<ReturnType<typeof dispatchBoundedSearch>> }> = [];
+  for (let index = 0; index < request.queries.length; index += WEB_ACCESS_BATCH_CONCURRENCY) {
+    const batch = request.queries.slice(index, index + WEB_ACCESS_BATCH_CONCURRENCY);
+    const settled = await Promise.all(
+      batch.map(async (entry) => ({
+        entry,
+        dispatched: await dispatchBoundedSearch(withCategoryHint(entry), limit, env, options.signal, queryFields),
+      })),
+    );
+    dispatchedQueries.push(...settled);
+  }
   // Caller cancellation propagates instead of collapsing into a backend-failure envelope.
   options.signal?.throwIfAborted();
+  const combinedRankings: Array<{ backend: WebSearchProviderId; hits: WebSearchHit[] }> = [];
+  const combinedGeneratedRaw: WebGeneratedText[] = [];
+  const combinedFailures: WebProviderFailure[] = [];
+  const servedList: string[] = [];
+  const seenSelected = new Set<WebSearchProviderId>();
+  const combinedSelected: WebSearchProviderId[] = [];
+  const seenRunnable = new Set<WebSearchProviderId>();
+  const combinedRunnable: WebSearchProviderId[] = [];
+  const seenUnavailable = new Set<WebSearchProviderId>();
+  const combinedUnavailable: WebSearchProviderId[] = [];
+  for (const { dispatched } of dispatchedQueries) {
+    combinedRankings.push(...dispatched.rankings);
+    combinedGeneratedRaw.push(...dispatched.generatedRaw);
+    combinedFailures.push(...dispatched.failures);
+    for (const backend of dispatched.servedBackends) {
+      if (!servedList.includes(backend)) servedList.push(backend);
+    }
+    for (const id of dispatched.selected) {
+      if (!seenSelected.has(id)) {
+        seenSelected.add(id);
+        combinedSelected.push(id);
+      }
+    }
+    for (const id of dispatched.runnable) {
+      if (!seenRunnable.has(id)) {
+        seenRunnable.add(id);
+        combinedRunnable.push(id);
+      }
+    }
+    for (const id of dispatched.unavailable) {
+      if (!seenUnavailable.has(id)) {
+        seenUnavailable.add(id);
+        combinedUnavailable.push(id);
+      }
+    }
+  }
+  const dispatched = {
+    selected: combinedSelected,
+    runnable: combinedRunnable,
+    unavailable: combinedUnavailable,
+    rankings: combinedRankings,
+    generatedRaw: combinedGeneratedRaw,
+    failures: combinedFailures,
+    servedBackends: servedList,
+  };
   const fused = fuseWebSearchRankings(dispatched.rankings, limit);
   const generatedText = normalizeGeneratedText(dispatched.generatedRaw);
 
@@ -1246,88 +1380,6 @@ async function semanticSourceUrls(source: Record<string, unknown>, query: string
   if (composed.length === 0) return [];
 
   return composed.map(({ url }) => url).filter(Boolean).slice(0, maxPages);
-}
-
-async function searchDuckDuckGo(query: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
-  // Single HTML request; no Instant Answer call, no retry.
-  return searchDuckDuckGoHtml(query, limit, signal);
-}
-
-async function searchDuckDuckGoHtml(query: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
-  const url = new URL('https://duckduckgo.com/html/');
-  url.searchParams.set('q', query);
-  const html = await fetchText(url.href, signal);
-  return [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)]
-    .map((match) => ({
-      title: stripHtml(match[2] ?? ''),
-      url: decodeDuckDuckGoUrl(match[1] ?? ''),
-      snippet: stripHtml(match[3] ?? ''),
-    }))
-    .filter((result) => result.url)
-    .slice(0, limit);
-}
-
-async function searchSearxng(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
-  const baseUrl = env.SEARXNG_BASE_URL?.trim();
-  if (!baseUrl) return [];
-  const url = new URL(`${baseUrl.replace(/\/+$/, '')}/search`);
-  url.searchParams.set('q', query);
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('safesearch', '1');
-  const data = await unsafeFetchJson(url.href, { Accept: 'application/json' }, signal) as { results?: Array<Record<string, unknown>> };
-  return (data.results ?? []).slice(0, limit).map((result) => ({
-    title: stringField(result.title, 'Untitled'),
-    url: stringField(result.url, ''),
-    snippet: stringField(result.content, ''),
-    source: 'searxng',
-  })).filter((result) => result.url);
-}
-
-async function searchBrave(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
-  const apiKey = env.BRAVE_API_KEY?.trim();
-  if (!apiKey) return [];
-  const url = new URL('https://api.search.brave.com/res/v1/web/search');
-  url.searchParams.set('q', query);
-  url.searchParams.set('count', String(Math.min(limit, 20)));
-  const data = await fetchJson(url.href, { Accept: 'application/json', 'X-Subscription-Token': apiKey }, signal) as { web?: { results?: Array<Record<string, unknown>> } };
-  return (data.web?.results ?? []).slice(0, limit).map((result) => ({
-    title: stringField(result.title, 'Untitled'),
-    url: stringField(result.url, ''),
-    snippet: stringField(result.description, ''),
-    source: 'brave',
-  })).filter((result) => result.url);
-}
-
-async function searchOllama(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
-  const baseUrl = (env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim();
-  if (!baseUrl) return [];
-  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
-  const apiKey = (env.OLLAMA_SEARCH_API_KEY ?? env.SEARCH_OLLAMA_API_KEY)?.trim();
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  const searchUrl = `${baseUrl.replace(/\/+$/, '')}/api/experimental/web_search`;
-  const response = await fetch(searchUrl, {
-    method: 'POST',
-    body: JSON.stringify({ query, max_results: limit }),
-    ...fetchInit(headers, signal),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status} for Ollama search`);
-  const data = await safeResponseJson(response, searchUrl) as { results?: Array<Record<string, unknown>> };
-  return (data.results ?? []).slice(0, limit).map((result) => ({
-    title: stringField(result.title, 'Untitled'),
-    url: stringField(result.url, ''),
-    snippet: stringField(result.content, ''),
-    source: 'ollama-search',
-  })).filter((result) => result.url);
-}
-
-function decodeDuckDuckGoUrl(raw: string): string {
-  const decoded = raw.replace(/&amp;/g, '&');
-  try {
-    const url = new URL(decoded, 'https://duckduckgo.com');
-    return url.searchParams.get('uddg') ?? url.href;
-  } catch {
-    return decoded;
-  }
 }
 
 export function formatWebResults(query: string, results: WebResult[]): string {

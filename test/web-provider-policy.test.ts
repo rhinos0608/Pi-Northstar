@@ -28,7 +28,34 @@ const ALL_IDS: WebSearchProviderId[] = [
   'searxng',
   'ollama-search',
   'duckduckgo',
+  'parallel',
+  'parallel-mcp',
+  'tinyfish',
+  'querit',
+  'valyu',
+  'bocha',
+  'xcrawl',
+  'xai',
+  'mistral',
+  'brightdata',
+  'serpapi',
+  'serper',
   'codex',
+];
+
+const NEW_IDS: WebSearchProviderId[] = [
+  'parallel',
+  'parallel-mcp',
+  'tinyfish',
+  'querit',
+  'valyu',
+  'bocha',
+  'xcrawl',
+  'xai',
+  'mistral',
+  'brightdata',
+  'serpapi',
+  'serper',
 ];
 
 function adaptersFor(configured: readonly string[], calls: string[]): WebSearchAdapter[] {
@@ -109,6 +136,35 @@ test('ninth id rejects before adapter calls', () => {
     /at most 8/,
   );
   assert.deepEqual(calls, []);
+});
+
+test('explicit PI_SEARCH_WEB_BACKENDS accepts all 12 newly added ids (max-8 batches)', () => {
+  for (const batch of [NEW_IDS.slice(0, 8), NEW_IDS.slice(8)]) {
+    const calls: string[] = [];
+    const policy = resolveWebProviderPolicy(
+      { PI_SEARCH_WEB_BACKENDS: batch.join(',') },
+      adaptersFor(batch, calls),
+    );
+    assert.equal(policy.explicit, true);
+    assert.deepEqual(policy.selected, batch);
+    assert.deepEqual(
+      policy.runnable.map((a) => a.id),
+      batch,
+    );
+    assert.deepEqual(policy.unavailable, []);
+  }
+});
+
+test('explicit but unwired new ids report unavailable without fetch', () => {
+  const calls: string[] = [];
+  const policy = resolveWebProviderPolicy(
+    { PI_SEARCH_WEB_BACKENDS: 'parallel,xcrawl' },
+    adaptersFor(['tavily'], calls),
+  );
+  assert.equal(policy.explicit, true);
+  assert.deepEqual(policy.selected, ['parallel', 'xcrawl']);
+  assert.deepEqual(policy.runnable.map((a) => a.id), []);
+  assert.deepEqual(policy.unavailable, ['parallel', 'xcrawl']);
 });
 
 test('invalid timeout rejects before adapter calls', () => {
