@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { EventEmitter } from 'node:events';
+import { isAbsolute, join } from 'node:path';
 import { SidecarManager } from '../src/sidecar-manager.js';
 import type { SidecarManagerOptions } from '../src/sidecar-manager.js';
 
@@ -202,13 +203,24 @@ test('start spawns python3 with correct args and transitions to running', async 
   assert.equal(spawnRecords.length, 1);
   const rec = spawnRecords[0]!;
   assert.equal(rec.command, 'python3');
-  assert.ok(rec.args.includes('sidecar/app.py'));
+  // Package-root resolution: absolute path, no cwd dependence.
+  assert.ok(rec.args.some((arg) => arg.endsWith(join('sidecar', 'app.py')) && isAbsolute(arg)));
   assert.ok(rec.args.includes('--port'));
   assert.ok(rec.args.includes(String(TEST_PORT)));
   assert.ok(rec.args.includes('--model'));
   assert.ok(rec.args.includes('my-model'));
   assert.ok(rec.args.includes('--device'));
   assert.ok(rec.args.includes('cuda'));
+});
+
+test('default scriptPath resolves under the package root (no cwd dependence)', async () => {
+  const mgr = createManager({ _fetch: okFetch() });
+  await mgr.start();
+  assert.equal(spawnRecords.length, 1);
+  const scriptArg = spawnRecords[0]!.args[0]!;
+  assert.ok(isAbsolute(scriptArg), `default script must be absolute, got ${scriptArg}`);
+  assert.ok(scriptArg.endsWith(join('sidecar', 'app.py')), `unexpected script path ${scriptArg}`);
+  await mgr.stop();
 });
 
 test('start uses default model when not specified', async () => {

@@ -1,10 +1,14 @@
 import { spawn as realSpawn, type ChildProcess } from 'node:child_process';
 import { createServer as realCreateServer } from 'node:net';
+import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { buildPythonChildEnvironment } from './python-child-env.js';
 
 const DEFAULT_PYTHON_PATH = 'python3';
-const DEFAULT_SCRIPT_PATH = 'sidecar/app.py';
+// Package-root resolution (no cwd dependence): src/sidecar-manager.ts lives
+// one level below the package root, next to sidecar/app.py.
+const DEFAULT_SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'sidecar', 'app.py');
 const DEFAULT_MODEL = 'all-MiniLM-L6-v2';
 const DEFAULT_STARTUP_TIMEOUT_MS = 60_000;
 const PORT_LINE_TIMEOUT_MS = 10_000;
