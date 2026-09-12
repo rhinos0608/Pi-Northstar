@@ -1,6 +1,6 @@
 {
   "name": "pi-northstar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pi extension — web search, fetch, GitHub, social, media, browser, and desktop tools with multi-provider search, academic research, and agent-browser automation.",
   "type": "module",
   "license": "MIT",
@@ -37,8 +37,8 @@
     "agent-browser": "0.37.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.79.10",
-    "@earendil-works/pi-coding-agent": "^0.79.10",
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@types/node": "^25.6.0",
     "typebox": "^1.3.2",
     "typescript": "^5.9.3"
