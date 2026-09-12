@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { searxngSearchAdapter } from '../src/web-searxng.js';
 import type { WebProviderSearchInput } from '../src/web-search-types.js';
+import { jsonResponse, mockFetch } from './web-provider-test-utils.js';
 
 function input(overrides?: Partial<WebProviderSearchInput>): WebProviderSearchInput {
   return {
@@ -11,26 +12,6 @@ function input(overrides?: Partial<WebProviderSearchInput>): WebProviderSearchIn
     nativeAi: { summaries: false, answers: false },
     ...overrides,
   };
-}
-
-function mockFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>): {
-  calls: Array<{ url: string; init: RequestInit | undefined }>;
-  restore: () => void;
-} {
-  const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
-  const saved = globalThis.fetch;
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    calls.push({ url: String(url), init });
-    return handler(String(url), init);
-  }) as typeof fetch;
-  return { calls, restore: () => { globalThis.fetch = saved; } };
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 }
 
 test('searxng configured: base present, blank and absent rejected', () => {

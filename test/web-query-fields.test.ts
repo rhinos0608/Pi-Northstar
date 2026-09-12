@@ -52,10 +52,11 @@ test('post-filter drops stale/excluded hits and retains undated ones', () => {
     { title: 'old', url: 'https://example.com/old', snippet: 's', backend: 'tinyfish' as const, publishedDate: '2020-01-01T00:00:00.000Z' },
     { title: 'undated', url: 'https://example.com/u', snippet: 's', backend: 'tinyfish' as const },
     { title: 'blocked', url: 'https://blocked.com/x', snippet: 's', backend: 'tinyfish' as const },
+    { title: 'unparsable', url: '::not a url', snippet: 's', backend: 'tinyfish' as const },
   ];
   const out = applyWebQueryFieldFilters(hits, { recency: 'week', domains: ['example.com', '-blocked.com'] });
   assert.deepEqual(out.map((h) => h.title).sort(), ['fresh', 'undated']);
-  assert.deepEqual(applyWebQueryFieldFilters(hits, {}).length, 4);
+  assert.deepEqual(applyWebQueryFieldFilters(hits, {}).length, 5);
 });
 
 test('webSearch passes recency/domains through provider inputs and post-filters', async () => {

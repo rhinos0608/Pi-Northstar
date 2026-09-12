@@ -3,9 +3,11 @@ import { test } from 'node:test';
 import {
   runWebAccessBatchSearch,
   resolveWebAccessBackends,
+  WEB_ACCESS_DEFAULT_BACKEND_COUNT,
   WEB_ACCESS_RRF_K,
   type WebAccessSearchAdapter,
 } from '../src/web-access-search.js';
+import { WEB_ACCESS_BATCH_CONCURRENCY } from '../src/web-access-contract.js';
 
 function stub(id: 'tavily' | 'exa' | 'brave' | 'searxng', opts: {
   configured?: boolean;
@@ -41,6 +43,7 @@ test('absent env uses first 3 configured; explicit runs all runnable', () => {
   const adapters = [stub('tavily'), stub('exa'), stub('brave'), stub('searxng')];
   const top = resolveWebAccessBackends({}, adapters);
   assert.equal(top.explicit, false);
+  assert.equal(top.selected.length, WEB_ACCESS_DEFAULT_BACKEND_COUNT);
   assert.deepEqual(top.selected, ['tavily', 'exa', 'brave']);
   const explicit = resolveWebAccessBackends({ PI_SEARCH_WEB_BACKENDS: 'searxng,exa' }, adapters);
   assert.equal(explicit.explicit, true);
@@ -59,7 +62,7 @@ test('batch preserves input order with concurrency 3', async () => {
   );
   assert.deepEqual(out.results.map((r) => r.query), ['q0', 'q1', 'q2', 'q3', 'q4']);
   assert.deepEqual(out.results.map((r) => r.queryIndex), [0, 1, 2, 3, 4]);
-  assert.ok(active.max <= 3, `max concurrency ${active.max} exceeds 3`);
+  assert.ok(active.max <= WEB_ACCESS_BATCH_CONCURRENCY, `max concurrency ${active.max} exceeds ${WEB_ACCESS_BATCH_CONCURRENCY}`);
   assert.equal(WEB_ACCESS_RRF_K, 60);
 });
 

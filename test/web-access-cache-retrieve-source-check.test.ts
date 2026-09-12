@@ -98,7 +98,7 @@ test('cached source_check assesses claims from stored corpus only, with hashes a
   const artifact = runWebAccessCachedSourceCheck(store, { responseId: 'resp-sc', claims: ['alpha feature exists here'] });
   assert.equal(artifact.heuristic, true);
   assert.equal(artifact.claims?.length, 1);
-  assert.ok(['supported', 'contradicted', 'unclear', 'missing-evidence'].includes(artifact.claims?.[0]?.status ?? ''));
+  assert.equal(artifact.claims?.[0]?.status, 'unclear');
   assert.ok((artifact.claims?.[0]?.confidence ?? 1) <= 0.85);
   for (const passage of artifact.passages) {
     assert.match(passage.passage_id, /^p-\d+-\d+$/);

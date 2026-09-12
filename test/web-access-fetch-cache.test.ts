@@ -98,7 +98,12 @@ test('fetch routes media urls through the media subsystem (keyless oEmbed)', asy
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
   try {
-    const out = await callNativeTool('fetch', { url: 'https://www.youtube.com/watch?v=oemb1' }, { env: {} });
+    // Offline DNS stub: media routing preflights DNS before the mocked fetch,
+    // and youtube.com does not resolve in sandboxes without public DNS.
+    const out = await callNativeTool('fetch', { url: 'https://www.youtube.com/watch?v=oemb1' }, {
+      env: {},
+      lookup: async () => [{ address: '142.250.72.14', family: 4 as const }],
+    });
     assert.match(JSON.stringify(out), /OEmbed Special/);
   } finally {
     globalThis.fetch = savedFetch;

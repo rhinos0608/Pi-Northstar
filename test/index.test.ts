@@ -881,11 +881,15 @@ test('graph description states native language, provenance, probe countability, 
   assert.ok(/schema/i.test(description), 'graph description must mention schema');
 });
 
+const EXPECTED_KG_SCHEMA_KEYS = ['action', 'confidenceThreshold', 'cursor', 'description', 'email', 'employer', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'fields', 'id', 'includeEvidence', 'includeRelationships', 'language', 'limit', 'location', 'maxEntities', 'maxProviders', 'name', 'phone', 'providers', 'query', 'school', 'text', 'title', 'type', 'url'];
+const EXPECTED_WEB_SEARCH_SCHEMA_KEYS = ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom'];
+const EXPECTED_FETCH_SCHEMA_KEYS = ['action', 'claims', 'findText', 'followLinks', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'searchQuery', 'siteMap', 'sourceIds', 'topK', 'url', 'urls'];
+
 test('graph registration leaves kg, web_search, and fetch schemas unchanged', async () => {
   const defs = await captureAllTools();
-  assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), ['action', 'confidenceThreshold', 'cursor', 'description', 'email', 'employer', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'fields', 'id', 'includeEvidence', 'includeRelationships', 'language', 'limit', 'location', 'maxEntities', 'maxProviders', 'name', 'phone', 'providers', 'query', 'school', 'text', 'title', 'type', 'url']);
-  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom']);
-  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['action', 'claims', 'findText', 'followLinks', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'searchQuery', 'siteMap', 'sourceIds', 'topK', 'url', 'urls']);
+  assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), EXPECTED_KG_SCHEMA_KEYS);
+  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), EXPECTED_WEB_SEARCH_SCHEMA_KEYS);
+  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), EXPECTED_FETCH_SCHEMA_KEYS);
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
   assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');
