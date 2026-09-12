@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BM25Index, tokenize } from '../src/bm25.js';
+import { BM25Index, stem, tokenize } from '../src/bm25.js';
 
 // ── Tokenizer ──
 
@@ -363,4 +363,56 @@ test('BM25Index multiple operations maintain consistency', () => {
   const results = idx.search('cat');
   assert.equal(results.length, 1);
   assert.equal(results[0]!.id, 'doc3');
+});
+
+// ── Stemmer ──
+
+test('stem folds verb inflections to a shared base', () => {
+  assert.equal(stem('run'), 'run');
+  assert.equal(stem('runs'), 'run');
+  assert.equal(stem('running'), 'run');
+  assert.equal(stem('played'), 'play');
+  assert.equal(stem('stopped'), 'stop');
+  assert.equal(stem('stories'), 'story');
+  assert.equal(stem('boxes'), 'box');
+  assert.equal(stem('watches'), 'watch');
+  assert.equal(stem('cats'), 'cat');
+});
+
+test('stem leaves short words and non-inflected forms intact', () => {
+  assert.equal(stem('run'), 'run');
+  assert.equal(stem('bus'), 'bus');
+  assert.equal(stem('class'), 'class');
+  assert.equal(stem('red'), 'red');
+  assert.equal(stem('café'), 'café');
+  assert.equal(stem('机器学习'), '机器学习');
+});
+
+test('stem does not strip derivational suffixes: runner keeps its form', () => {
+  // `runner` is an agent noun, not an inflection of `run`; folding it to
+  // `run` would mangle code identifiers and prose alike.
+  assert.equal(stem('runner'), 'runner');
+  assert.equal(stem('filler'), 'filler');
+});
+
+test('tokenize folds inflections but keeps code identifiers sensible', () => {
+  assert.deepEqual(tokenize('running runs'), ['run', 'run']);
+  assert.deepEqual(tokenize('the runner runs'), ['runner', 'run']);
+  // Underscore splits first, so `running_total` yields stemmed parts:
+  // still searchable as run/total, never as one mangled token.
+  assert.deepEqual(tokenize('running_total'), ['run', 'total']);
+});
+
+test('BM25Index search matches across verb inflections', () => {
+  const idx = new BM25Index();
+  idx.add('doc1', 'the runner keeps running every morning');
+  idx.add('doc2', 'unrelated bird fish');
+
+  const byBase = idx.search('run');
+  assert.equal(byBase.length, 1);
+  assert.equal(byBase[0]!.id, 'doc1');
+
+  const byInflection = idx.search('running');
+  assert.equal(byInflection.length, 1);
+  assert.equal(byInflection[0]!.id, 'doc1');
 });

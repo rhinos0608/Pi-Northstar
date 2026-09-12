@@ -22,21 +22,57 @@ export interface TokenizerOptions {
 
 const DEFAULT_STOPWORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'shall', 'should',
-  'may', 'might', 'must', 'can', 'could', 'i', 'me', 'my', 'myself', 'we',
-  'our', 'ours', 'ourselves', 'you', 'your', 'yours', 'yourself', 'yourselves',
+  'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'will', 'would',
+  'shall', 'should', 'may', 'might', 'must', 'can', 'could', 'i', 'me', 'my',
+  'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 'yours', 'yourself', 'yourselves',
   'he', 'him', 'his', 'himself', 'she', 'her', 'hers', 'herself', 'it', 'its',
   'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom',
-  'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be',
-  'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing',
-  'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until',
-  'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into',
-  'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
-  'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once',
-  'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each',
-  'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only',
-  'own', 'same', 'so', 'than', 'too', 'very', 'just', 'don', 'now',
+  'this', 'that', 'these', 'those', 'am', 'and', 'but', 'if', 'or', 'because',
+  'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against',
+  'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from',
+  'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further',
+  'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any',
+  'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
+  'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'don', 'now',
 ]);
+
+// Doubled consonants collapsed after -ing/-ed stripping. `ll`, `ss`, and
+// `zz` are excluded: called -> call, passed -> pass, buzzing -> buzz must
+// keep their double letter, while running -> runn -> run collapses.
+const COLLAPSE_DOUBLES = new Set(['bb', 'cc', 'dd', 'ff', 'gg', 'mm', 'nn', 'pp', 'rr', 'tt']);
+
+/**
+ * Minimal dependency-free suffix stemmer for English verb/noun inflections.
+ * Assumes lowercase input (tokenize lowercases by default). Conservative by
+ * design: short tokens (length <= 3) pass through untouched, and derivational
+ * suffixes like -er/-or/-ly are never stripped, so agent nouns (`runner`)
+ * keep their form while inflections (`running`, `runs`) fold to `run`.
+ */
+export function stem(token: string): string {
+  if (token.length <= 3) return token;
+  // -ies -> -y (stories -> story). Length guard keeps `ties` on the -s path.
+  if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
+  // -ing / -ed with doubled-consonant collapse (running -> run, stopped -> stop).
+  // Base-length guard keeps short words (`aging`, `seed`, `red`) intact.
+  if (token.endsWith('ing') || token.endsWith('ed')) {
+    const suffixLength = token.endsWith('ing') ? 3 : 2;
+    const base = token.slice(0, -suffixLength);
+    if (base.length >= 3) {
+      const lastTwo = base.slice(-2);
+      if (COLLAPSE_DOUBLES.has(lastTwo)) return base.slice(0, -1);
+      return base;
+    }
+    return token;
+  }
+  // -es after sibilants (boxes -> box, watches -> watch, wishes -> wish).
+  if (/(?:s|x|z|ch|sh)es$/.test(token) && token.length > 4) return token.slice(0, -2);
+  // Plain plural -s (runs -> run, cats -> cat). `ss`/`us` guard keeps
+  // `class` and `bus` intact.
+  if (token.endsWith('s') && !token.endsWith('ss') && !token.endsWith('us') && token.length > 3) {
+    return token.slice(0, -1);
+  }
+  return token;
+}
 
 export function tokenize(text: string, options?: TokenizerOptions): string[] {
   const minLength = options?.minLength ?? 2;
@@ -52,7 +88,7 @@ export function tokenize(text: string, options?: TokenizerOptions): string[] {
   for (const token of rawTokens) {
     if (token.length < minLength) continue;
     if (stopwords.has(token)) continue;
-    result.push(token);
+    result.push(stem(token));
   }
   return result;
 }
