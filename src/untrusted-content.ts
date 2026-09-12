@@ -18,6 +18,7 @@ export const EXTERNAL_TOOL_NAMES = [
   'social',
   'media',
   'browser',
+  'desktop',
   'kg',
   'graph',
 ] as const;
