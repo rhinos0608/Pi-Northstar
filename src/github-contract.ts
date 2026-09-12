@@ -40,6 +40,7 @@ export {
   GITHUB_QUERY_MAX,
   GITHUB_REF_MAX,
   GITHUB_REPO_MAX,
+  GITHUB_RUN_STATUSES,
   GITHUB_SEARCH_PER_PAGE_MAX,
   GITHUB_TRENDING_LIMIT_MAX,
   githubPaginationSupported,
@@ -70,7 +71,10 @@ export type GithubEntityKind =
   | 'issue'
   | 'pull'
   | 'release'
-  | 'commit';
+  | 'commit'
+  | 'workflow'
+  | 'workflow_run'
+  | 'workflow_job';
 
 export const GITHUB_ENTITY_KINDS: ReadonlySet<string> = new Set([
   'repo',
@@ -81,6 +85,9 @@ export const GITHUB_ENTITY_KINDS: ReadonlySet<string> = new Set([
   'pull',
   'release',
   'commit',
+  'workflow',
+  'workflow_run',
+  'workflow_job',
 ]);
 
 function isGithubEntityKind(value: unknown): value is GithubEntityKind {
@@ -213,6 +220,52 @@ export interface GithubCommitV1 {
   url?: string;
 }
 
+export interface GithubWorkflowV1 {
+  version: 1;
+  kind: 'workflow';
+  id: string;
+  backend: string;
+  workflow_id: number;
+  name?: string;
+  path?: string;
+  state?: string;
+  url?: string;
+  badge_url?: string;
+}
+
+export interface GithubWorkflowRunV1 {
+  version: 1;
+  kind: 'workflow_run';
+  id: string;
+  backend: string;
+  run_id: number;
+  run_number?: number;
+  name?: string;
+  status?: string;
+  conclusion?: string;
+  head_branch?: string;
+  head_sha?: string;
+  event?: string;
+  url?: string;
+  created_at?: string;
+  actor?: string;
+}
+
+export interface GithubWorkflowJobV1 {
+  version: 1;
+  kind: 'workflow_job';
+  id: string;
+  backend: string;
+  job_id: number;
+  run_id: number;
+  name: string;
+  status?: string;
+  conclusion?: string;
+  started_at?: string;
+  completed_at?: string;
+  url?: string;
+}
+
 export type GithubEntityV1 =
   | GithubRepoV1
   | GithubFileV1
@@ -221,7 +274,10 @@ export type GithubEntityV1 =
   | GithubIssueV1
   | GithubPullV1
   | GithubReleaseV1
-  | GithubCommitV1;
+  | GithubCommitV1
+  | GithubWorkflowV1
+  | GithubWorkflowRunV1
+  | GithubWorkflowJobV1;
 
 export const GITHUB_ENTITY_CONTENT_MAX = 8000;
 export const GITHUB_PAGE_CONTENT_MAX = 60000;
@@ -246,6 +302,15 @@ const GITHUB_KIND_FIELDS: Readonly<Record<GithubEntityKind, ReadonlySet<string>>
   ]),
   release: new Set(['version', 'kind', 'id', 'backend', 'tag', 'name', 'published_at', 'url', 'body']),
   commit: new Set(['version', 'kind', 'id', 'backend', 'sha', 'message', 'author', 'date', 'url']),
+  workflow: new Set(['version', 'kind', 'id', 'backend', 'workflow_id', 'name', 'path', 'state', 'url', 'badge_url']),
+  workflow_run: new Set([
+    'version', 'kind', 'id', 'backend', 'run_id', 'run_number', 'name', 'status', 'conclusion',
+    'head_branch', 'head_sha', 'event', 'url', 'created_at', 'actor',
+  ]),
+  workflow_job: new Set([
+    'version', 'kind', 'id', 'backend', 'job_id', 'run_id', 'name', 'status', 'conclusion',
+    'started_at', 'completed_at', 'url',
+  ]),
 };
 
 function isValidHttpUrl(value: string): boolean {
@@ -416,6 +481,44 @@ export function validateGithubEntity(value: unknown): { ok: boolean; issues: str
       checkBoundedText(entity, 'message', issues);
       checkStringField(entity, 'author', issues);
       checkStringField(entity, 'date', issues);
+      checkOptionalUrl(entity, issues);
+      break;
+    }
+    case 'workflow': {
+      checkFiniteNumber(entity, 'workflow_id', issues);
+      if (entity.workflow_id === undefined) issues.push('workflow_id is required');
+      checkStringField(entity, 'name', issues);
+      checkStringField(entity, 'path', issues);
+      checkStringField(entity, 'state', issues);
+      checkOptionalUrl(entity, issues);
+      checkStringField(entity, 'badge_url', issues);
+      break;
+    }
+    case 'workflow_run': {
+      checkFiniteNumber(entity, 'run_id', issues);
+      if (entity.run_id === undefined) issues.push('run_id is required');
+      checkFiniteNumber(entity, 'run_number', issues);
+      checkStringField(entity, 'name', issues);
+      checkStringField(entity, 'status', issues);
+      checkStringField(entity, 'conclusion', issues);
+      checkStringField(entity, 'head_branch', issues);
+      checkStringField(entity, 'head_sha', issues);
+      checkStringField(entity, 'event', issues);
+      checkOptionalUrl(entity, issues);
+      checkStringField(entity, 'created_at', issues);
+      checkStringField(entity, 'actor', issues);
+      break;
+    }
+    case 'workflow_job': {
+      checkFiniteNumber(entity, 'job_id', issues);
+      if (entity.job_id === undefined) issues.push('job_id is required');
+      checkFiniteNumber(entity, 'run_id', issues);
+      if (entity.run_id === undefined) issues.push('run_id is required');
+      if (typeof entity.name !== 'string' || entity.name.length === 0) issues.push('name is required');
+      checkStringField(entity, 'status', issues);
+      checkStringField(entity, 'conclusion', issues);
+      checkStringField(entity, 'started_at', issues);
+      checkStringField(entity, 'completed_at', issues);
       checkOptionalUrl(entity, issues);
       break;
     }
@@ -701,6 +804,8 @@ export const GITHUB_BACKEND_PREFERENCE: Readonly<Record<GithubAction, readonly s
   search: ['github-api'],
   trending: ['github-api'],
   issues: ['github-api'],
+  workflows: ['github-api'],
+  runs: ['github-api'],
   pulls: ['github-api'],
   releases: ['github-api'],
   commits: ['github-api'],

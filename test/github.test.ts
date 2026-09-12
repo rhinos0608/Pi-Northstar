@@ -47,7 +47,7 @@ test('github schema exposes per-action selectors, caps, and cursor', async () =>
     'owner', 'repo', 'repository', 'path', 'paths', 'branch', 'ref',
     'query', 'language', 'limit', 'perPage', 'number', 'sha', 'since',
     'state', 'labels', 'tag', 'latest', 'files', 'author', 'recursive',
-    'includeReadme', 'cursor',
+    'includeReadme', 'cursor', 'workflow', 'status', 'jobs',
   ]) {
     assert.ok(param in props, `github schema must expose ${param}`);
   }

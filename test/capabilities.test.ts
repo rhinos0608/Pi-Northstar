@@ -341,7 +341,7 @@ test('setupChannelNames retains the legacy install_channels name set', () => {
 });
 
 test('github channel advertises the Stage 5 canonical action set', () => {
-  const expected = ['repo', 'file', 'tree', 'search', 'search_repos', 'trending', 'issues', 'pulls', 'releases', 'commits'];
+  const expected = ['repo', 'file', 'tree', 'search', 'search_repos', 'trending', 'issues', 'pulls', 'releases', 'commits', 'workflows', 'runs'];
   assert.deepEqual([...canonicalActionsFor('github')].sort(), [...expected].sort());
   assert.deepEqual([...canonicalActionsFor('github')].sort(), [...GITHUB_ACTIONS].sort(), 'registry must equal contract vocabulary');
   const backend = backendCapability('github', 'github-api');

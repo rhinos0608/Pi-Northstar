@@ -64,8 +64,8 @@ const REPO = { version: 1 as const, kind: 'repo' as const, id: 'octo:repo:1', ba
 
 // ── Canonical actions ──
 
-test('resolveGithubAction accepts all ten canonical actions', () => {
-  const expected = ['repo', 'file', 'tree', 'search', 'trending', 'issues', 'pulls', 'releases', 'commits', 'search_repos'];
+test('resolveGithubAction accepts all twelve canonical actions', () => {
+  const expected = ['repo', 'file', 'tree', 'search', 'trending', 'issues', 'pulls', 'releases', 'commits', 'search_repos', 'workflows', 'runs'];
   assert.deepEqual([...GITHUB_ACTIONS], expected);
   for (const action of expected) assert.equal(resolveGithubAction(action), action);
 });
@@ -200,6 +200,16 @@ test('validateGithubRequest enforces query and labels bounds', () => {
   githubError('invalid_request', () => validateGithubRequest({ action: 'issues', owner: 'o', repo: 'r', state: 'bogus' }));
 });
 
+test('validateGithubRequest validates run status enum for runs, reuses path validation for workflow', () => {
+  const { request } = validateGithubRequest({ action: 'runs', owner: 'o', repo: 'r', status: 'success' });
+  assert.equal(request.status, 'success');
+  githubError('invalid_request', () => validateGithubRequest({ action: 'runs', owner: 'o', repo: 'r', status: 'bogus' }));
+
+  const withWorkflow = validateGithubRequest({ action: 'workflows', owner: 'o', repo: 'r', workflow: 'ci.yml' });
+  assert.equal(withWorkflow.request.workflow, 'ci.yml');
+  githubError('invalid_request', () => validateGithubRequest({ action: 'workflows', owner: 'o', repo: 'r', workflow: '../secret' }));
+});
+
 // ── Limits reject-not-clamp ──
 
 test('resolveGithubLimit rejects out-of-range with field and cap named', () => {
@@ -252,11 +262,20 @@ function validEntity(kind: GithubEntityV1['kind']): GithubEntityV1 {
       return { ...base, kind, tag: 'v1.0.0', name: 'one', body: 'notes' };
     case 'commit':
       return { ...base, kind, sha: 'abc1234', message: 'fix' };
+    case 'workflow':
+      return { ...base, kind, workflow_id: 1, name: 'CI', path: '.github/workflows/ci.yml', state: 'active' };
+    case 'workflow_run':
+      return { ...base, kind, run_id: 1, run_number: 3, status: 'completed', conclusion: 'success' };
+    case 'workflow_job':
+      return { ...base, kind, job_id: 1, run_id: 1, name: 'build', status: 'completed' };
   }
 }
 
 test('validateGithubEntity accepts every entity kind', () => {
-  const kinds: GithubEntityV1['kind'][] = ['repo', 'file', 'tree', 'search_result', 'issue', 'pull', 'release', 'commit'];
+  const kinds: GithubEntityV1['kind'][] = [
+    'repo', 'file', 'tree', 'search_result', 'issue', 'pull', 'release', 'commit',
+    'workflow', 'workflow_run', 'workflow_job',
+  ];
   for (const kind of kinds) assert.equal(validateGithubEntity(validEntity(kind)).ok, true);
 });
 
@@ -322,7 +341,7 @@ test('validateGithubPage enforces dedupe, page cap, pagination shape', () => {
 // ── Cursors + pagination policy ──
 
 test('githubPaginationSupported is cursor only for list actions', () => {
-  for (const action of ['issues', 'pulls', 'releases', 'commits', 'search', 'search_repos'] as GithubAction[]) {
+  for (const action of ['issues', 'pulls', 'releases', 'commits', 'search', 'search_repos', 'workflows', 'runs'] as GithubAction[]) {
     assert.equal(githubPaginationSupported(action), true);
   }
   for (const action of ['repo', 'file', 'tree', 'trending'] as GithubAction[]) {

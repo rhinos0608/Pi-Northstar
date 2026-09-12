@@ -29,6 +29,8 @@ export const GITHUB_ACTIONS = [
   'releases',
   'commits',
   'search_repos',
+  'workflows',
+  'runs',
 ] as const;
 
 export type GithubAction = (typeof GITHUB_ACTIONS)[number];
@@ -239,6 +241,8 @@ export interface GithubRequestInput {
   state?: string;
   labels?: unknown;
   tag?: string;
+  workflow?: string;
+  status?: string;
   cursor?: string;
 }
 
@@ -257,6 +261,8 @@ export interface GithubRequest {
   state?: string;
   labels?: string[];
   tag?: string;
+  workflow?: string;
+  status?: string;
   cursor?: string;
 }
 
@@ -267,6 +273,8 @@ const GITHUB_PAGINATED_ACTIONS: ReadonlySet<GithubAction> = new Set([
   'commits',
   'search',
   'search_repos',
+  'workflows',
+  'runs',
 ]);
 
 export function githubPaginationSupported(action: GithubAction): boolean {
@@ -280,6 +288,12 @@ function cleanField(value: unknown): string | undefined {
 }
 
 const GITHUB_ISSUE_STATES: ReadonlySet<string> = new Set(['open', 'closed', 'all']);
+
+export const GITHUB_RUN_STATUSES = [
+  'completed', 'action_required', 'cancelled', 'failure', 'neutral', 'skipped', 'stale',
+  'success', 'timed_out', 'in_progress', 'queued', 'requested', 'waiting', 'pending',
+] as const;
+const GITHUB_RUN_STATUS_SET: ReadonlySet<string> = new Set(GITHUB_RUN_STATUSES);
 
 /**
  * Parse and validate a raw github request: resolve the canonical action,
@@ -381,6 +395,20 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   }
   const validatedTag = tag === undefined ? undefined : validateGithubRef(tag, 'tag');
 
+  const workflowRaw = cleanField(input.workflow);
+  if (typeof input.workflow === 'string' && workflowRaw === undefined) {
+    throw githubError('invalid_request', 'workflow must be a non-empty string when provided');
+  }
+  const workflow = workflowRaw !== undefined ? validateGithubPath(workflowRaw) : undefined;
+
+  const status = cleanField(input.status);
+  if (typeof input.status === 'string' && status === undefined) {
+    throw githubError('invalid_request', 'status must be a non-empty string when provided');
+  }
+  if (status !== undefined && action === 'runs' && !GITHUB_RUN_STATUS_SET.has(status)) {
+    throw githubError('invalid_request', `status must be one of ${GITHUB_RUN_STATUSES.join(', ')}: ${echo(status)}`);
+  }
+
   // Limit: perPage alias wins when both are present.
   const limitField = input.perPage !== undefined ? 'perPage' : 'limit';
   const limitRaw = input.perPage ?? input.limit;
@@ -414,6 +442,8 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   if (state !== undefined) request.state = state;
   if (labels !== undefined) request.labels = labels;
   if (validatedTag !== undefined) request.tag = validatedTag;
+  if (workflow !== undefined) request.workflow = workflow;
+  if (status !== undefined) request.status = status;
   if (cursor !== undefined) request.cursor = cursor;
   return { request, warnings };
 }

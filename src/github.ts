@@ -3,24 +3,24 @@ import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { resultToText, type SearchBackend } from './backend.js';
 import { guardText } from './tool-output.js';
-import { GITHUB_ACTIONS } from './github-contract.js';
+import { GITHUB_ACTIONS, GITHUB_RUN_STATUSES } from './github-contract.js';
 
 // Canonical actions only: repo, file, tree, search, trending, issues, pulls,
-// releases, commits, search_repos. Legacy 'list_dir'/'code_search' are rejected
-// as unsupported_action at runtime and never advertised here.
+// releases, commits, search_repos, workflows, runs. Legacy 'list_dir'/'code_search'
+// are rejected as unsupported_action at runtime and never advertised here.
 
 export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?: Record<string, string | undefined>): void {
   pi.registerTool({
     name: 'github',
     label: 'GitHub',
     description:
-      'Code facts via REST v3 only (no GraphQL): repo/file/tree/search/search_repos/trending/issues/pulls/releases/commits. Use for repo metadata, file reads, trees, code search, trending, issues/pulls/releases/commits; use web_search for non-GitHub discovery. GITHUB_TOKEN/GH_TOKEN optional for public reads (harder limits keyless). list_dir/code_search legacy spellings rejected; normalized entities; out-of-range rejected, never clamped.',
+      'Code facts via REST v3 only (no GraphQL): repo/file/tree/search/search_repos/trending/issues/pulls/releases/commits/workflows/runs. Use for repo metadata, file reads, trees, code search, trending, issues/pulls/releases/commits, GitHub Actions workflows and workflow runs (read-only, no dispatch/trigger); use web_search for non-GitHub discovery. GITHUB_TOKEN/GH_TOKEN optional for public reads (harder limits keyless). list_dir/code_search legacy spellings rejected; normalized entities; out-of-range rejected, never clamped.',
     promptSnippet:
-      'Query GitHub repos, files, trees, code search, trending, issues, pulls, releases, commits with normalized results. Prefer repository "owner/repo" or owner+repo; path xor paths (max 10, file only); branch must agree with ref.',
+      'Query GitHub repos, files, trees, code search, trending, issues, pulls, releases, commits, workflows, and workflow runs with normalized results. Prefer repository "owner/repo" or owner+repo; path xor paths (max 10, file only); branch must agree with ref.',
     parameters: Type.Object({
       action: StringEnum([...GITHUB_ACTIONS], {
         description:
-          'Pick repo (metadata), file (reads), tree (listing), search/search_repos (code/repos), trending, issues, pulls, releases, commits. Canonical only.',
+          'Pick repo (metadata), file (reads), tree (listing), search/search_repos (code/repos), trending, issues, pulls, releases, commits, workflows, runs (GitHub Actions, read-only). Canonical only.',
       }),
 
       // -- repo / file / tree / issues / pulls / releases / commits selectors --
@@ -89,6 +89,17 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
       // -- pulls --
       files: Type.Optional(Type.Boolean({
         description: 'List changed files for a single pull (pulls action with number only).',
+      })),
+
+      // -- workflows / runs --
+      workflow: Type.Optional(Type.String({
+        description: 'Workflow ID (numeric) or file name, e.g. "ci.yml" (workflows/runs actions).',
+      })),
+      status: Type.Optional(StringEnum([...GITHUB_RUN_STATUSES], {
+        description: 'Filter workflow runs by status/conclusion (runs action).',
+      })),
+      jobs: Type.Optional(Type.Boolean({
+        description: 'List jobs for a workflow run (runs action, requires `number`).',
       })),
 
       // -- releases --

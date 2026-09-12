@@ -209,6 +209,78 @@ test('commits list and get normalize', async () => {
   assert.equal(((single.details as Record<string, unknown>).entities as Array<Record<string, unknown>>)[0]?.sha, 'abc1234def');
 });
 
+test('workflows list and get normalize', async () => {
+  const workflow = {
+    id: 161335, name: 'CI', path: '.github/workflows/ci.yml', state: 'active',
+    html_url: 'https://github.com/o/r/blob/main/.github/workflows/ci.yml',
+    badge_url: 'https://github.com/o/r/workflows/CI/badge.svg',
+  };
+  const list = await withFetch(async (input) => {
+    assert.match(String(input), /\/actions\/workflows\?/);
+    return jsonResponse({ total_count: 1, workflows: [workflow] });
+  }, () => callGithubTool({ action: 'workflows', owner: 'o', repo: 'r' }, { env: {} }));
+  const listEntities = (list.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
+  assert.equal(listEntities[0]?.kind, 'workflow');
+  assert.equal(listEntities[0]?.workflow_id, 161335);
+  assert.equal(listEntities[0]?.name, 'CI');
+
+  const single = await withFetch(async (input) => {
+    assert.match(String(input), /\/actions\/workflows\/ci\.yml$/);
+    return jsonResponse(workflow);
+  }, () => callGithubTool({ action: 'workflows', owner: 'o', repo: 'r', workflow: 'ci.yml' }, { env: {} }));
+  assert.equal(((single.details as Record<string, unknown>).entities as Array<Record<string, unknown>>)[0]?.path, '.github/workflows/ci.yml');
+});
+
+test('runs list scoped to workflow, get single run, and jobs normalize', async () => {
+  const run = {
+    id: 30433642, run_number: 562, name: 'Build', status: 'completed', conclusion: 'success',
+    head_branch: 'main', head_sha: 'abc1234', event: 'push',
+    html_url: 'https://github.com/o/r/actions/runs/30433642', created_at: '2024-01-01T00:00:00Z',
+    actor: { login: 'octo' },
+  };
+  const list = await withFetch(async (input) => {
+    assert.match(String(input), /\/actions\/workflows\/ci\.yml\/runs\?/);
+    assert.match(String(input), /branch=main/);
+    assert.match(String(input), /status=success/);
+    assert.match(String(input), /actor=octo/);
+    return jsonResponse({ total_count: 1, workflow_runs: [run] });
+  }, () => callGithubTool({
+    action: 'runs', owner: 'o', repo: 'r', workflow: 'ci.yml', branch: 'main', status: 'success', author: 'octo',
+  }, { env: {} }));
+  const listEntities = (list.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
+  assert.equal(listEntities[0]?.kind, 'workflow_run');
+  assert.equal(listEntities[0]?.run_id, 30433642);
+  assert.equal(listEntities[0]?.actor, 'octo');
+
+  const single = await withFetch(async (input) => {
+    assert.match(String(input), /\/actions\/runs\/30433642$/);
+    return jsonResponse(run);
+  }, () => callGithubTool({ action: 'runs', owner: 'o', repo: 'r', number: 30433642 }, { env: {} }));
+  assert.equal(((single.details as Record<string, unknown>).entities as Array<Record<string, unknown>>)[0]?.run_number, 562);
+
+  const jobs = await withFetch(async (input) => {
+    assert.match(String(input), /\/actions\/runs\/30433642\/jobs$/);
+    return jsonResponse({
+      total_count: 1,
+      jobs: [{
+        id: 399444496, name: 'build', status: 'completed', conclusion: 'success',
+        started_at: '2024-01-01T00:00:00Z', completed_at: '2024-01-01T00:05:00Z',
+        html_url: 'https://github.com/o/r/runs/1/jobs/399444496',
+      }],
+    });
+  }, () => callGithubTool({ action: 'runs', owner: 'o', repo: 'r', number: 30433642, jobs: true }, { env: {} }));
+  const jobEntities = (jobs.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
+  assert.equal(jobEntities[0]?.kind, 'workflow_job');
+  assert.equal(jobEntities[0]?.job_id, 399444496);
+  assert.equal(jobEntities[0]?.run_id, 30433642);
+});
+
+test('runs and workflows validation: bad status, jobs misuse, jobs without number', async () => {
+  await expectGithubError('invalid_request', () => callGithubTool({ action: 'runs', owner: 'o', repo: 'r', status: 'bogus' }, { env: {} }));
+  await expectGithubError('invalid_request', () => callGithubTool({ action: 'issues', owner: 'o', repo: 'r', jobs: true }, { env: {} }));
+  await expectGithubError('invalid_request', () => callGithubTool({ action: 'runs', owner: 'o', repo: 'r', jobs: true }, { env: {} }));
+});
+
 test('search and search_repos normalize; query is required', async () => {
   const code = await withFetch(async (input) => {
     assert.match(String(input), /\/search\/code\?/);

@@ -345,6 +345,84 @@ function normalizeCommit(row: Record<string, unknown>, owner: string, repo: stri
   return entity;
 }
 
+function normalizeWorkflow(row: Record<string, unknown>, owner: string, repo: string): GithubEntityV1 {
+  const workflowId = numberField(row, 'id') ?? 0;
+  const entity: GithubEntityV1 = {
+    version: 1,
+    kind: 'workflow',
+    id: `github:workflow:${owner}/${repo}#${workflowId}`,
+    backend: BACKEND,
+    workflow_id: workflowId,
+  };
+  const name = stringField(row, 'name');
+  if (name !== undefined) entity.name = name;
+  const path = stringField(row, 'path');
+  if (path !== undefined) entity.path = path;
+  const state = stringField(row, 'state');
+  if (state !== undefined) entity.state = state;
+  const url = stringField(row, 'html_url');
+  if (url !== undefined) entity.url = url;
+  const badgeUrl = stringField(row, 'badge_url');
+  if (badgeUrl !== undefined) entity.badge_url = badgeUrl;
+  return entity;
+}
+
+function normalizeWorkflowRun(row: Record<string, unknown>, owner: string, repo: string): GithubEntityV1 {
+  const runId = numberField(row, 'id') ?? 0;
+  const entity: GithubEntityV1 = {
+    version: 1,
+    kind: 'workflow_run',
+    id: `github:workflow_run:${owner}/${repo}@${runId}`,
+    backend: BACKEND,
+    run_id: runId,
+  };
+  const runNumber = numberField(row, 'run_number');
+  if (runNumber !== undefined) entity.run_number = runNumber;
+  const name = stringField(row, 'name') ?? stringField(row, 'display_title');
+  if (name !== undefined) entity.name = name;
+  const status = stringField(row, 'status');
+  if (status !== undefined) entity.status = status;
+  const conclusion = stringField(row, 'conclusion');
+  if (conclusion !== undefined) entity.conclusion = conclusion;
+  const headBranch = stringField(row, 'head_branch');
+  if (headBranch !== undefined) entity.head_branch = headBranch;
+  const headSha = stringField(row, 'head_sha');
+  if (headSha !== undefined) entity.head_sha = headSha;
+  const event = stringField(row, 'event');
+  if (event !== undefined) entity.event = event;
+  const url = stringField(row, 'html_url');
+  if (url !== undefined) entity.url = url;
+  const createdAt = stringField(row, 'created_at');
+  if (createdAt !== undefined) entity.created_at = createdAt;
+  const actor = loginOf(row.actor);
+  if (actor !== undefined) entity.actor = actor;
+  return entity;
+}
+
+function normalizeWorkflowJob(row: Record<string, unknown>, owner: string, repo: string, runId: number): GithubEntityV1 {
+  const jobId = numberField(row, 'id') ?? 0;
+  const entity: GithubEntityV1 = {
+    version: 1,
+    kind: 'workflow_job',
+    id: `github:workflow_job:${owner}/${repo}@${jobId}`,
+    backend: BACKEND,
+    job_id: jobId,
+    run_id: runId,
+    name: stringField(row, 'name') ?? '(unnamed job)',
+  };
+  const status = stringField(row, 'status');
+  if (status !== undefined) entity.status = status;
+  const conclusion = stringField(row, 'conclusion');
+  if (conclusion !== undefined) entity.conclusion = conclusion;
+  const startedAt = stringField(row, 'started_at');
+  if (startedAt !== undefined) entity.started_at = startedAt;
+  const completedAt = stringField(row, 'completed_at');
+  if (completedAt !== undefined) entity.completed_at = completedAt;
+  const url = stringField(row, 'html_url');
+  if (url !== undefined) entity.url = url;
+  return entity;
+}
+
 function normalizeCodeItem(row: Record<string, unknown>): GithubEntityV1 {
   const repository = isRecord(row.repository) ? stringField(row.repository, 'full_name') : undefined;
   const path = stringField(row, 'path') ?? stringField(row, 'name') ?? 'unknown';
@@ -788,6 +866,112 @@ async function handleTrending(request: GithubRequest, signal?: AbortSignal): Pro
   }
 }
 
+async function handleWorkflows(request: GithubRequest, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
+  const owner = request.owner!;
+  const repo = request.repo!;
+  if (request.workflow !== undefined) {
+    const { data } = await githubFetch(`${repoUrl(owner, repo)}/actions/workflows/${encodeURIComponent(request.workflow)}`, env, signal);
+    if (!isRecord(data)) throw githubError('malformed_upstream', 'GitHub workflow response was not an object');
+    const page = checkPage({
+      entities: [normalizeWorkflow(data, owner, repo)],
+      pagination: { supported: false, limit: request.limit, returned: 1, hasMore: false },
+      partial: false,
+      warnings: [],
+    });
+    return { page, degraded: false };
+  }
+  const pageNum = pageNumber(request);
+  const url = new URL(`${repoUrl(owner, repo)}/actions/workflows`);
+  url.searchParams.set('per_page', String(request.limit));
+  url.searchParams.set('page', String(pageNum));
+  const { data, link } = await githubFetch(url.href, env, signal);
+  if (!isRecord(data) || !Array.isArray(data.workflows)) throw githubError('malformed_upstream', 'GitHub workflows response was not an object');
+  const entities = (data.workflows as unknown[]).flatMap((item): GithubEntityV1[] => {
+    if (!isRecord(item)) return [];
+    return [normalizeWorkflow(item, owner, repo)];
+  }).slice(0, request.limit);
+  const cursor = nextCursor(request, link, pageNum);
+  const page = checkPage({
+    entities,
+    pagination: {
+      supported: true,
+      limit: request.limit,
+      returned: entities.length,
+      hasMore: cursor !== undefined,
+      ...(cursor !== undefined ? { nextCursor: cursor } : {}),
+    },
+    partial: false,
+    warnings: [],
+  });
+  return { page, degraded: false };
+}
+
+async function handleRuns(request: GithubRequest, args: Record<string, unknown>, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
+  const owner = request.owner!;
+  const repo = request.repo!;
+  if (args.jobs === true && request.number === undefined) {
+    throw githubError('invalid_request', 'jobs requires selector: number');
+  }
+  if (request.number !== undefined) {
+    if (args.jobs === true) {
+      const { data } = await githubFetch(`${repoUrl(owner, repo)}/actions/runs/${request.number}/jobs`, env, signal);
+      if (!isRecord(data) || !Array.isArray(data.jobs)) throw githubError('malformed_upstream', 'GitHub jobs response was not an object');
+      const runId = request.number;
+      const entities = (data.jobs as unknown[]).flatMap((item): GithubEntityV1[] => {
+        if (!isRecord(item)) return [];
+        return [normalizeWorkflowJob(item, owner, repo, runId)];
+      }).slice(0, request.limit);
+      const page = checkPage({
+        entities,
+        pagination: { supported: true, limit: request.limit, returned: entities.length, hasMore: false },
+        partial: false,
+        warnings: [],
+      });
+      return { page, degraded: false };
+    }
+    const { data } = await githubFetch(`${repoUrl(owner, repo)}/actions/runs/${request.number}`, env, signal);
+    if (!isRecord(data)) throw githubError('malformed_upstream', 'GitHub run response was not an object');
+    const page = checkPage({
+      entities: [normalizeWorkflowRun(data, owner, repo)],
+      pagination: { supported: true, limit: request.limit, returned: 1, hasMore: false },
+      partial: false,
+      warnings: [],
+    });
+    return { page, degraded: false };
+  }
+  const pageNum = pageNumber(request);
+  const base = request.workflow !== undefined
+    ? `${repoUrl(owner, repo)}/actions/workflows/${encodeURIComponent(request.workflow)}/runs`
+    : `${repoUrl(owner, repo)}/actions/runs`;
+  const url = new URL(base);
+  if (request.ref !== undefined) url.searchParams.set('branch', request.ref);
+  if (request.status !== undefined) url.searchParams.set('status', request.status);
+  const author = optionalString(args.author);
+  if (author !== undefined) url.searchParams.set('actor', author);
+  url.searchParams.set('per_page', String(request.limit));
+  url.searchParams.set('page', String(pageNum));
+  const { data, link } = await githubFetch(url.href, env, signal);
+  if (!isRecord(data) || !Array.isArray(data.workflow_runs)) throw githubError('malformed_upstream', 'GitHub runs response was not an object');
+  const entities = (data.workflow_runs as unknown[]).flatMap((item): GithubEntityV1[] => {
+    if (!isRecord(item)) return [];
+    return [normalizeWorkflowRun(item, owner, repo)];
+  }).slice(0, request.limit);
+  const cursor = nextCursor(request, link, pageNum);
+  const page = checkPage({
+    entities,
+    pagination: {
+      supported: true,
+      limit: request.limit,
+      returned: entities.length,
+      hasMore: cursor !== undefined,
+      ...(cursor !== undefined ? { nextCursor: cursor } : {}),
+    },
+    partial: false,
+    warnings: [],
+  });
+  return { page, degraded: false };
+}
+
 // ── Entrypoint ──
 
 function resolvePaths(args: Record<string, unknown>, action: string): string[] {
@@ -829,8 +1013,11 @@ function rejectMisplacedFlags(args: Record<string, unknown>, action: string): vo
   if (args.includeReadme !== undefined && action !== 'repo') {
     throw githubError('invalid_request', 'includeReadme is only supported for github repo');
   }
-  if (args.author !== undefined && action !== 'commits') {
-    throw githubError('invalid_request', 'author is only supported for github commits');
+  if (args.author !== undefined && action !== 'commits' && action !== 'runs') {
+    throw githubError('invalid_request', 'author is only supported for github commits and runs');
+  }
+  if (args.jobs !== undefined && action !== 'runs') {
+    throw githubError('invalid_request', 'jobs is only supported for github runs');
   }
 }
 
@@ -844,6 +1031,9 @@ function entityTitle(entity: GithubEntityV1): string {
     case 'pull': return `#${entity.number} ${entity.title}`;
     case 'release': return entity.name ?? entity.tag;
     case 'commit': return entity.message?.split('\n')[0] ?? entity.sha;
+    case 'workflow': return entity.name ?? entity.path ?? entity.id;
+    case 'workflow_run': return `#${entity.run_number ?? entity.run_id} ${entity.status ?? 'unknown'}${entity.conclusion !== undefined ? ` (${entity.conclusion})` : ''}`;
+    case 'workflow_job': return entity.name;
   }
 }
 
@@ -857,6 +1047,9 @@ function entitySnippet(entity: GithubEntityV1): string | undefined {
     case 'pull': return entity.body?.slice(0, 2000);
     case 'release': return entity.body?.slice(0, 2000);
     case 'commit': return entity.message?.slice(0, 2000);
+    case 'workflow': return entity.state;
+    case 'workflow_run': return [entity.event, entity.head_branch].filter((part): part is string => part !== undefined).join(' on ') || undefined;
+    case 'workflow_job': return entity.status !== undefined ? `${entity.status}${entity.conclusion !== undefined ? `/${entity.conclusion}` : ''}` : undefined;
   }
 }
 
@@ -917,6 +1110,8 @@ export async function callGithubTool(
     ...(typeof args.state === 'string' ? { state: args.state } : {}),
     ...(args.labels !== undefined ? { labels: args.labels } : {}),
     ...(typeof args.tag === 'string' ? { tag: args.tag } : {}),
+    ...(typeof args.workflow === 'string' ? { workflow: args.workflow } : {}),
+    ...(typeof args.status === 'string' ? { status: args.status } : {}),
     ...(typeof args.cursor === 'string' ? { cursor: args.cursor } : {}),
   });
 
@@ -933,6 +1128,8 @@ export async function callGithubTool(
     case 'releases': result = await handleReleases(request, args, env, signal); break;
     case 'commits': result = await handleCommits(request, args, env, signal); break;
     case 'trending': result = await handleTrending(request, signal); break;
+    case 'workflows': result = await handleWorkflows(request, env, signal); break;
+    case 'runs': result = await handleRuns(request, args, env, signal); break;
   }
 
   const { page, degraded } = result;
