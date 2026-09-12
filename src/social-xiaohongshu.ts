@@ -23,6 +23,7 @@
 //   cookie/token environment variables are passed.
 
 import { spawn } from 'node:child_process';
+import { resolveCliCommand } from './cli-command.js';
 import { createHash } from 'node:crypto';
 
 import {
@@ -78,7 +79,10 @@ export const defaultSocialProcessRunner: SocialProcessRunner = (run) =>
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // win32: CreateProcess skips PATHEXT lookup, so resolve bare commands to
+    // their on-disk .cmd/.exe path first. Spawn stays shell:false — argv must
+    // never reach cmd.exe parsing (shell:true concatenates args unescaped).
+    const child = spawn(resolveCliCommand(command), args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     const terminate = () => {
       child.kill('SIGTERM');
       child.kill('SIGKILL');

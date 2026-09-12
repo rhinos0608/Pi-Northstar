@@ -18,6 +18,7 @@
 // mutation command (save/upvote/comment/login/open/export) is ever spawned.
 
 import { spawn } from 'node:child_process';
+import { resolveCliCommand } from './cli-command.js';
 import { createHash } from 'node:crypto';
 import { cookieHeaderForUrl } from './cookie-jar.js';
 import { requireCliPositional } from './social-cli-safety.js';
@@ -691,7 +692,10 @@ export async function runRedditCli(
       reject(abortError());
       return;
     }
-    const child = spawn(command, args, {
+    // win32: CreateProcess skips PATHEXT lookup, so resolve bare commands to
+    // their on-disk .cmd/.exe path first. Spawn stays shell:false — argv must
+    // never reach cmd.exe parsing (shell:true concatenates args unescaped).
+    const child = spawn(resolveCliCommand(command), args, {
       env: resolveRedditChildEnv(command, envSource),
       stdio: ['ignore', 'pipe', 'pipe'],
     });

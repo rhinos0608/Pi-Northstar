@@ -18,6 +18,7 @@
 //     commands), matching the Stage 2 capability table.
 
 import { spawn } from 'node:child_process';
+import { resolveCliCommand } from './cli-command.js';
 import { buildPythonChildEnvironment } from './python-child-env.js';
 import { redactCliDiagnostics, requireCliPositional } from './social-cli-safety.js';
 import { openCliChildEnv } from './social-opencli.js';
@@ -248,7 +249,10 @@ function defaultRunner(invocation: SocialCliInvocation): Promise<SocialCliResult
     let stderr = '';
     let aborted = false;
     let timedOut = false;
-    const child = spawn(invocation.command, invocation.args, {
+    // win32: CreateProcess skips PATHEXT lookup, so resolve bare commands to
+    // their on-disk .cmd/.exe path first. Spawn stays shell:false — argv must
+    // never reach cmd.exe parsing (shell:true concatenates args unescaped).
+    const child = spawn(resolveCliCommand(invocation.command), invocation.args, {
       env: invocation.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

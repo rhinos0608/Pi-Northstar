@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { resolveCliCommand } from './cli-command.js';
 import type { BackendCallResult } from './backend.js';
 import { callSetupTool } from './bootstrap.js';
 import { cookieAuthEnvironment, cookieEnvKeysForProvider, cookieHeaderForUrl, cookieProviderForCommand, COOKIE_ENV_KEYS } from './cookie-jar.js';
@@ -348,7 +349,10 @@ export async function runCommand(command: string, args: string[], options: Reach
     let stderr = '';
     let aborted = false;
     let timedOut = false;
-    const child = spawn(command, args, {
+    // win32: CreateProcess skips PATHEXT lookup, so resolve bare commands to
+    // their on-disk .cmd/.exe path first. Spawn stays shell:false — argv must
+    // never reach cmd.exe parsing (shell:true concatenates args unescaped).
+    const child = spawn(resolveCliCommand(command), args, {
       env: externalEnvironment(command, options.env ?? process.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     });

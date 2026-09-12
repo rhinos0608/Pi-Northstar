@@ -38,16 +38,18 @@ async function writeShim(dir: string, name: string, body: string): Promise<void>
   await writeFile(path, body);
   await chmod(path, 0o700);
   if (process.platform === 'win32') {
-    // Windows spawn() resolves bare commands via PATHEXT, so extensionless
-    // POSIX shims are invisible. Emit a .cmd twin with identical behavior:
-    // env-dump bodies record sorted `KEY=value` lines, echo bodies print
-    // their payload (without sh single-quotes), then exit with the same code.
+    // Windows CreateProcess skips PATHEXT lookup, so prod resolves bare
+    // commands to their on-disk extension (resolveCliCommand) and spawns
+    // shell:false. Emit a .cmd twin for that resolution to find: env-dump
+    // bodies use `set` (same KEY=value shape; avoids nested-quote breakage
+    // of node -e under cmd.exe), echo bodies print their payload (without
+    // sh single-quotes), then exit with the same code.
     const dumpMatch = />\s*(\S+)\s*$/.exec(body.split('\n').find((line) => line.includes('>')) ?? '');
     const payloads = [...body.matchAll(/echo\s+'([^']*)'/g)].map((m) => m[1] ?? '');
     const exitMatch = /exit\s+(\d+)/.exec(body);
     const lines = ['@echo off'];
     if (dumpMatch?.[1]) {
-      lines.push(`node -e "const fs=require('node:fs');const p=${JSON.stringify(dumpMatch[1])};const t=Object.keys(process.env).sort().map(k=>k+'='+process.env[k]).join('\n');fs.writeFileSync(p,t);"`);
+      lines.push(`set > ${JSON.stringify(dumpMatch[1])}`);
     }
     for (const payload of payloads) lines.push(`echo ${payload}`);
     lines.push(`exit /b ${exitMatch?.[1] ?? '0'}`);
