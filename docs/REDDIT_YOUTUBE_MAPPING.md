@@ -147,7 +147,7 @@ switch (action) {
 
 ### Retry
 - **No retry at CLI level.** Each candidate gets one attempt.
-- **Platform-level retry:** `retryWithBackoff` exists in `src/retry.ts:8-27` but is **only used in native-tools.ts for web_search backends**, not for reach-tools CLI dispatch.
+- **Platform-level retry:** `retryWithBackoff` exists in `src/retry.ts` as a retained, unit-tested helper with **no production callers** (previously used in native-tools.ts; now unwired). Dispatch paths run single-attempt with ordered fallback.
 - **Retryability check:** `isRetryable(error)` matches timeout/ECONNRESET/ENOTFOUND/5xx, but this is **not called** for CLI commands.
 
 ### Output Sanitization
@@ -427,7 +427,7 @@ rm $(which opencli) && npm run cli -- call social '{"platform":"reddit","action"
 ## Reusable Primitives
 
 ### Existing (available for reuse)
-- **`retryWithBackoff<T>(fn, opts)`** — `src/retry.ts:8-27`
+- **`retryWithBackoff<T>(fn, opts)`** — `src/retry.ts:8-27` (retained helper, currently unwired: no production callers)
   - Configurable maxAttempts, backoff factor, delays
   - Skips non-retryable errors (AbortError, TimeoutError, 5xx, connection errors)
   - Can wrap CLI call, but must be careful not to retry destructive operations
@@ -515,7 +515,7 @@ rm $(which opencli) && npm run cli -- call social '{"platform":"reddit","action"
 | `src/index.ts` | 234-255 | 'media' tool registration |
 | `src/index.ts` | 324-345 | buildMediaRoute (routes 'youtube' to 'video' tool) |
 | `src/providers.ts` | 30, 41 | YouTube & Reddit provider descriptors |
-| `src/retry.ts` | 8-27 | retryWithBackoff (not used by CLI backends) |
+| `src/retry.ts` | 8-27 | retryWithBackoff (retained helper, no production callers) |
 | `src/cli-backend.ts` | 25-30 | CliSearchBackend.callTool spawns cli.ts |
 | `src/cli.ts` | 44 | callNativeTool routing |
 | `src/native-tools.ts` | 64-73 | callNativeTool fallback to reach-tools |

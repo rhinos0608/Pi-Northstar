@@ -2,7 +2,7 @@
 
 Pi extension that gives your agent real-world reach — web search, page reading, GitHub, social media, video, browser automation, and desktop control. Zero-config works out of the box; API keys unlock more power.
 
-Underneath the eight tools is a small set of shared services — result fusion/ranking, layered config loading, a backend abstraction with retry and ordered fallback, and a reliability envelope around browser and desktop mutations. Each tool is a thin adapter over these services; see [Architecture](#architecture) for what's actually worth evaluating here.
+Underneath the eight tools is a small set of shared services — result fusion/ranking, layered config loading, a backend abstraction with ordered fallback, and a reliability envelope around browser and desktop mutations. Each tool is a thin adapter over these services; see [Architecture](#architecture) for what's actually worth evaluating here.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ Underneath the eight tools is a small set of shared services — result fusion/r
 |---|---|---|
 | **Fusion & ranking** | `src/fusion.ts`, `src/bm25.ts`, `src/vector-index.ts` | Reciprocal rank fusion (RRF) merges rankings from multiple search backends, or from BM25 + embedding scoring in `fetch`; URL normalization dedupes across providers before fusion. |
 | **Config loading** | `src/local-config.ts` | Merges process env, a package-local `.env` file, and an optional JSON config into one environment — process env always wins, so shell exports override everything. |
-| **Backend abstraction & fallback** | `src/backend.ts`, `src/cli-backend.ts`, `src/mcp-client.ts`, `src/retry.ts` | `SearchBackend` is one interface with two implementations (native CLI, default; legacy MCP client). `retryWithBackoff` retries only genuinely transient failures — timeouts, connection resets, 5xx — with jittered exponential backoff. |
+| **Backend abstraction & fallback** | `src/backend.ts`, `src/cli-backend.ts`, `src/mcp-client.ts`, `src/retry.ts` | `SearchBackend` is one interface with two implementations (native CLI, default; legacy MCP client). `retryWithBackoff` (`src/retry.ts`) is a retained, unit-tested helper with no production callers — dispatch paths run single-attempt with ordered fallback, never automatic retry. |
 | **Reliability envelope — browser** | `src/browser-result.ts`, `src/session-page-state.ts`, `src/click-verification.ts`, `src/scroll-verification.ts`, `src/overlay-detection.ts` | Every result carries a structured `resultCategory`/`failureCategory`/`nextActions`; stale `@eN` refs are rejected before they reach the CLI; clicks are verified with a DOM event probe; scrolls and overlay appearances are diffed pre/post action. |
 | **Reliability envelope — desktop** | `src/desktop-contract.ts`, `src/desktop-policy.ts` | Accessibility trees are depth/node/screenshot-byte capped and redacted; mutations require a fresh `stateId` from the most recent observation and are never blindly retried after dispatch. |
 | **Output guarding** | `src/tool-output.ts` | Every tool result is truncated to a configurable character budget before it reaches the model, with head/tail preservation and a truncation marker. |
