@@ -21,6 +21,32 @@ export function sanitizeDesktopErrorMessage(message: string): string {
     .replace(/Set-Cookie\s*[:=]\s*[^,\s}"']+/gi, 'Set-Cookie: ***')
     .slice(0, 2000);
 }
+/** Await human confirmation, honoring caller abort while the TUI dialog
+ *  is pending. Listener removed once confirmation settles. Rejects with the
+ *  signal reason on abort; a missing callback fails closed (false). */
+function confirmWithSignal(
+  confirmation: ((request: DesktopRequest) => Promise<boolean>) | undefined,
+  request: DesktopRequest,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (confirmation === undefined) return Promise.resolve(false);
+  if (signal === undefined) return confirmation(request);
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('confirmation aborted'));
+  return new Promise<boolean>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason ?? new Error('confirmation aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    confirmation(request).then(
+      (approved) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(approved);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('wait aborted'));
   return new Promise<void>((resolve, reject) => {
@@ -35,7 +61,7 @@ export class DesktopService {
   async execute(raw: Record<string, unknown>, signal?: AbortSignal, confirm?: (request: DesktopRequest) => Promise<boolean>): Promise<DesktopResult & { content?: unknown[] }> {
     const request = validatePolicy(raw, this.env);
     const confirmation = confirm ?? this.confirm;
-    if (requiresConfirmation(request) && (!confirmation || !(await confirmation(request)))) throw new Error('CONFIRMATION_REQUIRED: type_text/press_key require explicit human confirmation in TUI');
+    if (requiresConfirmation(request) && !(await confirmWithSignal(confirmation, request, signal))) throw new Error('CONFIRMATION_REQUIRED: type_text/press_key require explicit human confirmation in TUI');
     this.used = true;
     const pid = request.pid ?? 0; const windowId = request.windowId ?? '';
     if (isMutation(request.action)) { if (!request.pid || !request.windowId || !request.stateId) throw new Error('STALE_OBSERVATION: mutation requires target and state'); const coordinate = request.x !== undefined || request.y !== undefined || request.deltaX !== undefined || request.deltaY !== undefined; const stored = this.observations.get(request.stateId!, request.pid, request.windowId, coordinate ? COORDINATE_MUTATION_FRESHNESS_MS : OBSERVATION_TTL_MS); await this.assertWindowFresh(request.pid, request.windowId, stored.fingerprint, stored.stateId, signal); }
