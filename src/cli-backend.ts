@@ -13,6 +13,7 @@ import { retrieveWebAccessCorpus } from './web-access-retrieve.js';
 import { runWebAccessCachedSourceCheck } from './web-access-cached-source-check.js';
 import { formatWebAccessSourceCheck } from './web-access-presentation.js';
 import { textResult } from './tool-output.js';
+import { getProcessLocalBridgeToken } from './chrome-profile-adapter.js';
 
 interface CliEnvelope {
   ok: boolean;
@@ -62,8 +63,15 @@ export class CliSearchBackend implements SearchBackend {
         reject(cliAbortError());
         return;
       }
+      // Forward the process-local bridge token explicitly at spawn time so
+      // late-bound bridges reach one-shot children without global env writes.
+      const childEnv = buildCliEnvironment(this.env);
+      const bridgeToken = getProcessLocalBridgeToken();
+      if (bridgeToken !== undefined && childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN === undefined) {
+        childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN = bridgeToken;
+      }
       const child = spawn(process.execPath, ['--import', TSX_LOADER_URL, this.cliPath, ...args], {
-        env: buildCliEnvironment(this.env),
+        env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let stdout = '';
@@ -144,6 +152,7 @@ export interface CliCorpusHit {
   url: string;
   snippet?: string | undefined;
   backend?: string | undefined;
+  source?: string | undefined;
 }
 
 /** Parent-side mirror of webSearchCached: stash web_search hits so a later
@@ -156,7 +165,7 @@ export function populateCliCorpus(
 ): BackendCallResult {
   try {
     if (name !== 'web_search') return result;
-    const details = (result as { details?: { query?: unknown; results?: CliCorpusHit[]; responseId?: unknown } }).details;
+    const details = (result as { details?: { query?: unknown; results?: Array<CliCorpusHit & { source?: unknown }>; responseId?: unknown } }).details;
     if (!details || typeof details.query !== 'string' || !Array.isArray(details.results) || details.responseId !== undefined) {
       return result;
     }
@@ -165,7 +174,10 @@ export function populateCliCorpus(
     const byProvider = new Map<string, Array<{ title: string; url: string; snippet: string }>>();
     for (const hit of details.results) {
       if (typeof hit.url !== 'string' || !hit.url) continue;
-      const provider = typeof hit.backend === 'string' && hit.backend.length > 0 ? hit.backend : 'parallel';
+      // Same precedence as webSearchCached in native-tools: backend first, source fallback.
+      const backend = typeof hit.backend === 'string' && hit.backend.length > 0 ? hit.backend : undefined;
+      const source = typeof hit.source === 'string' && hit.source.length > 0 ? hit.source : undefined;
+      const provider = backend ?? source ?? 'parallel';
       const list = byProvider.get(provider) ?? [];
       list.push({ title: typeof hit.title === 'string' ? hit.title : hit.url, url: hit.url, snippet: typeof hit.snippet === 'string' ? hit.snippet : '' });
       byProvider.set(provider, list);

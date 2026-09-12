@@ -12,8 +12,10 @@
 
 export const CHROME_REDACTED = '[redacted]';
 
-/** Shared minimum secret length: shorter fragments are skipped to avoid over-redaction. */
-const CHROME_MIN_SECRET_LEN = 4;
+// Every known secret value is redacted unconditionally, including short
+// PINs/codes. Empty strings are skipped (splitting on '' would join every
+// character). Generic-pattern heuristics below keep their own length floors
+// so unstructured text is not over-redacted.
 
 const GRANT_ID_PATTERN = /\bgrant-[a-z0-9-]{4,}\b/gi;
 const SESSION_KEY_PATTERN = /\bsession-?key\b\s*[:=]\s*['"]?[a-z0-9-_.]{4,}['"]?/gi;
@@ -35,21 +37,21 @@ export interface ChromeRedactionSecrets {
 /** Redact secret-bearing text. Never returns secret values verbatim. */
 export function redactChromeProfileText(input: string, secrets?: ChromeRedactionSecrets): string {
   let out = input;
-  if (secrets?.sessionKey && secrets.sessionKey.length >= CHROME_MIN_SECRET_LEN) {
+  if (secrets?.sessionKey && secrets.sessionKey.length > 0) {
     out = out.split(secrets.sessionKey).join(CHROME_REDACTED);
   }
-  if (secrets?.grantId && secrets.grantId.length >= CHROME_MIN_SECRET_LEN) {
+  if (secrets?.grantId && secrets.grantId.length > 0) {
     out = out.split(secrets.grantId).join(CHROME_REDACTED);
   }
-  if (secrets?.nonce && secrets.nonce.length >= CHROME_MIN_SECRET_LEN) {
+  if (secrets?.nonce && secrets.nonce.length > 0) {
     out = out.split(secrets.nonce).join(CHROME_REDACTED);
   }
-  if (secrets?.instanceId && secrets.instanceId.length >= CHROME_MIN_SECRET_LEN) {
+  if (secrets?.instanceId && secrets.instanceId.length > 0) {
     out = out.split(secrets.instanceId).join(CHROME_REDACTED);
   }
   if (secrets?.typedValues) {
     for (const typed of secrets.typedValues) {
-      if (typed.length >= CHROME_MIN_SECRET_LEN) out = out.split(typed).join(CHROME_REDACTED);
+      if (typeof typed === 'string' && typed.length > 0) out = out.split(typed).join(CHROME_REDACTED);
     }
   }
   out = out
@@ -72,7 +74,7 @@ export function chromeProfileTextLeaksSecret(text: string, secrets: ChromeRedact
     secrets.nonce,
     secrets.instanceId,
     ...(secrets.typedValues ?? []),
-  ].filter((v): v is string => typeof v === 'string' && v.length >= CHROME_MIN_SECRET_LEN);
+  ].filter((v): v is string => typeof v === 'string' && v.length > 0);
   return candidates.some((secret) => text.includes(secret));
 }
 

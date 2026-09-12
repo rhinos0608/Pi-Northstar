@@ -199,6 +199,10 @@ async function runSingleQuery(
       try {
         return { ok: true as const, response: await adapter.search(adapterRequest, options.env) };
       } catch (error) {
+        // Cancellation is never a provider failure: rethrow so callers
+        // observe the abort instead of a synthetic upstream_error entry.
+        if (adapterRequest.signal?.aborted || options.signal?.aborted) throw error;
+        if (error instanceof Error && error.name === 'AbortError') throw error;
         const nested = (error as { failure?: unknown } | null | undefined)?.failure;
         const failure: WebAccessProviderFailure =
           nested !== null && typeof nested === 'object' && 'provider' in nested && 'kind' in nested
@@ -211,6 +215,7 @@ async function runSingleQuery(
                 message: error instanceof Error ? error.message.slice(0, 500) : 'search failed',
                 retryable: false,
               };
+        if (failure.kind === 'aborted') throw error;
         return { ok: false as const, failure };
       }
     }),

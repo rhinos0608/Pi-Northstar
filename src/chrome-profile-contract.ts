@@ -20,8 +20,11 @@ export const CHROME_LEASE_RENEW_MS = 30_000;
 export const CHROME_BRIDGE_MAX_REQUEST_BYTES = 256 * 1024;
 export const CHROME_BRIDGE_MAX_RESULT_BYTES = 1024 * 1024;
 export const CHROME_BRIDGE_INSTANCE_STALE_MS = 90_000;
-/** Clamp for wait operations so a wait never outlives the bridge command timeout. */
-export const CHROME_PROFILE_WAIT_MAX_MS = 60_000;
+/** Shared effective maximum for waitMs: fits inside the companion operation
+ *  timeout (COMMAND_TIMEOUT_MS 25s) and the bridge command timeout, so the
+ *  Pi-side contract clamp and the companion clamp agree instead of silently
+ *  diverging. Both sides clamp to this value. */
+export const CHROME_PROFILE_WAIT_MAX_MS = 15_000;
 
 export interface ChromeBridgeInstanceInfo {
   instanceId: string;

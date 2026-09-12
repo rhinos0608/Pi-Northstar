@@ -48,6 +48,26 @@ import { jsonTextResult, textResult } from './tool-output.js';
 
 export type { ChromeRevokeReason };
 
+/** Process-local bridge session token. Set once the bridge binds; never
+ *  published to global process.env. CLI children receive it explicitly via
+ *  buildCliEnvironment at spawn time. */
+let processLocalBridgeToken: string | undefined;
+
+export function setProcessLocalBridgeToken(token: string | undefined): void {
+  processLocalBridgeToken = typeof token === 'string' && token.length > 0 ? token : undefined;
+}
+
+export function getProcessLocalBridgeToken(): string | undefined {
+  return processLocalBridgeToken;
+}
+
+/** Default token resolver: process-local value first, operator env fallback. */
+export function defaultBridgeToken(): string | undefined {
+  if (processLocalBridgeToken !== undefined) return processLocalBridgeToken;
+  const fromEnv = process.env.PI_SEARCH_CHROME_BRIDGE_TOKEN;
+  return typeof fromEnv === 'string' && fromEnv.length > 0 ? fromEnv : undefined;
+}
+
 /** Actions never allowed in user-chrome, even with ALLOW_SENSITIVE=1. */
 export const USER_CHROME_DENIED_ACTIONS: readonly string[] = [
   'evaluate',
@@ -152,7 +172,7 @@ export class ChromeProfileAdapter {
     this.bridge = options?.bridge ?? null;
     this.targetInstanceId = options?.targetInstanceId ?? null;
     const tokenOption = options?.bridgeToken;
-    this.bridgeToken = tokenOption ?? (() => process.env.PI_SEARCH_CHROME_BRIDGE_TOKEN);
+    this.bridgeToken = tokenOption ?? defaultBridgeToken;
     this.now = options?.now ?? Date.now;
     this.randomId = options?.randomId ?? defaultRandomId;
     this.dnsLookup = options?.dnsLookup;

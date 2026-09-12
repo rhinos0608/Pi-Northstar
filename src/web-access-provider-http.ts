@@ -73,16 +73,55 @@ export function assertNotRedirect(response: Response, options: WebAccessHttpOpti
   }
 }
 
+/** Incrementally consume a body up to maxBytes UTF-8 bytes. Stops reading
+ *  once the cap is reached so unbounded payloads never buffer fully; decode
+ *  and parse only the bounded prefix. Falls back to response.text() when the
+ *  stream is unavailable (e.g. mocked responses). */
+export async function readBoundedText(response: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+  try {
+    if (response.body === null || response.body === undefined) {
+      const raw = await response.text().catch(() => '');
+      const bytes = Buffer.byteLength(raw, 'utf8');
+      if (bytes <= maxBytes) return { text: raw, truncated: false };
+      const buf = Buffer.from(raw, 'utf8').subarray(0, maxBytes);
+      return { text: buf.toString('utf8'), truncated: true };
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    let truncated = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      const remaining = maxBytes - bytes;
+      if (value.byteLength >= remaining) {
+        chunks.push(value.subarray(0, Math.max(remaining, 0)));
+        bytes += Math.max(remaining, 0);
+        truncated = true;
+        try { await reader.cancel(); } catch { /* best-effort */ }
+        break;
+      }
+      chunks.push(value);
+      bytes += value.byteLength;
+    }
+    const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+    return { text: buf.toString('utf8'), truncated };
+  } catch {
+    return { text: '', truncated: false };
+  }
+}
+
 /** Read an error body with byte cap and secret redaction. */
 export async function readErrorText(response: Response, options: WebAccessHttpOptions): Promise<string> {
-  const raw = await response.text().catch(() => '');
+  const { text: raw } = await readBoundedText(response, WEB_ACCESS_HTTP_ERROR_TEXT_MAX * 4);
   return redactWebAccessSecrets(raw, secretOf(options.apiKey)).slice(0, WEB_ACCESS_HTTP_ERROR_TEXT_MAX);
 }
 
 /** Parse a bounded JSON payload; invalid JSON becomes invalid_response. */
 export async function readJsonPayload(response: Response, options: WebAccessHttpOptions): Promise<unknown> {
-  const raw = await response.text().catch(() => '');
-  if (Buffer.byteLength(raw, 'utf8') > WEB_ACCESS_HTTP_JSON_MAX_BYTES) {
+  const { text: raw, truncated } = await readBoundedText(response, WEB_ACCESS_HTTP_JSON_MAX_BYTES + 1);
+  if (truncated || Buffer.byteLength(raw, 'utf8') > WEB_ACCESS_HTTP_JSON_MAX_BYTES) {
     throw fail(
       options.provider,
       new Error(`${options.label} returned invalid response: payload exceeds size bound`),

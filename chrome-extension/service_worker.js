@@ -25,6 +25,10 @@
   var INSTANCE_KEY = 'atlasInstance';
   var OWNED_KEY = 'atlasOwnedTab';
   var COMMAND_TIMEOUT_MS = 25_000;
+  // Shared effective maximum for waitMs (mirrors CHROME_PROFILE_WAIT_MAX_MS
+  // in src/chrome-profile-contract.ts). Keep in sync; a wait must fit inside
+  // COMMAND_TIMEOUT_MS so the Pi-side clamp and this clamp never diverge.
+  var WAIT_MAX_MS = 15_000;
   var REDACTED = '[redacted]';
 
   // Closed operation union mirror. Anything else fails closed.
@@ -37,9 +41,21 @@
   var state = {
     grant: null, // { sessionKey, grantId, leaseExpiresAt }
     bridgeToken: null, // session token paired via origin-pinned POST /register
+    lastRegisterAttempt: 0, // epoch ms of last POST /register attempt
     owned: null, // { tabId, frozenHostname, sessionKey, grantId }
     polling: false,
   };
+  // Re-pair interval when unpaired or the token goes stale (bridge restart
+  // rotates the session token; a token-mismatch route rejection clears the
+  // token so the next loop iteration re-registers promptly).
+  var REGISTER_RETRY_MS = 60_000;
+  /** Throw when the operation was cancelled (timeout) or the grant is gone.
+   *  Checked before every browser mutation so nothing mutates after timeout
+   *  or revocation. */
+  function throwIfCancelled(signal) {
+    if (signal && signal.aborted === true) throw new Error('chrome_timeout: operation cancelled');
+    if (state.grant === null) throw new Error('chrome_revoked: grant revoked during operation');
+  }
 
   function now() {
     return Date.now();
@@ -166,6 +182,7 @@
    *  Best-effort: pollLoop retries while unpaired; commands fail closed
    *  against a foreign token once paired. Never logged. */
   async function registerCompanion(fetchImpl, chrome, inst) {
+    state.lastRegisterAttempt = now();
     var record = inst || null;
     try {
       if (record === null && chrome && chrome.storage && chrome.storage.session) {
@@ -481,11 +498,12 @@
   }
 
   /** Execute one closed-union operation against the owned tab only. */
-  async function dispatchOperation(chrome, cmd, fetchImpl, inst) {
+  async function dispatchOperation(chrome, cmd, fetchImpl, inst, signal) {
     var op = cmd.operation;
     // Direct-dispatch gate mirrors the pollLoop pre-check (tests call here directly).
     var direct = checkExecute(cmd, undefined, inst);
     if (direct !== null) throw new Error(direct.code + ': ' + direct.message);
+    throwIfCancelled(signal);
     var tabId;
     if (op.kind === 'tabs') {
       if (state.owned === null) return { tabs: [] };
@@ -513,10 +531,13 @@
       if (!isNonEmptyString(op.url) || !isNonEmptyString(op.frozenHostname)) {
         throw new Error('chrome_invalid_request: navigate needs url + frozenHostname');
       }
+      throwIfCancelled(signal);
       var owned = await ensureOwnedTab(chrome, op.frozenHostname.toLowerCase(), cmd.sessionKey, cmd.grantId);
       tabId = owned.tabId;
       var rules = buildDnrRules(op.frozenHostname.toLowerCase(), tabId, ruleBaseForTab(tabId));
+      throwIfCancelled(signal);
       await applyDnr(chrome, rules);
+      throwIfCancelled(signal);
       try {
         await chrome.tabs.update(tabId, { url: op.url });
       } catch (e) {
@@ -526,6 +547,7 @@
     }
     // All remaining ops require an existing owned tab; never fall back to active tab.
     if (state.owned === null) throw new Error('chrome_no_owned_tab: no Atlas-owned tab');
+    throwIfCancelled(signal);
     tabId = state.owned.tabId;
     switch (op.kind) {
       case 'snapshot': {
@@ -580,6 +602,7 @@
       case 'fill':
       case 'select':
       case 'scroll': {
+        throwIfCancelled(signal);
         await debuggerAttach(chrome, tabId);
         try {
           if (op.kind === 'scroll') {
@@ -590,7 +613,9 @@
             return { scrolled: true };
           }
           if (!isNonEmptyString(op.selector)) throw new Error('chrome_invalid_request: selector required');
+          throwIfCancelled(signal);
           var nodeId = await queryNode(chrome, tabId, op.selector);
+          throwIfCancelled(signal);
           if (op.kind === 'click') {
             await clickNode(chrome, tabId, nodeId);
             return { clicked: true };
@@ -599,7 +624,9 @@
             if (typeof op.text !== 'string' || op.text.length === 0) {
               throw new Error('chrome_invalid_request: text required');
             }
+            throwIfCancelled(signal);
             await focusNode(chrome, tabId, nodeId);
+            throwIfCancelled(signal);
             if (op.kind === 'fill') {
               await cdpSend(chrome, tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
               await cdpSend(chrome, tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
@@ -623,12 +650,13 @@
         }
       }
       case 'wait': {
-        var waitMs = typeof op.waitMs === 'number' && Number.isFinite(op.waitMs) ? Math.min(Math.max(op.waitMs, 0), 15000) : 0;
+        var waitMs = typeof op.waitMs === 'number' && Number.isFinite(op.waitMs) ? Math.min(Math.max(op.waitMs, 0), WAIT_MAX_MS) : 0;
         var deadline = Date.now() + waitMs;
         if (isNonEmptyString(op.selector)) {
           await debuggerAttach(chrome, tabId);
           try {
             for (;;) {
+              throwIfCancelled(signal);
               try {
                 await queryNode(chrome, tabId, op.selector);
                 break;
@@ -642,7 +670,9 @@
           }
           return { waited: true };
         }
+        throwIfCancelled(signal);
         if (waitMs > 0) await new Promise(function (r) { setTimeout(r, waitMs); });
+        throwIfCancelled(signal);
         void deadline;
         return { waited: true };
       }
@@ -798,7 +828,9 @@
           try { inst = await ensureInstance(chrome); } catch (e) { inst = null; }
         }
         // Pair the session token before polling so routed commands verify.
-        if (state.bridgeToken === null && typeof fetch === 'function') {
+        // Re-pair when unpaired or the last attempt is stale: a bridge restart
+        // rotates the session token and orphans a token-paired companion.
+        if ((state.bridgeToken === null || now() - state.lastRegisterAttempt > REGISTER_RETRY_MS) && typeof fetch === 'function') {
           try { await registerCompanion(fetchImpl, chrome, inst); } catch (e) {}
         }
         try {
@@ -841,6 +873,9 @@
           if (inst && isNonEmptyString(inst.instanceId) && cmd.targetInstanceId !== inst.instanceId) {
             routeError = err('chrome_revoked', 'command targeted at another companion', false);
           } else if (isNonEmptyString(state.bridgeToken) && cmd.bridgeToken !== state.bridgeToken) {
+            // Stale token (bridge restarted): drop it so the next loop
+            // iteration re-registers instead of failing closed forever.
+            state.bridgeToken = null;
             routeError = err('chrome_revoked', 'bridge token mismatch', false);
           }
           if (routeError !== null) {
@@ -857,13 +892,22 @@
             if (gate) {
               out = { protocol: PROTOCOL, id: cmd.id, ok: false, error: gate };
             } else {
-              var data = await Promise.race([
-                dispatchOperation(chrome, cmd, fetchImpl, inst),
-                new Promise(function (_, reject) {
-                  setTimeout(function () { reject(new Error('chrome_timeout: operation timed out')); }, COMMAND_TIMEOUT_MS);
-                }),
-              ]);
-              out = resultEnvelope(cmd, data);
+              // Cooperative cancellation: the timeout only rejects the race,
+              // so mark the signal and let dispatchOperation refuse further
+              // browser mutations once the deadline passes.
+              var opSignal = { aborted: false };
+              var opTimer = null;
+              var opPromise = dispatchOperation(chrome, cmd, fetchImpl, inst, opSignal);
+              var timeoutPromise = new Promise(function (_, reject) {
+                opTimer = setTimeout(function () { opSignal.aborted = true; reject(new Error('chrome_timeout: operation timed out')); }, COMMAND_TIMEOUT_MS);
+              });
+              try {
+                var data = await Promise.race([opPromise, timeoutPromise]);
+                out = resultEnvelope(cmd, data);
+              } finally {
+                if (opTimer !== null) clearTimeout(opTimer);
+                opSignal.aborted = true;
+              }
             }
           }
         } catch (e) {
@@ -914,6 +958,10 @@
     ownExtensionId: ownExtensionId,
     INSTANCE_KEY: INSTANCE_KEY,
     POLL_MS: POLL_MS,
+    COMMAND_TIMEOUT_MS: COMMAND_TIMEOUT_MS,
+    WAIT_MAX_MS: WAIT_MAX_MS,
+    REGISTER_RETRY_MS: REGISTER_RETRY_MS,
+    throwIfCancelled: throwIfCancelled,
     detectFamily: detectFamily,
     ensureInstance: ensureInstance,
     heartbeatInstance: heartbeatInstance,
@@ -929,6 +977,7 @@
       state.owned = null;
       state.polling = false;
       state.bridgeToken = null;
+      state.lastRegisterAttempt = 0;
     },
   };
 

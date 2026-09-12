@@ -22,6 +22,7 @@ import {
   userChromeStatus,
 } from './browser-tools.js';
 import { ChromeBridgeServer, type ChromeBridgeInstanceInfo } from './chrome-profile-bridge.js';
+import { setProcessLocalBridgeToken } from './chrome-profile-adapter.js';
 import { selectBridgeCompanion, type SelectionResult } from './chrome-companion-selection.js';
 import {
   buildOsQueryEnv,
@@ -279,13 +280,15 @@ export async function ensureChromeBridgeServer(
     );
   }
   _chromeBridge = server;
-  // Publish the session token where the in-process adapter (default token
-  // resolver) and one-shot CLI children (env allowlist) can stamp it on
-  // every command. Only when actually bound: a shared-mode instance holds a
+  // Publish the session token process-locally where the in-process adapter
+  // (default token resolver) can stamp it on every command. One-shot CLI
+  // children receive it explicitly via the buildCliEnvironment allowlist at
+  // spawn time. Only when actually bound: a shared-mode instance holds a
   // different token than the bridge that owns the port, so publishing it
   // would lock the owner out. In-memory only; rotation on bridge restart.
+  // Never assigned to global process.env.
   if (!server.isShared) {
-    process.env.PI_SEARCH_CHROME_BRIDGE_TOKEN = server.bridgeToken;
+    setProcessLocalBridgeToken(server.bridgeToken);
   }
   return server;
 }
@@ -294,6 +297,7 @@ export async function stopChromeBridgeServer(): Promise<void> {
   if (_chromeBridge === null) return;
   const server = _chromeBridge;
   _chromeBridge = null;
+  setProcessLocalBridgeToken(undefined);
   await server.stop();
 }
 
