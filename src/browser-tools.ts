@@ -120,7 +120,7 @@ export function getUserChromeController(env: Record<string, string | undefined> 
     _chrome = createUserChromeController({ automationEnabled: !isBrowserAutomationDisabled(env) })
     return _chrome
   }
-  _chrome.auth.setAutomationEnabled(!isBrowserAutomationDisabled(env))
+  _chrome.adapter.setAutomationEnabled(!isBrowserAutomationDisabled(env))
   return _chrome
 }
 

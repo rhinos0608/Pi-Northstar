@@ -469,3 +469,45 @@ test('multi-instance same-family conflict fails closed via hasFamilyConflict; st
     await server.stop();
   }
 });
+
+test('/command checks the session token before revoked/duplicate state', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port, commandTimeoutMs: 5_000 });
+  const client = new ChromeBridgeClient({ port, timeoutMs: 5_000 });
+  try {
+    await server.start();
+    registerTestTarget(server);
+    const pending = client.send(testCommand(server, 'token-first-1'));
+    const deadline = Date.now() + 5_000;
+    while (server.pendingResultCount === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(server.pendingResultCount, 1);
+    server.revokeAll();
+    await assert.rejects(pending, /revoked/);
+    const replay = await rawRequest(port, '/command', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...testCommand(server, 'token-first-1'), bridgeToken: 'wrong-token' }),
+    });
+    assert.equal(replay.status, 403);
+    assert.ok(replay.text.includes('bridge command rejected'));
+  } finally {
+    await server.stop();
+  }
+});
+
+test('GET /next rejects a malformed bare instanceId instead of tracking it', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port });
+  try {
+    await server.start();
+    const bad = await rawRequest(port, '/next?timeoutMs=0&instanceId=!!!not-an-id!!!', {
+      headers: { origin: EXTENSION_ORIGIN },
+    });
+    assert.equal(bad.status, 400);
+    assert.ok(bad.text.includes('chrome_invalid_request'));
+  } finally {
+    await server.stop();
+  }
+});

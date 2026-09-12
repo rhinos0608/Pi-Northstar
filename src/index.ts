@@ -440,7 +440,13 @@ function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string 
           await showCommandResult(ctx, 'Chrome Authorize', 'authorization requires explicit user confirmation; no grant issued');
           return;
         }
-        const ttl = chromeTtlMsForSpec(parseChromeAuthorizeArg(ttlArg));
+        let ttl: number | null;
+        try {
+          ttl = chromeTtlMsForSpec(parseChromeAuthorizeArg(ttlArg));
+        } catch (error) {
+          await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
+          return;
+        }
         const result = await authorizeUserChrome(ttl, true, env, check.selected.instanceId);
         await showCommandResult(ctx, 'Chrome Authorize', resultToText(result));
         return;

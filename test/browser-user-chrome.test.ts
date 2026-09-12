@@ -10,6 +10,7 @@ import { selectBridgeCompanion } from '../src/chrome-companion-selection.js';
 import {
   browser,
   createUserChromeController,
+  getUserChromeController,
   renewUserChromeLeaseIfDue,
   resetUserChromeForTest,
   userChromeStatus,
@@ -218,6 +219,22 @@ test('renewUserChromeLeaseIfDue renews past the TTL-30s window', async () => {
     await renewUserChromeLeaseIfDue({});
     assert.equal(bridge.sends.some((c) => c.kind === 'renew'), true);
     assert.ok(controller.auth.currentGrant()!.leaseExpiresAt > before);
+  } finally {
+    resetUserChromeForTest(null);
+  }
+});
+
+test('singleton kill-switch sync routes via adapter and purges session secrets', async () => {
+  const { controller } = await authorizedController();
+  const typed = await controller.adapter.execute({ action: 'type', selector: '@e1', text: 'singleton-secret' });
+  assert.equal(detailsOf(typed)['chromeError'], undefined);
+  resetUserChromeForTest(controller);
+  try {
+    assert.ok(typedMemoryOf(controller.adapter).length > 0);
+    getUserChromeController({ PI_SEARCH_BROWSER_AUTOMATION: '0' });
+    assert.equal(controller.auth.isAutomationEnabled(), false);
+    assert.equal(typedMemoryOf(controller.adapter).length, 0);
+    assert.equal(controller.auth.status().state, 'locked');
   } finally {
     resetUserChromeForTest(null);
   }

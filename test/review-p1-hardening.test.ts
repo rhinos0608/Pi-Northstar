@@ -37,12 +37,17 @@ function cmd(server: ChromeBridgeServer, id: string, target = TARGET_A, token?: 
 
 function freePort(): Promise<number> {
   const s = http.createServer();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     s.listen(0, CHROME_BRIDGE_HOST, () => {
       const a = s.address();
       const port = typeof a === 'object' && a !== null ? a.port : 0;
+      if (port <= 0) {
+        s.close(() => reject(new Error('freePort: ephemeral bind returned no port')));
+        return;
+      }
       s.close(() => resolve(port));
     });
+    s.on('error', reject);
   });
 }
 
@@ -123,20 +128,11 @@ test('register response pairs the session token', async () => {
     );
     // register requires extension origin
     assert.equal(res.status, 403);
-    const ok = await new Promise<{ status: number; text: string }>((resolve, reject) => {
-      const body = JSON.stringify({ instanceId: TARGET_A, family: 'chrome', version: '1.0.0', caps: '' });
-      const req = http.request(
-        { host: CHROME_BRIDGE_HOST, port, path: '/register', method: 'POST', headers: { origin: `chrome-extension://${EXTENSION_ID}`, 'content-length': Buffer.byteLength(body) } },
-        (r) => {
-          const chunks: Buffer[] = [];
-          r.on('data', (c: Buffer) => chunks.push(c));
-          r.on('end', () => resolve({ status: r.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }));
-          r.on('error', reject);
-        },
-      );
-      req.on('error', reject);
-      req.end(body);
-    });
+    const ok = await raw(
+      port,
+      '/register',
+      JSON.stringify({ instanceId: TARGET_A, family: 'chrome', version: '1.0.0', caps: '' }),
+    );
     assert.equal(ok.status, 200);
     assert.equal((JSON.parse(ok.text) as { bridgeToken: string }).bridgeToken, server.bridgeToken);
   } finally {

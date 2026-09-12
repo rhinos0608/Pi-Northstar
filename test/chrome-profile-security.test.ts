@@ -34,7 +34,7 @@ function sendsOf(result: { content?: unknown }): string {
   return JSON.stringify(result);
 }
 
-async function lockedAdapter(
+async function authorizedAdapter(
   sends: ChromeBridgeCommand[],
   dnsLookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>,
 ): Promise<ChromeProfileAdapter> {
@@ -63,7 +63,7 @@ async function lockedAdapter(
 
 test('loopback/metadata/private/credentialed targets rejected pre-bridge', async () => {
   const sends: ChromeBridgeCommand[] = [];
-  const adapter = await lockedAdapter(sends);
+  const adapter = await authorizedAdapter(sends);
   const targets = [
     'http://127.0.0.1/',
     'http://localhost:3000/',
@@ -83,7 +83,7 @@ test('loopback/metadata/private/credentialed targets rejected pre-bridge', async
 
 test('mixed-DNS answers rejected pre-bridge', async () => {
   const sends: ChromeBridgeCommand[] = [];
-  const adapter = await lockedAdapter(sends, mixedDns());
+  const adapter = await authorizedAdapter(sends, mixedDns());
   const result = await adapter.execute({ action: 'navigate', url: 'https://example.com/' });
   assert.ok(sendsOf(result).includes('chrome_domain_blocked'));
   assert.equal(sends.length, 0);
@@ -91,7 +91,7 @@ test('mixed-DNS answers rejected pre-bridge', async () => {
 
 test('DNR-model freeze blocks cross-host redirect targets after first nav', async () => {
   const sends: ChromeBridgeCommand[] = [];
-  const adapter = await lockedAdapter(sends);
+  const adapter = await authorizedAdapter(sends);
   const first = await adapter.execute({ action: 'navigate', url: 'https://example.com/' });
   assert.ok(!sendsOf(first).includes('chromeError'));
   assert.equal(adapter.frozenHost(), 'example.com');
@@ -106,6 +106,12 @@ test('sentinels absent from results, errors, and snapshot output', async () => {
   const sessionSentinel = 'SESSIONKEY-SENTINEL-AAA';
   const grantSentinel = 'GRANT-SENTINEL-BBB';
   const typedSentinel = 'TYPED-SENTINEL-CCC';
+  const failure: ChromeBridgeResult = {
+    protocol: 1,
+    id: 'x',
+    ok: false,
+    error: { code: 'chrome_timeout', message: `boom ${sessionSentinel}`, retryable: true },
+  };
   const auth = new ChromeProfileAuth({ now: fakeClock().now, randomId: (() => {
     let n = 0;
     const values = [sessionSentinel, grantSentinel, 'nonce-sentinel'];
@@ -146,12 +152,6 @@ test('sentinels absent from results, errors, and snapshot output', async () => {
   const typed = await adapter.execute({ action: 'type', selector: '@e1', text: typedSentinel });
   assert.ok(!sendsOf(typed).includes(typedSentinel));
 
-  const failure: ChromeBridgeResult = {
-    protocol: 1,
-    id: 'x',
-    ok: false,
-    error: { code: 'chrome_timeout', message: `boom ${sessionSentinel}`, retryable: true },
-  };
   const errResult = await adapter.execute({ action: 'tabs' });
   const errText = sendsOf(errResult);
   assert.ok(errText.includes('chrome_timeout'), 'failure surfaces error code');
@@ -191,7 +191,7 @@ test('revoke race never surfaces success-after-revoke', async () => {
 
 test('empty screenshot fails closed; unknown action fails closed without dispatch', async () => {
   const sends: ChromeBridgeCommand[] = [];
-  const adapter = await lockedAdapter(sends);
+  const adapter = await authorizedAdapter(sends);
   // Bridge data carries no screenshotBase64: adapter fails closed, no image emitted.
   const shot = await adapter.execute({ action: 'screenshot' });
   assert.ok(sendsOf(shot).includes('chrome_invalid_result'));

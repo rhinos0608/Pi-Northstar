@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { createWebAccessContentStore, buildWebAccessStoredEntry } from '../src/web-access-content-store.js';
 import { retrieveWebAccessCorpus } from '../src/web-access-retrieve.js';
 import { validateWebRequest } from '../src/web-contract.js';
-import { selectCompanion } from '../src/chrome-companion-selection.js';
+import { selectCompanion, type SelectCompanionInput } from '../src/chrome-companion-selection.js';
 import { PROVIDER_DESCRIPTOR_SOURCE } from '../src/providers.js';
 import { cacheWebSearchForRetrieve } from '../src/native-tools.js';
 
@@ -43,7 +43,6 @@ describe('review round3 regressions', () => {
 
   test('cached corpus preserves raw backend instead of mapping to parallel', async () => {
     const { populateCliCorpus, tryServeCliCorpusAction } = await import('../src/cli-backend.js');
-    const { createWebAccessContentStore } = await import('../src/web-access-content-store.js');
     const store = createWebAccessContentStore();
     const result = populateCliCorpus(store, 'web_search', {
       content: [{ type: 'text', text: 'hits' }],
@@ -61,13 +60,14 @@ describe('review round3 regressions', () => {
 
   test('same-family duplicate companions fail closed', () => {
     const at = Date.now();
-    const r = selectCompanion({
+    const input: SelectCompanionInput = {
       osDefault: { family: 'chrome', isChromium: true },
       companions: [
         { family: 'chrome', version: '1.0.0', evidence: '', instanceId: 'i-1', lastSeen: at },
         { family: 'chrome', version: '1.0.0', evidence: '', instanceId: 'i-2', lastSeen: at },
       ],
-    } as never);
+    };
+    const r = selectCompanion(input);
     assert.equal(r.ok, false);
   });
 

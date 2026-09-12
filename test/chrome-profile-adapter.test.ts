@@ -197,6 +197,12 @@ test('snapshot/text/screenshot convert safely; typed values never echo', async (
   const snap = await adapter.execute({ action: 'snapshot' });
   assert.ok(!textOf(snap).includes(secret));
 
+  const text = await adapter.execute({ action: 'text' });
+  const textCommand = bridge.sends.find((command) => command.kind === 'execute' && command.operation.kind === 'text');
+  assert.ok(textCommand?.kind === 'execute');
+  assert.equal(textCommand.grantId, bridge.sends[0]!.grantId);
+  assert.ok(!textOf(text).includes(textCommand.grantId));
+
   const typedSecret = 's3cr3t-typed-value';
   const typed = await adapter.execute({ action: 'type', selector: '@e1', text: typedSecret });
   assert.ok(!textOf(typed).includes(typedSecret));

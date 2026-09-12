@@ -625,19 +625,20 @@ export class ChromeBridgeServer {
       sendJson(res, 400, httpErrorBody('chrome_invalid_request', 'invalid bridge command'));
       return;
     }
+    // Session token first: any local process can reach loopback, so the token
+    // minted at construction gates every command including authorize. Mismatch
+    // fails closed without echoing the body (it may carry grant material) and
+    // without revealing revoked/duplicate state to unauthenticated callers.
+    if (!this.checkBridgeToken(command.bridgeToken)) {
+      sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'bridge command rejected'));
+      return;
+    }
     if (this.revokedIds.has(command.id)) {
       sendJson(res, 409, httpErrorBody('chrome_revoked', 'command revoked before completion'));
       return;
     }
     if (this.waiters.has(command.id)) {
       sendJson(res, 409, httpErrorBody('chrome_invalid_request', 'duplicate command id'));
-      return;
-    }
-    // Session token: any local process can reach loopback, so the token minted
-    // at construction gates every command including authorize. Mismatch fails
-    // closed without echoing the body (it may carry grant material).
-    if (!this.checkBridgeToken(command.bridgeToken)) {
-      sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'bridge command rejected'));
       return;
     }
     // Per-instance targeting: commands bind to the selected companion only.
@@ -781,7 +782,13 @@ export class ChromeBridgeServer {
         pollerId = claim.instanceId;
       } else {
         const bare = url.searchParams.get('instanceId');
-        if (bare !== null && bare !== '') pollerId = bare;
+        if (bare !== null && bare !== '') {
+          if (!INSTANCE_ID_PATTERN.test(bare)) {
+            sendJson(res, 400, httpErrorBody('chrome_invalid_request', 'invalid instanceId'));
+            return;
+          }
+          pollerId = bare;
+        }
       }
     } catch (error) {
       if (error instanceof ChromeBridgeError) {
