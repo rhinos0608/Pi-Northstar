@@ -235,7 +235,7 @@ pi -e ./src/index.ts
 
 ### About that `npm install`
 
-Requires Node.js ≥ 24. `web_search`, `fetch`, `github`, `social`, and `media` have no native dependency — `npm install` (or `npm install --omit=optional`) is enough to use them. `browser` is the one tool backed by a native binary: `agent-browser` (~86 MB) is an **optional** npm dependency, so `npm install` downloads it by default, but nothing else in the package needs it. Skip it with:
+Requires Node.js ≥ 24. The floor comes from the `browser` tool chain, not the core tools: the optional `agent-browser` npm dependency declares `engines: { node: ">=24.0.0" }`, and `package.json` (`engines: { node: ">=24.0.0" }`) plus CI (`node-version: 24` in `.github/workflows/ci.yml`) pin the whole package to it. The core tools (`web_search`, `fetch`, `github`, `social`, `media`) use portable APIs behind the `node --import tsx` loader (which only needs Node ≥ 20.6), so there is no newer-`URL`/`fetch`-API reason you must be on 24 for them — but 24 is the only tested/supported runtime, so upgrade rather than polyfill. `web_search`, `fetch`, `github`, `social`, and `media` have no native dependency — `npm install` (or `npm install --omit=optional`) is enough to use them. `browser` is the one tool backed by a native binary: `agent-browser` (~86 MB) is an **optional** npm dependency, so `npm install` downloads it by default, but nothing else in the package needs it. Skip it with:
 
 ```bash
 npm install --omit=optional
