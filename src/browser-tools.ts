@@ -6,6 +6,10 @@ import { AgentBrowserAdapter } from './agent-browser.js'
 import { agentBrowserExecutableConfigured, resolveAgentBrowserExecutable } from './agent-browser-process.js'
 import { parseLoopbackDebugTarget, type LoopbackDebugPolicy } from './loopback-debug-policy.js'
 import { LoopbackProxy } from './loopback-proxy.js'
+import { ChromeProfileAdapter, type ChromeProfileBridgeTransport } from './chrome-profile-adapter.js'
+import { ChromeProfileAuth, type ChromeRevokeReason } from './chrome-profile-auth.js'
+import { ChromeBridgeClient } from './chrome-profile-bridge.js'
+import type { DnsLookup } from './network-policy.js'
 
 export type BrowserAction = 'status' | 'tabs' | 'navigate' | 'evaluate' | 'text' | 'html' | 'screenshot' | 'click' | 'type' | 'scroll' | 'close' | 'cookies' | 'set_cookies'
 
@@ -58,6 +62,100 @@ async function disposeCurrentAdapter(): Promise<void> {
 
 export async function closeBrowserSession(): Promise<void> {
   await disposeCurrentAdapter()
+  if (_chrome !== null) {
+    const chrome = _chrome
+    _chrome = null
+    await chrome.adapter.shutdown()
+  }
+}
+
+// ── User-Chromium runtime (bridge-backed, isolated fallback) ──
+
+export interface UserChromeController {
+  auth: ChromeProfileAuth
+  adapter: ChromeProfileAdapter
+}
+
+export interface UserChromeControllerDeps {
+  auth?: ChromeProfileAuth | undefined
+  bridge?: ChromeProfileBridgeTransport | undefined
+  targetInstanceId?: string | undefined
+  bridgeToken?: string | (() => string | undefined) | undefined
+  now?: (() => number) | undefined
+  randomId?: (() => string) | undefined
+  dnsLookup?: DnsLookup | undefined
+  automationEnabled?: boolean | undefined
+}
+
+/** Instantiate-compatible controller: same adapter/auth/bridge shapes as slash registration. */
+export function createUserChromeController(deps?: UserChromeControllerDeps): UserChromeController {
+  const auth =
+    deps?.auth ??
+    new ChromeProfileAuth({
+      ...(deps?.now ? { now: deps.now } : {}),
+      ...(deps?.randomId ? { randomId: deps.randomId } : {}),
+      automationEnabled: deps?.automationEnabled ?? true,
+    })
+  if (deps?.automationEnabled !== undefined && deps?.auth !== undefined) {
+    auth.setAutomationEnabled(deps.automationEnabled)
+  }
+  const bridge = deps?.bridge ?? new ChromeBridgeClient()
+  const adapter = new ChromeProfileAdapter({
+    auth,
+    bridge,
+    ...(deps?.targetInstanceId !== undefined ? { targetInstanceId: deps.targetInstanceId } : {}),
+    ...(deps?.bridgeToken !== undefined ? { bridgeToken: deps.bridgeToken } : {}),
+    ...(deps?.now ? { now: deps.now } : {}),
+    ...(deps?.randomId ? { randomId: deps.randomId } : {}),
+    ...(deps?.dnsLookup ? { dnsLookup: deps.dnsLookup } : {}),
+  })
+  return { auth, adapter }
+}
+
+let _chrome: UserChromeController | null = null
+
+/** Canonical lazy singleton. Syncs the automation kill switch on every access. */
+export function getUserChromeController(env: Record<string, string | undefined> = process.env): UserChromeController {
+  if (_chrome === null) {
+    _chrome = createUserChromeController({ automationEnabled: !isBrowserAutomationDisabled(env) })
+    return _chrome
+  }
+  _chrome.auth.setAutomationEnabled(!isBrowserAutomationDisabled(env))
+  return _chrome
+}
+
+/** Test-only seam: replace or clear the lazy singleton. */
+export function resetUserChromeForTest(controller?: UserChromeController | null): void {
+  _chrome = controller ?? null
+}
+
+export function userChromeStatus(env?: Record<string, string | undefined>): { state: string; backend: 'user-chrome' | 'isolated'; expiresAt?: number | null } {
+  const state = getUserChromeController(env).auth.status()
+  if (state.state === 'authorized') return { state: state.state, backend: 'user-chrome', expiresAt: state.expiresAt }
+  return { state: state.state, backend: 'isolated' }
+}
+
+export async function authorizeUserChrome(
+  ttlMs: number | null,
+  confirmed: boolean,
+  env?: Record<string, string | undefined>,
+  targetInstanceId?: string | undefined,
+): Promise<BackendCallResult> {
+  return getUserChromeController(env).adapter.authorize(ttlMs, confirmed, targetInstanceId)
+}
+
+export async function revokeUserChrome(
+  reason: ChromeRevokeReason = 'user',
+  env?: Record<string, string | undefined>,
+): Promise<BackendCallResult> {
+  return getUserChromeController(env).adapter.revoke(reason)
+}
+
+/** Renew the companion lease when inside the renewal window; no-op otherwise. */
+export async function renewUserChromeLeaseIfDue(env?: Record<string, string | undefined>): Promise<BackendCallResult> {
+  const controller = getUserChromeController(env)
+  if (!controller.auth.leaseRenewalDue()) return textResult({ ok: true, renewed: false })
+  return controller.adapter.renewLease()
 }
 
 // ── Main entry point ──
@@ -70,6 +168,22 @@ export async function browser(
 
   if (isBrowserAutomationDisabled(env)) {
     return textResult({ ok: false, message: 'Browser automation disabled by PI_SEARCH_BROWSER_AUTOMATION. Set it to 1 or unset to enable.' })
+  }
+
+  // User-Chromium path: authorized grants route to the companion bridge.
+  // Loopback debug sessions always stay on the isolated backend: the
+  // user-chrome adapter rejects private targets pre-dispatch by design.
+  const chromeAction = typeof args.action === 'string' ? args.action : ''
+  const chromeUrl = typeof args.url === 'string' ? args.url : ''
+  const loopbackForced = _loopbackPolicy !== null || (chromeAction === 'navigate' && chromeUrl !== '' && parseLoopbackDebugTarget(chromeUrl) !== null)
+  if (!loopbackForced) {
+    const chrome = getUserChromeController(env)
+    if (chrome.auth.canExecute()) {
+      if (chromeAction === 'close') {
+        await disposeCurrentAdapter()
+      }
+      return chrome.adapter.execute(args, { ...(options.signal ? { signal: options.signal } : {}) })
+    }
   }
 
   return agentBrowserRoute(args, options)

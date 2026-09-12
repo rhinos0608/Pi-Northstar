@@ -18,6 +18,7 @@ const CONFIGURED_TOOL_NAMES = [
 ] as const;
 
 const EXPECTED_COMMAND_NAMES = [
+  'chrome',
   'reach-status',
   'reach-setup',
 ] as const;

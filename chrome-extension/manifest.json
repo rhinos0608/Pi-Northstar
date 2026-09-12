@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Pi-Northstar User-Chrome Companion",
+  "version": "1.0.0",
+  "description": "Atlas-owned inactive-tab automation for explicitly authorized user Chrome. No cookies, no eval, deny-by-default network.",
+  "minimum_chrome_version": "120",
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "debugger",
+    "declarativeNetRequest",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:17319/*"
+  ],
+  "web_accessible_resources": []
+}
