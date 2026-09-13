@@ -8,6 +8,15 @@ import { callNativeTool } from '../src/native-tools.js';
 import { runCommand, sanitizeExternalOutput } from '../src/reach-tools.js';
 import { writeCookieState } from '../src/cookie-jar.js';
 
+// Windows-only skip flag: the tests below spawn extensionless `#!/bin/sh`
+// fixture CLIs (opencli/rdt/yt-dlp) through raw spawn(..., { shell: false })
+// via reach-tools runCommand / social-opencli defaultExec. Windows
+// CreateProcess cannot execute extensionless shell scripts (and those paths
+// do not route through spawnCliCommand), so the fixtures never run there.
+// The production gap is tracked as a src finding (reach-tools spawn
+// portability); the tests stay POSIX-only until it lands.
+const requiresPosixSpawn = process.platform === 'win32' ? 'requires POSIX sh spawn' : false;
+
 test('callNativeTool fetch alias routes query-less calls to read', async () => {
   await assert.rejects(
     () => callNativeTool('fetch', {}),
@@ -241,7 +250,7 @@ test('reach_setup install returns descriptor', async () => {
   assert.match(JSON.stringify(result.details), /Installation disabled/);
 });
 
-test('reach_status redacts warning output from external backend probes', async () => {
+test('reach_status redacts warning output from external backend probes', { skip: requiresPosixSpawn }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-opencli-'));
   const opencliPath = join(dir, 'opencli');
 
@@ -421,7 +430,7 @@ test('reddit get_post: rejects lookalike reddit hosts', async () => {
   }
 });
 
-test('external subprocess env: Reddit API credentials and YouTube key never forwarded to rdt', async () => {
+test('external subprocess env: Reddit API credentials and YouTube key never forwarded to rdt', { skip: requiresPosixSpawn }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-env-iso-'));
   try {
     const rdtPath = join(dir, 'rdt');
@@ -681,7 +690,7 @@ test('youtube details: canonical youtu.be short URL video ID used for Data API',
   assert.match(requestedUrl, /id=abc123defgh/);
 });
 
-test('reach_status: youtube without key is partial (oEmbed details) and never probes yt-dlp', async () => {
+test('reach_status: youtube without key is partial (oEmbed details) and never probes yt-dlp', { skip: requiresPosixSpawn }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-status-yt-'));
   try {
     const ytDlpPath = join(dir, 'yt-dlp');
@@ -794,7 +803,7 @@ test('reach_status: expired or non-Reddit stored cookie never reports reddit-coo
   }
 });
 
-test('reddit: pre-aborted signal never spawns a CLI candidate', async () => {
+test('reddit: pre-aborted signal never spawns a CLI candidate', { skip: requiresPosixSpawn }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-preabort-'));
   const marker = join(dir, 'ran');
   try {
@@ -817,7 +826,7 @@ test('reddit: pre-aborted signal never spawns a CLI candidate', async () => {
   }
 });
 
-test('reddit: abort during CLI command propagates AbortError without falling through', async () => {
+test('reddit: abort during CLI command propagates AbortError without falling through', { skip: requiresPosixSpawn }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cli-abort-'));
   try {
     const opencliPath = join(dir, 'opencli');

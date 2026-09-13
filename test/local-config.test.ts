@@ -5,6 +5,12 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadedConfigSummary, loadSearchMcpEnvironment, readDiffbotTokenFromLoginShell } from '../src/local-config.js';
 
+// Windows-only skip flag: the login-shell e2e test below spawns a real
+// `#!/bin/sh` script with an fd3 redirect (`>&3`). Login-shell probing is a
+// POSIX-only concept (src/local-config.ts falls back to /bin/sh) and
+// cmd.exe cannot execute the fixture, so the test is skipped on win32.
+const requiresPosixLoginShell = process.platform === 'win32' ? 'requires a POSIX login shell' : false;
+
 test('loadSearchMcpEnvironment does not assume a developer-specific default config path', () => {
   const env = { PI_SEARCH_ENV_PATH: '/tmp/missing-pi-search-env' };
   assert.deepEqual(loadSearchMcpEnvironment(env), env);
@@ -256,7 +262,7 @@ test('login-shell resolver rejects duplicate frames or extra fd3 bytes', () => {
   assert.equal(fd3('PI_ATLAS_TOKEN_START\nmulti\nline\nPI_ATLAS_TOKEN_END\n'), undefined);
 });
 
-test('login-shell resolver reads temp fake shell without real credentials', async () => {
+test('login-shell resolver reads temp fake shell without real credentials', { skip: requiresPosixLoginShell }, async () => {
   const { mkdtemp, writeFile, chmod } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');

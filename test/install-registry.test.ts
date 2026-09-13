@@ -7,6 +7,14 @@ import { installAllowed, runSetupInstall } from '../src/installer.js';
 
 const script = '#!/bin/sh\necho "GITHUB_TOKEN=ghp_should_redact" >&2\nexit 0\n';
 
+// Windows-only skip flag: these tests install extensionless `#!/bin/sh`
+// fixtures as fake `pipx`/`uv`/`npm` binaries. src/installer.ts spawns
+// candidates via raw spawn(..., { shell: false }) and its commandExists
+// check only probes the bare name (plus .exe on win32), so the fixtures
+// are never executable there — and chmod 0o600 vs 0o700 is a no-op on
+// Windows, which also breaks the non-executable-candidate test.
+const requiresPosixInstallShim = process.platform === 'win32' ? 'requires POSIX executable shims' : false;
+
 test('installer opt-out disables execution', async () => {
   const result = await runSetupInstall('install_core', { PI_SEARCH_ALLOW_INSTALL: '0' }, undefined);
 
@@ -15,7 +23,7 @@ test('installer opt-out disables execution', async () => {
   assert.deepEqual(result.installers, []);
 });
 
-test('installer uses allowed package-manager command and redacts output', async () => {
+test('installer uses allowed package-manager command and redacts output', { skip: requiresPosixInstallShim }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-'));
   try {
     const pipx = join(dir, 'pipx');
@@ -36,7 +44,7 @@ test('installer uses allowed package-manager command and redacts output', async 
   }
 });
 
-test('installer ignores non-executable command candidates on PATH', async () => {
+test('installer ignores non-executable command candidates on PATH', { skip: requiresPosixInstallShim }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-executable-'));
   try {
     const pipx = join(dir, 'pipx');
@@ -72,7 +80,7 @@ test('installAllowed defaults to enabled', () => {
   assert.equal(installAllowed({ PI_SEARCH_ALLOW_INSTALL: 'off' }), false);
 });
 
-test('installer pins verified CLI versions (opencli 1.8.6, twitter-cli 0.8.5)', async () => {
+test('installer pins verified CLI versions (opencli 1.8.6, twitter-cli 0.8.5)', { skip: requiresPosixInstallShim }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-pinned-'));
   try {
     // PATH offers only pipx (exit 0): twitter-cli installs via pipx with a
@@ -93,7 +101,7 @@ test('installer pins verified CLI versions (opencli 1.8.6, twitter-cli 0.8.5)', 
   }
 });
 
-test('installer pins opencli npm spec to verified 1.8.6', async () => {
+test('installer pins opencli npm spec to verified 1.8.6', { skip: requiresPosixInstallShim }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-opencli-'));
   try {
     const npm = join(dir, 'npm');
