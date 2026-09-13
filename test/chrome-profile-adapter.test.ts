@@ -241,6 +241,21 @@ test('revoke locks sync then best-effort remote cleanup; shutdown clears freeze'
   assert.deepEqual(second.adapter.status(), { state: 'locked', reason: 'shutdown' });
 });
 
+test('failed navigate does not strand the hostname freeze', async () => {
+  const bridge = fakeBridge((command) => {
+    if (command.kind === 'execute') throw new ChromeBridgeError('chrome_extension_unavailable', 'companion gone', true, 503);
+    return okData({}, command.id);
+  });
+  const { adapter } = await authorizedAdapter(bridge);
+  const failed = await adapter.execute({ action: 'navigate', url: 'https://example.com/' });
+  assert.equal((detailsOf(failed)['chromeError'] as { code: string }).code, 'chrome_extension_unavailable');
+  assert.equal(adapter.frozenHost(), null);
+  bridge.handler = (command) => okData({}, command.id);
+  const retried = await adapter.execute({ action: 'navigate', url: 'https://wikipedia.org/' });
+  assert.equal(detailsOf(retried)['chromeError'], undefined);
+  assert.equal(adapter.frozenHost(), 'wikipedia.org');
+});
+
 test('doctor reveals reachability/auth/latency only, never tab URL/title', async () => {
   const bridge = fakeBridge((command) => okData({}, command.id));
   const { adapter } = await authorizedAdapter(bridge);

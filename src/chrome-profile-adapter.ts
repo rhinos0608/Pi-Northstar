@@ -129,6 +129,8 @@ export interface ChromeProfileExecuteOptions {
 interface PreparedOperation {
   operation: ChromeProfileOperation;
   typedValues: string[];
+  /** First-navigation hostname, committed only after companion success. */
+  pendingFrozenHostname?: string;
 }
 
 function chromeErrorResult(
@@ -267,7 +269,7 @@ export class ChromeProfileAdapter {
     if (this.bridge !== null && token === undefined) {
       this.auth.abortAuthorize(grant.sessionKey, grant.grantId);
       this.purgeIfLocked();
-      return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge token unavailable', true);
+      return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge token unavailable; run user-chrome commands in the bridge owner process', true);
     }
     if (this.bridge !== null) {
       this.targetInstanceId = target;
@@ -506,6 +508,10 @@ export class ChromeProfileAdapter {
         result.error.retryable,
       );
     }
+    // Stage-then-commit: a failed send/error result must not strand the freeze.
+    if (prepared.pendingFrozenHostname !== undefined && this.frozenHostname === null) {
+      this.frozenHostname = prepared.pendingFrozenHostname;
+    }
     return this.toBackendResult(action, result.data, secrets);
   }
 
@@ -607,14 +613,17 @@ export class ChromeProfileAdapter {
         } catch (error) {
           throw new Error(`chrome_domain_blocked: ${error instanceof Error ? error.message : String(error)}`);
         }
-        if (this.frozenHostname === null) {
-          this.frozenHostname = hostname;
-        } else if (hostname !== this.frozenHostname) {
+        const frozen = this.frozenHostname ?? hostname;
+        if (this.frozenHostname !== null && hostname !== this.frozenHostname) {
           throw new Error(
             `chrome_domain_blocked: navigation to ${hostname} blocked by frozen host ${this.frozenHostname}`,
           );
         }
-        return { operation: { kind: 'navigate', url: normalized, frozenHostname: this.frozenHostname }, typedValues: [] };
+        return {
+          operation: { kind: 'navigate', url: normalized, frozenHostname: frozen },
+          typedValues: [],
+          ...(this.frozenHostname === null ? { pendingFrozenHostname: hostname } : {}),
+        };
       }
       case 'snapshot': {
         return { operation: { kind: 'snapshot', compact: raw.compact === true }, typedValues: [] };

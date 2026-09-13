@@ -310,26 +310,44 @@ export class AgentBrowserAdapter {
 
   /**
    * Shared public-navigation trust boundary: static URL validation, DNS
-   * preflight, first-hostname domain freeze, and containment check. Used by
+   * preflight, first-hostname staging, and containment check. Used by
    * single navigate and by batch/job navigation steps alike so raw command
    * arrays cannot tunnel underneath the policy layer. Throws on invalid
    * targets; returns { ok: false } only for domain-policy blocks.
+   *
+   * Stage-then-commit: when the session is not yet frozen, the first
+   * hostname is validated (freeze-shape + DNS) and returned as
+   * pendingHostname WITHOUT freezing. The caller commits the freeze only
+   * after the navigation command succeeds, so a failed open leaves
+   * domainsFrozen=false and allowedDomains unchanged. Pass `staged` when
+   * preflighting several commands up front (batch) so later commands are
+   * checked against the staged first hostname.
    */
-  private async preflightNavigationTarget(rawUrl: string, signal?: AbortSignal): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  private async preflightNavigationTarget(rawUrl: string, signal?: AbortSignal, staged?: string[]): Promise<{ ok: true; url: string; pendingHostname?: string } | { ok: false; error: string }> {
     const url = validateNavigationUrl(rawUrl);
     const hostname = new URL(url).hostname.toLowerCase();
     await dnsPreflight(hostname, signal);
-    if (!this.domainsFrozen) {
-      this.setAllowedDomains([hostname]);
-      await validateAllowedDomainsDns(this.allowedDomains, signal);
+    const effective = this.domainsFrozen ? this.allowedDomains : (staged ?? this.allowedDomains);
+    if (!this.domainsFrozen && (!staged || staged.length === 0)) {
+      const candidate = freezeAllowedDomains([hostname]);
+      await validateAllowedDomainsDns(candidate, signal);
+      return { ok: true, url, pendingHostname: candidate[0]! };
     }
-    if (this.allowedDomains.length > 0 && !checkDomainAllowed(hostname, this.allowedDomains)) {
+    if (effective.length > 0 && !checkDomainAllowed(hostname, effective)) {
+      const allowed = this.domainsFrozen ? this.allowedDomains : effective;
       return {
         ok: false,
-        error: `Navigation to ${hostname} blocked by domain policy. Allowed domains: ${this.allowedDomains.join(', ')}. Close the session and navigate fresh to a different hostname to continue.`,
+        error: `Navigation to ${hostname} blocked by domain policy. Allowed domains: ${allowed.join(', ')}. Close the session and navigate fresh to a different hostname to continue.`,
       };
     }
     return { ok: true, url };
+  }
+
+  /** Commit a staged first-navigation hostname. No-op once frozen. */
+  private commitNavigationFreeze(hostname: string): void {
+    if (!this.domainsFrozen) {
+      this.setAllowedDomains([hostname]);
+    }
   }
 
   private async handleNavigate(request: BrowserRequest, options: AgentBrowserProcessOptions): Promise<BackendCallResult> {
@@ -354,18 +372,20 @@ export class AgentBrowserAdapter {
       // Skip public hostname/DNS check — proxy enforces containment
       // Keep exact hostname in allowedDomains so vendor containment remains active.
       // This narrow loopback exception bypasses public domain validation only here.
-      if (!this.domainsFrozen) {
-        // Strip IPv6 brackets ([::1] → ::1) so mergeOptions forwards canonical value
-        const hostname = loopbackPolicy.hostname.startsWith('[') && loopbackPolicy.hostname.endsWith(']')
-          ? loopbackPolicy.hostname.slice(1, -1)
-          : loopbackPolicy.hostname;
-        this.allowedDomains = [hostname];
-        this.domainsFrozen = true;
-      }
+      // Strip IPv6 brackets ([::1] → ::1) so mergeOptions forwards canonical value
+      const pendingLoopbackHost = loopbackPolicy.hostname.startsWith('[') && loopbackPolicy.hostname.endsWith(']')
+        ? loopbackPolicy.hostname.slice(1, -1)
+        : loopbackPolicy.hostname;
       await this.ensureSession(options);
       const merged = this.mergeOptions(options);
       const result = await runCommand(['open', loopbackPolicy.navigationUrl], merged);
-      if (result.success) this.pageState.invalidate(this.session.namespace, 'navigation');
+      if (result.success) {
+        if (!this.domainsFrozen) {
+          this.allowedDomains = [pendingLoopbackHost];
+          this.domainsFrozen = true;
+        }
+        this.pageState.invalidate(this.session.namespace, 'navigation');
+      }
       return jsonTextResult(result.success ? { ok: true, url: loopbackPolicy.navigationUrl } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
     }
 
@@ -381,7 +401,10 @@ export class AgentBrowserAdapter {
 
     // Use 'open' command (not 'navigate')
     const result = await runCommand(['open', url], merged);
-    if (result.success) this.pageState.invalidate(this.session.namespace, 'navigation');
+    if (result.success) {
+      if (preflight.pendingHostname) this.commitNavigationFreeze(preflight.pendingHostname);
+      this.pageState.invalidate(this.session.namespace, 'navigation');
+    }
     return jsonTextResult(result.success ? { ok: true, url } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
   }
 
@@ -871,12 +894,16 @@ export class AgentBrowserAdapter {
 
     // Navigation-capable batch commands pass through the exact same trust
     // boundary as single navigate: no raw tunnel underneath the policy layer.
-    // Loopback stays rejected outright (validateNoLoopbackInBatch); public
-    // targets get static validation + DNS preflight + domain freeze here, so
-    // the first batch navigation freezes containment for the rest of the batch.
+    // Loopback stays rejected outright; public targets get static validation +
+    // DNS preflight here with the first batch navigation staged so it bounds
+    // containment for the rest of the batch. The staged freeze commits only
+    // after a batch navigation succeeds, so a failed batch leaves
+    // domainsFrozen=false and allowedDomains unchanged.
     // In loopback sessions any batch navigation is rejected: public preflight
     // would overwrite the pinned loopback domain with an attacker-influenced
     // host. Use a single navigate action for loopback targets instead.
+    let stagedBatchHost: string | undefined;
+    const batchNavIndices: number[] = [];
     for (let i = 0; i < batch.commands.length; i++) {
       const cmd = batch.commands[i]!;
       const action = cmd.args[0]?.toLowerCase();
@@ -885,8 +912,11 @@ export class AgentBrowserAdapter {
           return jsonTextResult({ error: `command ${i}: navigation commands are not allowed in batch for loopback sessions. Use a single navigate action instead.` });
         }
         try {
-          const preflight = await this.preflightNavigationTarget(cmd.args[1], options.signal);
+          const staged = stagedBatchHost ? [stagedBatchHost] : undefined;
+          const preflight = await this.preflightNavigationTarget(cmd.args[1], options.signal, staged);
           if (!preflight.ok) return jsonTextResult({ error: `command ${i}: ${preflight.error}` });
+          if (preflight.pendingHostname && !stagedBatchHost) stagedBatchHost = preflight.pendingHostname;
+          batchNavIndices.push(i);
         } catch (error) {
           return jsonTextResult({ error: `command ${i}: ${error instanceof Error ? error.message : String(error)}` });
         }
@@ -900,6 +930,10 @@ export class AgentBrowserAdapter {
       batch.commands.map(c => ({ args: c.args, sensitive: c.sensitive ?? true })),
       merged,
     );
+
+    if (stagedBatchHost && batchNavIndices.some((i) => results[i]?.success)) {
+      this.commitNavigationFreeze(stagedBatchHost);
+    }
 
     const steps: BatchStepResult[] = results.map((r, index) => ({
       index,
