@@ -366,6 +366,7 @@ export async function runCommand(
   args: string[],
   options: AgentBrowserProcessOptions = {},
 ): Promise<AgentBrowserResult> {
+  options.signal?.throwIfAborted();
   const executablePath = await resolveAgentBrowserExecutable(options.executablePath);
   if (!options.runtimeRoot || !options.namespace) {
     throw new Error('Session required: provide runtimeRoot and namespace in options');
@@ -382,6 +383,7 @@ export async function runCommand(
     extraVars.AGENT_BROWSER_PROXY_BYPASS = options.loopbackProxyBypass ?? '<-loopback>';
   }
   const sandboxEnv = buildSandboxEnvironment(options.env ?? process.env, session, extraVars);
+  options.signal?.throwIfAborted();
 
   return new Promise((resolve) => {
     const tracker = createOutputTracker();
@@ -415,6 +417,7 @@ export async function runCommand(
       options.signal.addEventListener('abort', abortHandler, { once: true });
     }
 
+    options.signal?.throwIfAborted();
     const child = spawn(executablePath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: sandboxEnv,
@@ -478,6 +481,7 @@ export async function runBatchStdin(
   commands: Array<{ args: string[]; sensitive?: boolean }>,
   options: AgentBrowserProcessOptions = {},
 ): Promise<AgentBrowserResult[]> {
+  options.signal?.throwIfAborted();
   const executablePath = await resolveAgentBrowserExecutable(options.executablePath);
   if (!options.runtimeRoot || !options.namespace) {
     throw new Error('Session required: provide runtimeRoot and namespace in options');
@@ -492,6 +496,7 @@ export async function runBatchStdin(
     extraVars.AGENT_BROWSER_PROXY_BYPASS = options.loopbackProxyBypass ?? '<-loopback>';
   }
   const sandboxEnv = buildSandboxEnvironment(options.env ?? process.env, session, extraVars);
+  options.signal?.throwIfAborted();
 
   const batchCommands = commands.map(cmd => cmd.args);
   const batchJson = JSON.stringify(batchCommands);
@@ -528,6 +533,7 @@ export async function runBatchStdin(
       options.signal.addEventListener('abort', abortHandler, { once: true });
     }
 
+    options.signal?.throwIfAborted();
     const child = spawn(executablePath, ['batch', '--json', '--bail'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: sandboxEnv,
@@ -581,6 +587,10 @@ export async function runBatchStdin(
 export async function runScreenshot(
   options: AgentBrowserProcessOptions = {},
 ): Promise<{ data: string; mediaType: string; width: number; height: number; byteLength: number } | { error: string }> {
+  // Abort returns { error } (not throw): this runner's contract is an error
+  // union — the missing-session path below already returns { error } instead
+  // of throwing, so abort follows suit. Static string needs no sanitization.
+  if (options.signal?.aborted) return { error: 'aborted' };
   const executablePath = await resolveAgentBrowserExecutable(options.executablePath);
   if (!options.runtimeRoot || !options.namespace) {
     return { error: 'Session required for screenshot' };
@@ -595,6 +605,7 @@ export async function runScreenshot(
     extraVars.AGENT_BROWSER_PROXY_BYPASS = options.loopbackProxyBypass ?? '<-loopback>';
   }
   const sandboxEnv = buildSandboxEnvironment(options.env ?? process.env, session, extraVars);
+  if (options.signal?.aborted) return { error: 'aborted' };
 
   const screenshotDir = join(options.runtimeRoot, 'screenshots');
   const screenshotPath = join(screenshotDir, `shot-${Date.now()}.png`);
@@ -636,6 +647,7 @@ export async function runScreenshot(
       options.signal.addEventListener('abort', abortHandler, { once: true });
     }
 
+    if (options.signal?.aborted) { settle({ error: 'aborted' }); return; }
     const child = spawn(executablePath, ['screenshot', screenshotPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: sandboxEnv,

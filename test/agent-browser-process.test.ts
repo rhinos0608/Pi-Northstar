@@ -253,6 +253,46 @@ test('runScreenshot timeout path still fires SIGKILL when child ignores SIGTERM'
   }
 });
 
+test('runCommand honors pre-aborted signal without spawning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ab-pre-'));
+  const marker = join(dir, 'launched');
+  const exe = await writeStubExecutable(`touch ${marker}\necho '{"success":true}'`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-pre-abort-cmd', signal: controller.signal }),
+    (err: unknown) => err instanceof Error && (err as Error).name === 'AbortError',
+  );
+  assert.equal(existsSync(marker), false);
+});
+
+test('runBatchStdin honors pre-aborted signal without spawning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ab-pre-'));
+  const marker = join(dir, 'launched');
+  const exe = await writeStubExecutable(`touch ${marker}\necho '{"success":true}'`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    runBatchStdin([{ args: ['snapshot'] }], { executablePath: exe, runtimeRoot, namespace: 'ns-pre-abort-batch', signal: controller.signal }),
+    (err: unknown) => err instanceof Error && (err as Error).name === 'AbortError',
+  );
+  assert.equal(existsSync(marker), false);
+});
+
+test('runScreenshot honors pre-aborted signal without spawning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ab-pre-'));
+  const marker = join(dir, 'launched');
+  const exe = await writeStubExecutable(`touch ${marker}\nexit 0`);
+  const runtimeRoot = await makeRuntimeRoot();
+  const controller = new AbortController();
+  controller.abort();
+  const result = await runScreenshot({ executablePath: exe, runtimeRoot, namespace: 'ns-pre-abort-shot', signal: controller.signal });
+  assert.deepEqual(result, { error: 'aborted' });
+  assert.equal(existsSync(marker), false);
+});
+
 test('hostile parent proxy vars are overridden by adapter-controlled values', () => {
   const env = buildSandboxEnvironment(
     { PATH: '/bin', AGENT_BROWSER_PROXY: 'http://evil.com:8080', HTTP_PROXY: 'http://evil.com:8080' },
