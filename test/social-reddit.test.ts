@@ -477,12 +477,16 @@ test('opencli spawn receives OPENCLI_* without secret leakage', async () => {
   chmodSync(join(dir, probe), 0o755);
   if (process.platform === 'win32') {
     // Bare extensionless scripts are invisible to Windows spawn() (PATHEXT
-    // lookup), so provide a .cmd twin that runs the same probe via node.
-    writeFileSync(join(dir, `${probe}.cmd`), `@node "%~dp0${probe}.js" %*\r\n`);
+    // lookup), so provide a .cmd twin that runs the same probe via the
+    // absolute node binary (sanitized child PATH is shim-dir-heavy).
+    writeFileSync(join(dir, `${probe}.cmd`), `@"${process.execPath}" "%~dp0${probe}.js" %*\r\n`);
     writeFileSync(join(dir, `${probe}.js`), 'process.stdout.write(JSON.stringify(process.env));\n');
   }
-  const previousPath = process.env.PATH;
+  const previousPath = process.env.PATH ?? process.env.Path ?? process.env.path;
   process.env.PATH = `${dir}${delimiter}${previousPath ?? '/usr/bin:/bin'}`;
+  if (process.platform === 'win32') {
+    process.env.Path = process.env.PATH;
+  }
   try {
     const payload = (await runRedditCli(probe, [], {}, {
       PATH: process.env.PATH,
@@ -499,8 +503,13 @@ test('opencli spawn receives OPENCLI_* without secret leakage', async () => {
     assert.ok(!('REDDIT_COOKIE' in payload), 'REDDIT_COOKIE leaked into the opencli child');
     assert.ok(!('GITHUB_TOKEN' in payload), 'GITHUB_TOKEN leaked into the opencli child');
   } finally {
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+      if (process.platform === 'win32') delete process.env.Path;
+    } else {
+      process.env.PATH = previousPath;
+      if (process.platform === 'win32') process.env.Path = previousPath;
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });

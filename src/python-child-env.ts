@@ -9,6 +9,9 @@ const PYTHON_CHILD_ALLOWLIST = new Set([
   'PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL',
   'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
   'NO_PROXY', 'no_proxy',
+  // Windows spawn essentials (benign, no secrets): cmd.exe resolution +
+  // PATHEXT lookup for .cmd shims when PATH is shim-dir-only.
+  'SystemRoot', 'windir', 'COMSPEC', 'PATHEXT',
   'PI_SEARCH_SCRAPLING_ENABLED', 'PI_SEARCH_SCRAPLING_PYTHON_PATH',
   'PI_SEARCH_SCRAPLING_FETCHER', 'PI_SEARCH_SCRAPLING_PROXY',
   'PI_SEARCH_SCRAPLING_TIMEOUT',
@@ -25,6 +28,13 @@ export function buildPythonChildEnvironment(
     if (typeof val === 'string' && !BLOCKED_PATTERN.test(key)) {
       out[key] = val;
     }
+  }
+  // Windows env keys are case-insensitive at the OS level but case-sensitive
+  // in Node's env object (real key is `Path`, not `PATH`). Mirror it so .cmd
+  // shims stay resolvable inside the sanitized child.
+  if (out.PATH === undefined) {
+    const alt = parentEnv.Path ?? parentEnv.path;
+    if (typeof alt === 'string') out.PATH = alt;
   }
   return out;
 }

@@ -60,14 +60,20 @@ async function writeShim(dir: string, name: string, body: string): Promise<void>
 /** Prepend a shim dir to the real process PATH (workers that sanitize from
  *  process.env resolve shims first); always restores the previous value. */
 async function withShimmedPath<T>(dir: string, fn: () => Promise<T>): Promise<T> {
-  const key = 'PATH';
-  const previous = process.env[key];
-  process.env[key] = `${dir}${delimiter}${previous ?? ''}`;
+  // Windows stores the live key as `Path`; resolveCliCommand reads PATH/Path/path.
+  // Patch all three so parent resolution and child `node`/cmd lookup agree.
+  const keys = ['PATH', 'Path', 'path'];
+  const previous: Record<string, string | undefined> = {};
+  for (const key of keys) previous[key] = process.env[key];
+  const base = previous.PATH ?? previous.Path ?? previous.path ?? '';
+  for (const key of keys) process.env[key] = `${dir}${delimiter}${base}`;
   try {
     return await fn();
   } finally {
-    if (previous === undefined) delete process.env[key];
-    else process.env[key] = previous;
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key] as string;
+    }
   }
 }
 
@@ -490,7 +496,9 @@ test('OPENCLI_* reach only the opencli child; Python CLIs get the sanitized envi
       PATH: dir, OPENCLI_HOST: 'cli.example', OPENCLI_PORT: '9222', OPENCLI_TOKEN: 'opencli-secret',
       REDDIT_COOKIE: 'cookie-secret', GITHUB_TOKEN: 'github-secret',
     };
-    const twitter = await callNativeTool('social', { platform: 'twitter', action: 'search', query: 'test' }, { env });
+    // Hermetic on Windows: resolveCliCommand reads process.env.PATH (not the
+    // child env), so the shim dir must be on the real PATH during the call.
+    const twitter = await withShimmedPath(dir, () => callNativeTool('social', { platform: 'twitter', action: 'search', query: 'test' }, { env }));
     assert.equal((twitter.details as { backend?: string }).backend, 'twitter-cli');
     const twitterEnv = await readFile(join(dir, 'twitter.env'), 'utf8');
     assert.doesNotMatch(twitterEnv, /OPENCLI_TOKEN/, 'twitter-cli must not receive OPENCLI_*');
@@ -502,7 +510,7 @@ test('OPENCLI_* reach only the opencli child; Python CLIs get the sanitized envi
     // xhs-cli search emits an empty item list after the preferred
     // opencli-xiaohongshu plan fails; the opencli child gets OPENCLI_*
     // while the Python xhs-cli child gets the sanitized environment.
-    const xhs = await callNativeTool('social', { platform: 'xiaohongshu', action: 'search', query: 'test' }, { env });
+    const xhs = await withShimmedPath(dir, () => callNativeTool('social', { platform: 'xiaohongshu', action: 'search', query: 'test' }, { env }));
     assert.equal((xhs.details as { backend?: string }).backend, 'xhs-cli');
     const opencliEnv = await readFile(join(dir, 'opencli.env'), 'utf8');
     assert.match(opencliEnv, /OPENCLI_HOST=cli\.example/);
@@ -595,7 +603,7 @@ test('video: bilibili search normalizes payloads with no raw stdout passthrough'
   const dir = await withExecutableDir();
   try {
     await writeShim(dir, 'bili', '#!/bin/sh\necho \'{"items":[{"bvid":"BV1xx411c7mD","title":"Bili Video","author":"uploader","play":123}]}\'\n');
-    const result = await callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir } });
+    const result = await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir } }));
     const details = result.details as Record<string, unknown>;
     assert.equal(details.backend, 'bili-cli');
     assert.ok(!('stdout' in details) && !('stderr' in details), 'success details must not carry raw CLI output');
@@ -614,7 +622,7 @@ test('video: bilibili child env is sanitized (no OPENCLI_*, no secrets)', async 
       PATH: dir, OPENCLI_HOST: 'cli.example', OPENCLI_PORT: '9222', OPENCLI_TOKEN: 'opencli-secret',
       REDDIT_COOKIE: 'cookie-secret', GITHUB_TOKEN: 'github-secret', YOUTUBE_API_KEY: 'yt-secret',
     };
-    await callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env });
+    await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env }));
     const captured = await readFile(join(dir, 'bili.env'), 'utf8');
     assert.doesNotMatch(captured, /OPENCLI_TOKEN/);
     assert.doesNotMatch(captured, /OPENCLI_HOST/);

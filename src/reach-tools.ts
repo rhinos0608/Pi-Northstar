@@ -448,12 +448,17 @@ export function externalEnvironment(command: string, env: Record<string, string 
   // cookie-consuming provider mapping receive them.
   const cookieProvider = cookieProviderForCommand(command);
   const allowed = [
-    'PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
+    'PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
+    'SystemRoot', 'windir', 'COMSPEC', 'PATHEXT',
     'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
     ...(command === 'opencli' ? ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN'] : []),
     ...(cookieProvider ? cookieEnvKeysForProvider(cookieProvider) : []),
   ];
-  const base = Object.fromEntries(allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key] as string]] : [])));
+  const base = Object.fromEntries(allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key] as string]] : []))) as Record<string, string>;
+  if (base.PATH === undefined) {
+    const alt = env.Path ?? env.path;
+    if (typeof alt === 'string') base.PATH = alt;
+  }
   return { ...(cookieProvider ? cookieAuthEnvironment(cookieProvider, env) : {}), ...base };
 }
 

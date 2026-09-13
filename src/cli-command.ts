@@ -32,11 +32,28 @@ const DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD';
  * then the bare name). Non-Windows platforms, explicit paths, and misses
  * return the command unchanged so spawn error behavior is preserved.
  */
+export function windowsPathValue(env: Record<string, string | undefined> = process.env): string {
+  for (const key of ['PATH', 'Path', 'path']) {
+    const val = env[key];
+    if (typeof val === 'string' && val.length > 0) return val;
+  }
+  return '';
+}
+
+/** Absolute cmd.exe so stripped child envs (shim dir only) still spawn .cmd shims. */
+export function windowsCmdExe(env: Record<string, string | undefined> = process.env): string {
+  const comspec = env.COMSPEC ?? env.ComSpec ?? env.comspec;
+  if (typeof comspec === 'string' && comspec.length > 0) return comspec;
+  const root = env.SystemRoot ?? env.systemroot ?? env.windir;
+  if (typeof root === 'string' && root.length > 0) return `${root}\\System32\\cmd.exe`;
+  return 'C:\\Windows\\System32\\cmd.exe';
+}
+
 export function resolveCliCommand(command: string, options: CliResolveOptions = {}): string {
   const platform = options.platform ?? process.platform;
   if (platform !== 'win32') return command;
   if (command.length === 0 || command.includes('/') || command.includes('\\')) return command;
-  const pathValue = options.pathValue ?? process.env.PATH ?? '';
+  const pathValue = options.pathValue ?? windowsPathValue();
   if (pathValue.length === 0) return command;
   const extensions = (options.pathext ?? process.env.PATHEXT ?? DEFAULT_PATHEXT)
     .split(';')
@@ -89,7 +106,7 @@ export function spawnCliCommand(
   const resolved = resolveCliCommand(command);
   if (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(resolved)) {
     const inner = [resolved, ...args].map(quoteCmdArg).join(' ');
-    return spawn('cmd.exe', ['/d', '/s', '/c', `"${inner}"`], options) as ChildProcessByStdio<
+    return spawn(windowsCmdExe(), ['/d', '/s', '/c', `"${inner}"`], options) as ChildProcessByStdio<
       null,
       Readable,
       Readable

@@ -132,8 +132,10 @@ const INSTAGRAM_POST_DETAIL_ACTIONS: ReadonlySet<SocialAction> = new Set(['get_p
 // or secret-bearing env vars. Only these operator-owned variables pass through.
 
 const OPENCLI_ENV_ALLOWLIST: readonly string[] = [
-  'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL',
+  'PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL',
   'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME',
+  // Windows spawn essentials (benign, no secrets).
+  'SystemRoot', 'windir', 'COMSPEC', 'PATHEXT',
   // Remote OpenCLI instance configuration (operator-owned, see providers.ts).
   'OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN',
 ];
@@ -143,6 +145,10 @@ export function openCliChildEnv(source: NodeJS.ProcessEnv): Record<string, strin
   for (const key of OPENCLI_ENV_ALLOWLIST) {
     const value = source[key];
     if (typeof value === 'string' && value.length > 0) env[key] = value;
+  }
+  if (env.PATH === undefined) {
+    const alt = source.Path ?? source.path;
+    if (typeof alt === 'string' && alt.length > 0) env.PATH = alt;
   }
   return env;
 }
