@@ -56,6 +56,12 @@ export const CHROME_BRIDGE_DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 export const CHROME_BRIDGE_DEFAULT_NEXT_WAIT_MS = 30_000;
 export const CHROME_BRIDGE_MAX_NEXT_WAIT_MS = 60_000;
 export const CHROME_BRIDGE_DEFAULT_HANDSHAKE_TIMEOUT_MS = 2_000;
+/** Single-owner contract: only the process that bound the port owns instances,
+token, and command routing. A shared-mode instance (EADDRINUSE after handshake)
+holds a decoy token and empty registry; local discovery/send must fail closed
+with this message directing work to the owner process. Never proxy or forward. */
+export const CHROME_BRIDGE_SHARED_OWNER_MESSAGE =
+  'bridge shared by another process; run user-chrome commands in the bridge owner process only';
 export const CHROME_BRIDGE_INSTANCE_ID_MAX = 128;
 export const CHROME_BRIDGE_CLAIM_MAX = 64;
 export const CHROME_BRIDGE_CAPS_MAX = 256;
@@ -357,9 +363,21 @@ export class ChromeBridgeServer {
     return this.extensionOrigin;
   }
 
-  /** Session token the owning Pi session stamps on every command. */
+  /** Session token the owning Pi session stamps on every command. Throws in
+  share mode: the decoy token must never stamp a command (owner would reject
+  it); callers must run in the owner process. */
   get bridgeToken(): string {
+    if (this.shared) {
+      throw new ChromeBridgeError('chrome_extension_unavailable', CHROME_BRIDGE_SHARED_OWNER_MESSAGE, false, 409);
+    }
     return this.sessionToken;
+  }
+
+  /** Throw when this instance shares (never owns) the bridge port. */
+  requireOwner(): void {
+    if (this.shared) {
+      throw new ChromeBridgeError('chrome_extension_unavailable', CHROME_BRIDGE_SHARED_OWNER_MESSAGE, false, 409);
+    }
   }
 
   get isShared(): boolean {
@@ -376,24 +394,28 @@ export class ChromeBridgeServer {
     return this.waiters.size;
   }
 
-  /** Upsert a companion instance claim; refreshes lastSeen heartbeat. */
+  /** Upsert a companion instance claim; refreshes lastSeen heartbeat. Owner only. */
   registerInstance(claim: { instanceId: string; family: string; version: string; caps: string }): ChromeBridgeInstanceInfo {
+    this.requireOwner();
     const parsed = parseBridgeInstanceClaim(claim);
     const info: ChromeBridgeInstanceInfo = { ...parsed, lastSeen: this.now() };
     this.instances.set(parsed.instanceId, info);
     return { ...info };
   }
 
-  /** Refresh heartbeat for a known instance; false when unknown. */
+  /** Refresh heartbeat for a known instance; false when unknown. Owner only. */
   heartbeat(instanceId: string): boolean {
+    this.requireOwner();
     const existing = this.instances.get(instanceId);
     if (existing === undefined) return false;
     existing.lastSeen = this.now();
     return true;
   }
 
-  /** Live instances within the staleness window (default 90s). */
+  /** Live instances within the staleness window (default 90s). Owner only:
+a shared instance throws instead of returning a misleading empty list. */
   listInstances(now?: number): ChromeBridgeInstanceInfo[] {
+    this.requireOwner();
     const at = now ?? this.now();
     const out: ChromeBridgeInstanceInfo[] = [];
     for (const info of this.instances.values()) {
@@ -406,8 +428,9 @@ export class ChromeBridgeServer {
     return this.listInstances().length;
   }
 
-  /** True when >1 live instance claims the same family: callers fail closed. */
+  /** True when >1 live instance claims the same family: callers fail closed. Owner only. */
   hasFamilyConflict(family: string, now?: number): boolean {
+    this.requireOwner();
     const at = now ?? this.now();
     let count = 0;
     for (const info of this.instances.values()) {

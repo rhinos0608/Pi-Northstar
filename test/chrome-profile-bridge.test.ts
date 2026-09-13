@@ -5,8 +5,10 @@ import http from 'node:http';
 import { test } from 'node:test';
 import {
   CHROME_BRIDGE_HOST,
+  CHROME_BRIDGE_SHARED_OWNER_MESSAGE,
   ChromeBridgeClient,
   ChromeBridgeConflictError,
+  ChromeBridgeError,
   ChromeBridgeServer,
   extensionOriginForId,
   isExtensionRequestAllowed,
@@ -329,9 +331,30 @@ test('EADDRINUSE sharing allowed only after our handshake answers', async () => 
   try {
     await first.start();
     assert.equal(await probeBridgeHandshake(port, { timeoutMs: 1_000 }), true);
+    registerTestTarget(first);
+    assert.equal(first.listInstances().length, 1);
     const second = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port });
     await second.start();
     assert.equal(second.isShared, true);
+    assert.equal(first.isShared, false);
+    // Single-owner contract: the shared instance fails closed with a clear
+    // owner-process error instead of serving an empty registry or decoy token.
+    assert.throws(() => second.listInstances(), (error: unknown) => {
+      assert.ok(error instanceof ChromeBridgeError);
+      assert.equal(error.message, CHROME_BRIDGE_SHARED_OWNER_MESSAGE);
+      return true;
+    });
+    assert.throws(() => second.bridgeToken, /bridge owner process only/);
+    assert.throws(
+      () => second.registerInstance({ instanceId: TEST_TARGET, family: 'chrome', version: '1.0.0', caps: '' }),
+      /bridge owner process only/,
+    );
+    // Process B cannot send through owner A: a foreign token is refused at the
+    // owner transport (generic rejection, no state leak). Owner discovery stays live.
+    const outsider = new ChromeBridgeClient({ port, timeoutMs: 5_000 });
+    const forged = { ...testCommand(first, 'shared-outsider-1'), bridgeToken: 'decoy-token-not-owner' };
+    await assert.rejects(outsider.send(forged), /bridge command rejected/);
+    assert.equal(first.listInstances().length, 1);
     await second.stop();
     assert.equal(first.isShared, false);
   } finally {

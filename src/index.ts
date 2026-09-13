@@ -433,8 +433,16 @@ function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string 
           await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
           return;
         }
+        let liveInstances: ReturnType<ChromeBridgeServer['listInstances']>;
+        try {
+          liveInstances = server.listInstances();
+        } catch (error) {
+          // Shared-mode instance owns nothing: fail closed directing to the owner process.
+          await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
+          return;
+        }
         const check = selectChromeCompanion({
-          instances: server.listInstances(),
+          instances: liveInstances,
           osDefault: detectChromeOsDefault(),
           ...(familyArg !== undefined ? { explicitFamily: familyArg } : {}),
           ...(ctx.hasUI ? {} : { headless: true as const }),
