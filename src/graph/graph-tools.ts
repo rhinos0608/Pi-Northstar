@@ -108,7 +108,6 @@ export async function callGraphTool(
 ): Promise<BackendCallResult> {
   const env = options.env ?? process.env;
   const normalized: Record<string, unknown> = { ...args };
-  if (normalized.action === undefined) normalized.action = 'search';
   if (normalized.language === undefined) normalized.language = 'dql';
   const validated = validateGraphRequest(normalized);
   if (!validated.ok) {
