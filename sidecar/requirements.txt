@@ -1,3 +1,20 @@
-fastapi>=0.115.0
-uvicorn>=0.32.0
-sentence-transformers>=3.3.0
+# Pinned known-good set, verified together on Python 3.11 (macOS arm64, torch CPU-only
+# build: torch.backends.cuda.is_built() == False). Re-verify with a pip dry-run after
+# any bump; see the sidecar-ci job in .github/workflows/ci.yml for the real-stack smoke test.
+#
+# Policy: exact `==` pins for everything here. No lower-bound flexibility — a silent
+# torch / sentence-transformers / numpy drift previously shipped a materially different
+# runtime with no CI signal. Bump pins deliberately, then update this header.
+#
+# Torch CPU note: on Linux the default PyPI torch wheel bundles CUDA (~GBs, slow CI).
+# The CPU index below makes the small CPU-only wheel available; CI installs torch from
+# it first (pip then sees the pin as satisfied and skips the CUDA wheel).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi==0.135.1
+uvicorn==0.41.0
+sentence-transformers==5.2.3
+torch==2.13.0
+pydantic==2.12.3
+numpy==2.3.5
+scipy==1.17.0

@@ -1,5 +1,5 @@
-import { CliSearchBackend } from './cli-backend.js';
-import { buildServerParameters, SearchMcpClient, type SearchMcpEnvironment } from './mcp-client.js';
+import { CliSearchBackend } from './cli/cli-backend.js';
+import { buildServerParameters, SearchMcpClient, type SearchMcpEnvironment } from './process/mcp-client.js';
 
 export interface BackendCallOptions {
   signal?: AbortSignal;

@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { callNativeTool } from '../src/native-tools.js';
-import { callReachTool, externalEnvironment } from '../src/reach-tools.js';
-import { writeCookieState } from '../src/cookie-jar.js';
-import { openCliChildEnv } from '../src/social-opencli.js';
+import { callReachTool, externalEnvironment, probeEnvironment } from '../src/reach-tools.js';
+import { cmdTwinBody } from './shim-cmd.js';
+import { writeCookieState } from '../src/chrome/cookie-jar.js';
+import { openCliChildEnv } from '../src/social/social-opencli.js';
 
 const REDDIT_TOKEN = 'https://www.reddit.com/api/v1/access_token';
 const REDDIT_WWW = 'https://www.reddit.com/';
@@ -39,21 +40,9 @@ async function writeShim(dir: string, name: string, body: string): Promise<void>
   await chmod(path, 0o700);
   if (process.platform === 'win32') {
     // Windows CreateProcess skips PATHEXT lookup, so prod resolves bare
-    // commands to their on-disk extension (resolveCliCommand) and spawns
-    // shell:false. Emit a .cmd twin for that resolution to find: env-dump
-    // bodies use `set` (same KEY=value shape; avoids nested-quote breakage
-    // of node -e under cmd.exe), echo bodies print their payload (without
-    // sh single-quotes), then exit with the same code.
-    const dumpMatch = />\s*(\S+)\s*$/.exec(body.split('\n').find((line) => line.includes('>')) ?? '');
-    const payloads = [...body.matchAll(/echo\s+'([^']*)'/g)].map((m) => m[1] ?? '');
-    const exitMatch = /exit\s+(\d+)/.exec(body);
-    const lines = ['@echo off'];
-    if (dumpMatch?.[1]) {
-      lines.push(`set > ${JSON.stringify(dumpMatch[1])}`);
-    }
-    for (const payload of payloads) lines.push(`echo ${payload}`);
-    lines.push(`exit /b ${exitMatch?.[1] ?? '0'}`);
-    await writeFile(`${path}.cmd`, `${lines.join('\r\n')}\r\n`);
+    // commands to their on-disk extension (resolveCliCommand) and runs
+    // .cmd twins via cmd.exe (spawnCliCommand). See test/shim-cmd.ts.
+    await writeFile(`${path}.cmd`, cmdTwinBody(body));
   }
 }
 
@@ -78,6 +67,12 @@ async function withShimmedPath<T>(dir: string, fn: () => Promise<T>): Promise<T>
 }
 
 const FAIL_SHIM = '#!/bin/sh\nexit 127\n';
+
+// POSIX-only: the tests below assert on `/usr/bin/env | /usr/bin/sort` dump
+// shapes (incl. an unescaped `PATH=${dir}` regex that backslash dirs break).
+// win32 runs the .cmd twins (`set` dumps) instead; native win32 transport is
+// covered by test/cli-command-win32-native.test.ts.
+const requiresPosixEnvDump = process.platform === 'win32' ? 'requires POSIX /usr/bin/env dump shape' : false;
 
 // ── Action-aware reach status ──
 
@@ -481,7 +476,7 @@ test('video: legacy bilibili video spelling is unsupported_action', async () => 
   }
 });
 
-test('OPENCLI_* reach only the opencli child; Python CLIs get the sanitized environment', async () => {
+test('OPENCLI_* reach only the opencli child; Python CLIs get the sanitized environment', { skip: requiresPosixEnvDump }, async () => {
   const dir = await withExecutableDir();
   try {
     // twitter-cli (Python) and xhs-cli (Python) both spawn under
@@ -559,6 +554,38 @@ test('probe env is capability-specific per command', () => {
   }
 });
 
+test('probe env strips proxy credentials but keeps the proxy host', () => {
+  const probe = probeEnvironment({
+    PATH: '/x',
+    HTTP_PROXY: 'http://user:pass@proxy.example:8080',
+    HTTPS_PROXY: 'https://proxy.example:8443',
+    NO_PROXY: 'localhost',
+  });
+  assert.match(probe.HTTP_PROXY!, /proxy\.example:8080/);
+  assert.doesNotMatch(probe.HTTP_PROXY!, /user|pass/);
+  assert.equal(probe.HTTPS_PROXY, 'https://proxy.example:8443');
+  assert.equal(probe.NO_PROXY, 'localhost');
+  assert.doesNotMatch(JSON.stringify(probe), /pass/);
+});
+
+test('probe env carries no credentials for any command (cookie/token hygiene)', () => {
+  const parent = {
+    PATH: '/x', HOME: '/h',
+    OPENCLI_HOST: 'cli.example', OPENCLI_PORT: '9222', OPENCLI_TOKEN: 'opencli-secret',
+    GITHUB_TOKEN: 'github-secret', BRAVE_API_KEY: 'brave-secret', TAVILY_API_KEY: 'tavily-secret',
+    REDDIT_COOKIE: 'cookie-secret', TWITTER_AUTH_TOKEN: 'tw-secret',
+  };
+  const probe = probeEnvironment(parent);
+  assert.equal(probe.PATH, '/x');
+  assert.equal(probe.HOME, '/h');
+  for (const key of ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN', 'GITHUB_TOKEN', 'BRAVE_API_KEY', 'TAVILY_API_KEY', 'REDDIT_COOKIE', 'TWITTER_AUTH_TOKEN']) {
+    assert.equal(probe[key], undefined, `probe env must not carry ${key}`);
+  }
+  assert.doesNotMatch(JSON.stringify(probe), /secret/);
+  // Execution env still carries the command's own credentials (split, not removal).
+  assert.equal(externalEnvironment('opencli', parent).OPENCLI_TOKEN, 'opencli-secret');
+});
+
 // ── Stage 3 media routing: keyed-only search/hot, legacy rejection, env isolation, transcripts ──
 
 test('youtube search/hot without key fail closed (never scrape)', async () => {
@@ -614,7 +641,7 @@ test('video: bilibili search normalizes payloads with no raw stdout passthrough'
   }
 });
 
-test('video: bilibili child env is sanitized (no OPENCLI_*, no secrets)', async () => {
+test('video: bilibili child env is sanitized (no OPENCLI_*, no secrets)', { skip: requiresPosixEnvDump }, async () => {
   const dir = await withExecutableDir();
   try {
     await writeShim(dir, 'bili', `#!/bin/sh\n/usr/bin/env | /usr/bin/sort > ${join(dir, 'bili.env')}\necho '{"items":[]}'\n`);

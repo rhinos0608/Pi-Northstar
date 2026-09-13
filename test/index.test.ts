@@ -98,8 +98,8 @@ test('buildMediaRoute includes optional fields in video params', () => {
   assert.equal(route.args.limit, 1);
 });
 
-test('buildFetchRoute no-query requires url', () => {
-  assert.throws(() => buildFetchRoute({}), /url is required when query is omitted/);
+test('buildFetchRoute empty params throw discriminator error', () => {
+  assert.throws(() => buildFetchRoute({} as never), /fetch requires exactly one of: url, urls, source/);
 });
 
 test('buildFetchRoute no-query routes to agentic_browse with maxChars default', () => {
@@ -116,8 +116,8 @@ test('buildFetchRoute no-query honors maxChars override', () => {
   assert.equal(route.args.maxChars, 5000);
 });
 
-test('buildFetchRoute with query routes to semantic_crawl with old defaults', () => {
-  const route = buildFetchRoute({ query: 'test query', searchQuery: 'test' });
+test('buildFetchRoute crawl_search routes to semantic_crawl with defaults', () => {
+  const route = buildFetchRoute({ source: { type: 'search', searchQuery: 'test' }, query: 'test query' });
   assert.equal(route.tool, 'semantic_crawl');
   assert.equal(route.args.query, 'test query');
   assert.equal((route.args.source as { query: string }).query, 'test');
@@ -127,8 +127,8 @@ test('buildFetchRoute with query routes to semantic_crawl with old defaults', ()
   assert.equal(route.timeout, 300_000);
 });
 
-test('buildFetchRoute with query and url sets maxDepth 1', () => {
-  const route = buildFetchRoute({ query: 'test query', url: 'https://example.com/page' });
+test('buildFetchRoute crawl_url sets maxDepth 1', () => {
+  const route = buildFetchRoute({ source: { type: 'url', url: 'https://example.com/page' }, query: 'test query' });
   assert.equal((route.args.source as { type: string }).type, 'url');
   assert.equal(route.args.maxDepth, 1);
 });
@@ -145,18 +145,10 @@ test('buildFetchRoute siteMap without query or maxPages passes through', () => {
   assert.deepEqual(route.args, { url: 'https://example.com/docs/', siteMap: true });
 });
 
-test('buildFetchRoute siteMap rejects missing url, combos, and non-boolean', () => {
-  assert.throws(() => buildFetchRoute({ siteMap: true }), /url is required with siteMap/);
-  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, searchQuery: 'x' }), /searchQuery is not supported with siteMap/);
-  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, followLinks: true, query: 'x' }), /followLinks is not supported with siteMap/);
-  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, topK: 5 }), /topK is not supported with siteMap/);
-  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: true, maxChars: 500 }), /maxChars is not supported with siteMap/);
-  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: 'yes' as unknown as boolean }), /siteMap must be a boolean/);
-});
-
-test('buildFetchRoute siteMap:false follows the normal read path', () => {
-  const route = buildFetchRoute({ url: 'https://example.com/page', siteMap: false });
-  assert.equal(route.tool, 'agentic_browse');
+test('buildFetchRoute siteMap rejects missing url and non-true marker', () => {
+  assert.throws(() => buildFetchRoute({ siteMap: true } as never), /sitemap requires url/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: 'yes' as unknown as true }), /siteMap must be true/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/page', siteMap: false as unknown as true }), /siteMap must be true/);
 });
 
 test('buildSearchRoute research category routes to research backend', () => {
@@ -230,12 +222,12 @@ test('buildMediaRoute handles empty params object', () => {
   assert.equal(route.timeout, 300_000);
 });
 
-test('buildFetchRoute blank query behaves as no-query mode', () => {
-  assert.throws(() => buildFetchRoute({ query: '   ' }), /url is required when query is omitted/);
+test('buildFetchRoute query without url/source/urls throws', () => {
+  assert.throws(() => buildFetchRoute({ query: '   ' } as never), /fetch requires exactly one of: url, urls, source/);
 });
 
-test('buildFetchRoute whitespace-only query routes to agentic_browse', () => {
-  const route = buildFetchRoute({ query: '   ', url: 'https://example.com/page' });
+test('buildFetchRoute read ignores no extra fields', () => {
+  const route = buildFetchRoute({ url: 'https://example.com/page' });
   assert.equal(route.tool, 'agentic_browse');
   assert.equal(route.args.url, 'https://example.com/page');
   assert.equal(route.args.action, 'read');
@@ -243,8 +235,10 @@ test('buildFetchRoute whitespace-only query routes to agentic_browse', () => {
   assert.equal(route.timeout, 120_000);
 });
 
-test('buildSearchRoute non-research route omits source but forwards yearFrom', () => {
-  const route = buildSearchRoute({ query: 'test', category: 'news', source: 'arxiv', yearFrom: 2020 });
+test('buildSearchRoute rejects source without research category', () => {
+  assert.throws(() => buildSearchRoute({ query: 'test', category: 'news', source: 'arxiv' }), /source requires category "research"/);
+  assert.throws(() => buildSearchRoute({ query: 'test', source: 'arxiv' }), /source requires category "research"/);
+  const route = buildSearchRoute({ query: 'test', category: 'news', yearFrom: 2020 });
   assert.equal(route.tool, 'web_search');
   assert.equal(route.args.source, undefined);
   assert.equal(route.args.yearFrom, 2020);
@@ -256,22 +250,8 @@ test('buildSearchRoute research paper category routes to web_search', () => {
   assert.equal(route.args.category, 'research paper');
 });
 
-test('buildFetchRoute followLinks without url throws', () => {
-  assert.throws(
-    () => buildFetchRoute({ followLinks: true, query: 'docs' }),
-    /followLinks requires url/,
-  );
-});
-
-test('buildFetchRoute followLinks without query throws', () => {
-  assert.throws(
-    () => buildFetchRoute({ followLinks: true, url: 'https://example.com' }),
-    /followLinks requires a query/,
-  );
-});
-
-test('buildFetchRoute followLinks routes to semantic_crawl with maxDepth 3', () => {
-  const route = buildFetchRoute({ followLinks: true, url: 'https://example.com', query: 'docs' });
+test('buildFetchRoute source followLinks routes to semantic_crawl with maxDepth 3', () => {
+  const route = buildFetchRoute({ source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs' });
   assert.equal(route.tool, 'semantic_crawl');
   assert.equal(route.args.followLinks, true);
   assert.equal(route.args.maxDepth, 3);
@@ -281,14 +261,21 @@ test('buildFetchRoute followLinks routes to semantic_crawl with maxDepth 3', () 
   assert.equal(route.timeout, 300_000);
 });
 
+test('buildFetchRoute unknown source type throws', () => {
+  assert.throws(
+    () => buildFetchRoute({ source: { type: 'feed' }, query: 'docs' } as never),
+    /source type must be one of: url, search/,
+  );
+});
+
 test('buildFetchRoute passes maxChars to semantic_crawl on crawl paths', () => {
-  const queryRoute = buildFetchRoute({ query: 'docs', searchQuery: 'topic', maxChars: 5000 });
+  const queryRoute = buildFetchRoute({ source: { type: 'search', searchQuery: 'topic' }, query: 'docs', maxChars: 5000 });
   assert.equal(queryRoute.tool, 'semantic_crawl');
   assert.equal(queryRoute.args.maxChars, 5000);
-  const followRoute = buildFetchRoute({ followLinks: true, url: 'https://example.com', query: 'docs', maxChars: 5000 });
+  const followRoute = buildFetchRoute({ source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs', maxChars: 5000 });
   assert.equal(followRoute.tool, 'semantic_crawl');
   assert.equal(followRoute.args.maxChars, 5000);
-  const defaultRoute = buildFetchRoute({ query: 'docs', searchQuery: 'topic' });
+  const defaultRoute = buildFetchRoute({ source: { type: 'search', searchQuery: 'topic' }, query: 'docs' });
   assert.equal(defaultRoute.args.maxChars, undefined);
 });
 
@@ -311,22 +298,55 @@ test('web_search schema leaves limit cap to per-category runtime validation', as
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
   }
   assert.ok(captured, 'web_search tool must be registered');
-  const props = (captured!.parameters as { properties: Record<string, { maximum?: number; minimum?: number }> }).properties;
+  const branches = (captured!.parameters as { anyOf: Array<{ properties: Record<string, { maximum?: number; minimum?: number }> }> }).anyOf;
   // No static maximum: research 21-30 is reachable; per-category runtime
   // caps (20 web, 30 research) reject via validateWebRequest.
-  assert.equal(props.limit?.maximum, undefined, 'web_search limit schema must not impose a static 20 cap');
-  assert.equal(props.limit?.minimum, 1);
+  assert.equal(branches.length, 3, 'web_search schema must carry single/batch/agent branches');
+  for (const branch of branches) {
+    assert.equal(branch.properties.limit?.maximum, undefined, 'web_search limit schema must not impose a static 20 cap');
+    assert.equal(branch.properties.limit?.minimum, 1);
+  }
 });
 
-test('buildFetchRoute without followLinks behaves as before', () => {
-  const route = buildFetchRoute({ url: 'https://example.com', query: 'test' });
+test('buildFetchRoute crawl_url without followLinks sets maxDepth 1', () => {
+  const route = buildFetchRoute({ source: { type: 'url', url: 'https://example.com' }, query: 'test' });
   assert.equal(route.tool, 'semantic_crawl');
   assert.equal(route.args.followLinks, undefined);
   assert.equal(route.args.maxDepth, 1);
 });
 
-test('buildFetchRoute no-followLinks no-query still requires url', () => {
-  assert.throws(() => buildFetchRoute({}), /url is required when query is omitted/);
+test('buildFetchRoute empty params throw discriminator error', () => {
+  assert.throws(() => buildFetchRoute({} as never), /fetch requires exactly one of: url, urls, source/);
+});
+
+test('buildFetchRoute rejects unknown action and cross-branch markers', () => {
+  assert.throws(
+    () => buildFetchRoute({ action: 'read', responseId: 'r1' } as never),
+    /action must be one of: retrieve, source_check/,
+  );
+  assert.throws(
+    () => buildFetchRoute({ url: 'https://example.com', siteMap: false } as never),
+    /siteMap must be true/,
+  );
+});
+
+test('buildSearchRoute rejects blank, overlong, and unpinned research cursors', () => {
+  assert.throws(
+    () => buildSearchRoute({ query: 'NLP', category: 'research', source: 'arxiv', cursor: '   ' }),
+    /cursor must be a non-empty string/,
+  );
+  assert.throws(
+    () => buildSearchRoute({ query: 'NLP', category: 'research', source: 'arxiv', cursor: 'x'.repeat(4097) }),
+    /cursor exceeds maximum length/,
+  );
+  assert.throws(
+    () => buildSearchRoute({ query: 'NLP', category: 'research', cursor: 'opaque-token' }),
+    /one exact research source/,
+  );
+  assert.throws(
+    () => buildSearchRoute({ query: 'NLP', category: 'research', source: 'all', cursor: 'opaque-token' }),
+    /one exact research source/,
+  );
 });
 
 
@@ -658,14 +678,16 @@ test('reachStatusCommandArgs rejects more than two arguments', () => {
 
 // ── kg tool registration (lowercase, action-aware, portable intent) ──
 
-async function captureAllTools(): Promise<Record<string, { description: string | undefined; parameters: Record<string, unknown> }>> {
-  const defs: Record<string, { description: string | undefined; parameters: Record<string, unknown> }> = {};
+async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Promise<Record<string, { description: string | undefined; promptSnippet: string | undefined; parameters: Record<string, unknown> }>> {
+  const defs: Record<string, { description: string | undefined; promptSnippet: string | undefined; parameters: Record<string, unknown> }> = {};
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  const previousDiffbotToken = process.env.DIFFBOT_TOKEN;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
+  process.env.DIFFBOT_TOKEN = diffbotToken;
   const pi = {
     on: () => {},
-    registerTool: (def: { name: string; description?: string; parameters: unknown }) => {
-      defs[def.name as string] = { description: def.description, parameters: def.parameters as Record<string, unknown> };
+    registerTool: (def: { name: string; description?: string; promptSnippet?: string; parameters: unknown }) => {
+      defs[def.name as string] = { description: def.description, promptSnippet: def.promptSnippet, parameters: def.parameters as Record<string, unknown> };
     },
     registerCommand: () => {},
   };
@@ -675,6 +697,8 @@ async function captureAllTools(): Promise<Record<string, { description: string |
   } finally {
     if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+    if (previousDiffbotToken === undefined) delete process.env.DIFFBOT_TOKEN;
+    else process.env.DIFFBOT_TOKEN = previousDiffbotToken;
   }
   return defs;
 }
@@ -700,10 +724,14 @@ test('kg description requires user authorization before sensitive text submissio
 
 test('web_search exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
   const defs = await captureAllTools();
-  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom']);
-  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), ['action', 'claims', 'findText', 'followLinks', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'searchQuery', 'siteMap', 'sourceIds', 'topK', 'url', 'urls']);
-  const knowledge = (defs.web_search!.parameters.properties as Record<string, { properties?: Record<string, unknown> }>).knowledge;
-  assert.deepEqual(Object.keys(knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
+  const webBranches = (defs.web_search!.parameters as { anyOf: Array<{ properties?: Record<string, { properties?: Record<string, unknown> }> }> }).anyOf;
+  assert.equal(webBranches.length, 3, 'web_search schema must carry single/batch/agent branches');
+  const withKnowledge = webBranches.filter((branch) => 'knowledge' in (branch.properties ?? {}));
+  assert.equal(withKnowledge.length, 2, 'single and batch branches carry knowledge; agent does not');
+  for (const branch of withKnowledge) {
+    assert.deepEqual(Object.keys(branch.properties!.knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
+  }
+  assert.equal((defs.fetch!.parameters as { anyOf?: unknown[] }).anyOf?.length, 8);
 });
 
 test('buildSearchRoute preserves knowledge on non-research route', () => {
@@ -754,7 +782,7 @@ test('buildSearchRoute rejects invalid knowledge via contract validation', () =>
 
 test('tool_result hook adds a fresh outer fence over pre-wrapped kg text', async () => {
   const handlers = await captureHooks();
-  const { wrapUntrustedText } = await import('../src/untrusted-content.js');
+  const { wrapUntrustedText } = await import('../src/core/untrusted-content.js');
   const once = wrapUntrustedText('entity data', { source: 'kg' });
   const result = handlers.tool_result!({
     toolName: 'kg',
@@ -807,19 +835,43 @@ test('guidance: web_search marks research-only params and honors yearFrom on pla
   const description = defs.web_search?.description ?? '';
   assert.ok(/No provider selection input/i.test(description), 'web_search description must forbid provider selection input');
   assert.ok(/queries\[1\.\.8\]/i.test(description), 'web_search description must document the batch selector');
-  const props = defs.web_search!.parameters.properties as Record<string, { description?: string }>;
-  assert.ok(/research-only/i.test(props.source?.description ?? ''), 'source param must say research-only');
-  assert.ok(/research-only/i.test(props.cursor?.description ?? ''), 'cursor param must say research-only');
-  assert.ok(/intersects with recency/i.test(props.yearFrom?.description ?? ''), 'yearFrom param must document the recency intersect');
-  assert.ok(!/ignored on plain/i.test(props.yearFrom?.description ?? ''), 'yearFrom must no longer claim plain-search ignore');
+  const snippet = defs.web_search?.promptSnippet ?? '';
+  assert.ok(/single \{query\}/i.test(snippet), 'web_search promptSnippet must document the single branch');
+  assert.ok(/batch \{queries\[1\.\.8\]\}/i.test(snippet), 'web_search promptSnippet must document the batch branch');
+  assert.ok(/agent \{query, mode/i.test(snippet), 'web_search promptSnippet must document the agent branch');
+  assert.ok(/cursor needs category "research"/i.test(snippet), 'web_search promptSnippet must keep cursor field constraints');
+  const params = defs.web_search!.parameters as { anyOf?: Array<{ description?: string; properties?: Record<string, { description?: string }> }> };
+  assert.equal(params.anyOf?.length, 3, 'web_search schema must carry exactly 3 branches (single/batch/agent)');
+  const branchKeys = params.anyOf!.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+'));
+  assert.ok(branchKeys.some((keys) => keys.includes('query') && !keys.includes('queries')), 'single branch must carry query without queries');
+  assert.ok(branchKeys.some((keys) => keys.includes('queries')), 'batch branch must carry queries');
+  assert.ok(branchKeys.some((keys) => keys.includes('mode')), 'agent branch must carry mode');
+  const single = params.anyOf!.find((branch) => 'cursor' in (branch.properties ?? {}));
+  assert.ok(/research-only/i.test(single?.properties?.source?.description ?? ''), 'source param must say research-only');
+  assert.ok(/research-only/i.test(single?.properties?.cursor?.description ?? ''), 'cursor param must say research-only');
+  assert.ok(/intersects with recency/i.test(single?.properties?.yearFrom?.description ?? ''), 'yearFrom param must document the recency intersect');
+  assert.ok(!/ignored on plain/i.test(single?.properties?.yearFrom?.description ?? ''), 'yearFrom must no longer claim plain-search ignore');
+  const agent = params.anyOf!.find((branch) => 'mode' in (branch.properties ?? {}));
+  assert.ok(!('cursor' in (agent?.properties ?? {})), 'agent branch must not carry cursor');
+  assert.ok(!('source' in (agent?.properties ?? {})), 'agent branch must not carry source');
+  assert.ok(!('knowledge' in (agent?.properties ?? {})), 'agent branch must not carry knowledge');
+  assert.ok(!('queries' in (agent?.properties ?? {})), 'agent branch must not carry batch queries');
 });
 
-test('guidance: fetch states url/searchQuery requirement', async () => {
+test('guidance: fetch states discriminated branches', async () => {
   const defs = await captureAllTools();
   const description = defs.fetch?.description ?? '';
-  assert.ok(/url or searchQuery/i.test(description), 'fetch description must state url/searchQuery requirement');
-  const props = defs.fetch!.parameters.properties as Record<string, { description?: string }>;
-  assert.ok(/no default/i.test(props.searchQuery?.description ?? ''), 'searchQuery must say no default');
+  assert.ok(/8 branches/i.test(description), 'fetch description must state the 8-branch surface');
+  assert.ok(/batch_read/i.test(description), 'fetch description must name batch_read');
+  assert.ok(/batch_crawl/i.test(description), 'fetch description must name batch_crawl');
+  assert.ok(/readable text per URL/i.test(description), 'batch_read must say full readable text per URL');
+  assert.ok(/ranked chunks per URL/i.test(description), 'batch_crawl must say ranked chunks per URL');
+  const params = defs.fetch!.parameters as { anyOf?: Array<{ description?: string; properties?: Record<string, unknown> }> };
+  assert.equal(params.anyOf?.length, 8, 'fetch schema must carry exactly 8 branches');
+  const branchKeys = params.anyOf!.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+'));
+  assert.ok(branchKeys.includes('maxChars+url'), 'read branch must be url+maxChars');
+  assert.ok(branchKeys.some((keys) => keys.includes('siteMap')), 'sitemap branch must carry the siteMap marker');
+  assert.ok(branchKeys.some((keys) => keys.includes('claims')), 'source_check branch must carry claims');
 });
 
 test('guidance: social limit clamps with warning', async () => {
@@ -882,14 +934,16 @@ test('graph description states native language, provenance, probe countability, 
 });
 
 const EXPECTED_KG_SCHEMA_KEYS = ['action', 'confidenceThreshold', 'cursor', 'description', 'email', 'employer', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'fields', 'id', 'includeEvidence', 'includeRelationships', 'language', 'limit', 'location', 'maxEntities', 'maxProviders', 'name', 'phone', 'providers', 'query', 'school', 'text', 'title', 'type', 'url'];
-const EXPECTED_WEB_SEARCH_SCHEMA_KEYS = ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom'];
-const EXPECTED_FETCH_SCHEMA_KEYS = ['action', 'claims', 'findText', 'followLinks', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'searchQuery', 'siteMap', 'sourceIds', 'topK', 'url', 'urls'];
+const EXPECTED_WEB_SEARCH_BRANCH_KEYS = ['category+cursor+domains+includeContent+knowledge+limit+query+recency+source+yearFrom', 'category+domains+includeContent+knowledge+limit+queries+recency+source+yearFrom', 'category+domains+includeContent+limit+mode+query+recency+yearFrom'];
+const EXPECTED_FETCH_BRANCH_KEYS = ['maxChars+url', 'maxChars+maxPages+query+source+topK', 'maxChars+maxPages+query+source+topK', 'maxChars+urls', 'maxChars+maxPages+query+topK+urls', 'maxPages+query+siteMap+url', 'action+findText+limit+offset+responseId+sourceIds', 'action+claims+responseId+sourceIds'];
 
 test('graph registration leaves kg, web_search, and fetch schemas unchanged', async () => {
   const defs = await captureAllTools();
   assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), EXPECTED_KG_SCHEMA_KEYS);
-  assert.deepEqual(Object.keys(defs.web_search!.parameters.properties as object).sort(), EXPECTED_WEB_SEARCH_SCHEMA_KEYS);
-  assert.deepEqual(Object.keys(defs.fetch!.parameters.properties as object).sort(), EXPECTED_FETCH_SCHEMA_KEYS);
+  const webParams = defs.web_search!.parameters as { anyOf?: Array<{ properties?: Record<string, unknown> }> };
+  assert.deepEqual(webParams.anyOf?.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+')).sort(), EXPECTED_WEB_SEARCH_BRANCH_KEYS.sort());
+  const fetchParams = defs.fetch!.parameters as { anyOf?: Array<{ properties?: Record<string, unknown> }> };
+  assert.deepEqual(fetchParams.anyOf?.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+')).sort(), EXPECTED_FETCH_BRANCH_KEYS.sort());
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
   assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');

@@ -26,3 +26,68 @@ jobs:
         # glob expansion unexpanded (pwsh/cmd would split or expand it).
         shell: bash
       - run: npm pack --dry-run --json
+
+  sidecar-ci:
+    # Real Torch/SentenceTransformers stack: guards sidecar/requirements.lock pins
+    # against silent runtime drift. CPU-only, time-bounded. Linux only — the
+    # default-PyPI torch wheel bundles CUDA; the CPU index below makes the small
+    # CPU-only wheel available and the lock installs with --require-hashes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: sidecar/requirements.lock
+      - run: pip install --upgrade pip
+      - run: pip install "torch==2.13.0" --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install --require-hashes -r sidecar/requirements.lock
+      - run: python -c "import torch, sentence_transformers; print('torch', torch.__version__); print('st', sentence_transformers.__version__)"
+      - name: Boot sidecar and hit one embed request
+        run: |
+          python sidecar/app.py --port 8765 --device cpu &
+          SIDECAR_PID=$!
+          trap 'kill $SIDECAR_PID' EXIT
+          for i in $(seq 1 60); do
+            STATUS=$(python -c "import json,urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:8765/v1/health', timeout=5)).get('status',''))" 2>/dev/null || true)
+            [ "$STATUS" = "ok" ] && break
+            sleep 10
+          done
+          [ "$STATUS" = "ok" ] || { echo "sidecar never reached status ok (last: $STATUS)"; exit 1; }
+          python - <<'EOF'
+          import json, urllib.request
+          body = json.dumps({"input": "sidecar ci smoke test"}).encode()
+          req = urllib.request.Request('http://127.0.0.1:8765/v1/embeddings', data=body,
+                                        headers={'Content-Type': 'application/json'})
+          res = json.load(urllib.request.urlopen(req, timeout=120))
+          vec = res['data'][0]['embedding']
+          assert isinstance(vec, list) and len(vec) > 0, res
+          print(f"embed ok: dims={len(vec)}")
+          EOF
+
+  pack-smoke:
+    # Supply-chain smoke: pack the real tarball, install it into an empty
+    # directory, and invoke the packaged CLI (offline-safe commands only:
+    # status/config touch no network).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm pack --json
+      - name: Install tarball into empty directory and invoke packaged CLI
+        run: |
+          set -euo pipefail
+          TARBALL="$GITHUB_WORKSPACE/$(ls -t pi-northstar-*.tgz | head -1)"
+          mkdir -p /tmp/pack-smoke
+          cd /tmp/pack-smoke
+          rm -rf node_modules package.json package-lock.json
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$TARBALL"
+          ./node_modules/.bin/pi-northstar status
+          ./node_modules/.bin/pi-northstar config
+        shell: bash

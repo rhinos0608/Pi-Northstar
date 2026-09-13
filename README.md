@@ -32,7 +32,20 @@ Each public tool validates input, calls into the shared services above, and shap
 | `media` | YouTube (official Data API for search/details/hot; keyless unofficial transcript) and Bilibili search, metadata, details, and subtitles. RSS/Atom feed reading. |
 | `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. While `/chrome authorize` grants are live, the same `browser` tool routes allowlisted actions to the user-Chromium companion over the pinned bridge (`PI_SEARCH_CHROME_EXTENSION_ID`, 127.0.0.1:17319); revoke/expiry returns to the isolated backend. |
 | `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
-| `graph` | Native graph access: `query` executes DQL with provider-faithful JSON plus shape (`rows`/`facets`/`aggregate`/`scalar`/`object`); `probe` checks cardinality of countable queries; `schema` discovers ontology types/fields (24-hour cache, stale fallback marked `partial`). |
+| `graph` | Native graph access: `query` executes DQL with provider-faithful JSON plus shape (`rows`/`facets`/`aggregate`/`scalar`/`object`); `probe` checks cardinality of countable queries; `schema` discovers ontology types/fields (24-hour cache, stale fallback marked `partial`). DIFFBOT-gated (see below). |
+
+### Knowledge graph tools (DIFFBOT_TOKEN-gated)
+
+`kg` and `graph` enter model context only when `DIFFBOT_TOKEN` is set — without it their schemas are absent (not erroring stubs). Auth resolution: explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only when all three omit it does runtime fall back to a login-shell lookup, which fails closed and never logs the token. See `.env.example` for spend caps (`DIFFBOT_SEARCH_SIZE`, `DIFFBOT_ENHANCE_SIZE`, `DIFFBOT_FALLBACK_BUDGET`).
+
+```ts
+kg({ action: 'search', language: 'dql', query: 'type:Person name:"Ada Lovelace"' })
+kg({ action: 'enhance', type: 'Organization', name: 'Acme', fields: 'basic' })
+graph({ action: 'query', language: 'dql', query: 'type:Organization name:"Acme"' })
+graph({ action: 'schema', language: 'dql', view: 'types' })
+```
+
+Every paid call spends Diffbot credit; read [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing) before enabling.
 
 ### Research sources (exact-source guarantee)
 

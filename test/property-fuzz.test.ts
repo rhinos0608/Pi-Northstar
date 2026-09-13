@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { normalizeUrl } from '../src/fusion.js';
-import { validateHttpUrl } from '../src/http.js';
+import { normalizeUrl } from '../src/search/fusion.js';
+import { validateHttpUrl } from '../src/core/http.js';
 import {
   buildNorthstarResult,
   decodeResultCursor,
@@ -14,16 +14,16 @@ import {
   decodeGithubCursor,
   encodeGithubCursor,
   githubCursorFingerprint,
-} from '../src/github-contract.js';
+} from '../src/github/github-contract.js';
 import {
   parseChromeBridgeCommand,
   parseChromeBridgeResult,
   parseChromeProfileOperation,
-} from '../src/chrome-profile-contract.js';
+} from '../src/chrome/chrome-profile-contract.js';
 import {
   ChromeBridgeServer,
   parseBridgeInstanceClaim,
-} from '../src/chrome-profile-bridge.js';
+} from '../src/chrome/chrome-profile-bridge.js';
 
 // Deterministic seeded PRNG (mulberry32). No dependencies.
 function mulberry32(seed: number): () => number {

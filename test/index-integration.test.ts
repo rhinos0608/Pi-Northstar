@@ -38,7 +38,7 @@ test('buildSearchRoute rejects query+queries, empty selectors, and multi-query c
   assert.throws(() => buildSearchRoute({}), /requires selector/);
   assert.throws(() => buildSearchRoute({ queries: [] }), /1-8/);
   assert.throws(
-    () => buildSearchRoute({ queries: ['a', 'b'], category: 'research', cursor: 'x' }),
+    () => buildSearchRoute({ queries: ['a', 'b'], category: 'research', source: 'arxiv', cursor: 'x' }),
     /only supported with a single query/,
   );
 });

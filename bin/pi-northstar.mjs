@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const cliPath = join(root, 'src', 'cli.ts');
+const cliPath = join(root, 'src', 'cli', 'cli.ts');
 const tsxLoaderUrl = import.meta.resolve('tsx');
 const child = spawn(process.execPath, ['--import', tsxLoaderUrl, cliPath, ...process.argv.slice(2)], {
   stdio: 'inherit',

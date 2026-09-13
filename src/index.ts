@@ -2,15 +2,15 @@ import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext } from '@ea
 import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { createSearchBackend, resultToText, type SearchBackend } from './backend.js';
-import { normalizeProviderPayload } from './payload.js';
-import { registerGitHubTool } from './github.js';
-import { callSetupTool, ensureFirstStartBootstrap } from './bootstrap.js';
-import { loadSearchMcpEnvironment } from './local-config.js';
-import { PROVIDER_DESCRIPTORS } from './providers.js';
+import { normalizeProviderPayload } from './core/payload.js';
+import { registerGitHubTool } from './github/github.js';
+import { callSetupTool, ensureFirstStartBootstrap } from './setup/bootstrap.js';
+import { loadSearchMcpEnvironment } from './setup/local-config.js';
+import { PROVIDER_DESCRIPTORS } from './setup/providers.js';
 import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, researchSourceIds, socialPlatforms as registrySocialPlatforms } from './capabilities.js';
-import { guardText } from './tool-output.js';
-import { isExternalToolName, wrapUntrustedText } from './untrusted-content.js';
-import { DesktopService } from './desktop-tools.js';
+import { guardText } from './core/tool-output.js';
+import { isExternalToolName, wrapUntrustedText } from './core/untrusted-content.js';
+import { DesktopService } from './desktop/desktop-tools.js';
 import { spawnSync } from 'node:child_process';
 import {
   browserToolConfigured,
@@ -20,10 +20,10 @@ import {
   renewUserChromeLeaseIfDue,
   revokeUserChrome,
   userChromeStatus,
-} from './browser-tools.js';
-import { ChromeBridgeServer, type ChromeBridgeInstanceInfo } from './chrome-profile-bridge.js';
-import { setProcessLocalBridgeToken } from './chrome-profile-adapter.js';
-import { selectBridgeCompanion, type SelectionResult } from './chrome-companion-selection.js';
+} from './browser/browser-tools.js';
+import { ChromeBridgeServer, type ChromeBridgeInstanceInfo } from './chrome/chrome-profile-bridge.js';
+import { setProcessLocalBridgeToken } from './chrome/chrome-profile-adapter.js';
+import { selectBridgeCompanion, type SelectionResult } from './chrome/chrome-companion-selection.js';
 import {
   buildOsQueryEnv,
   detectOsDefault,
@@ -31,13 +31,14 @@ import {
   OS_DEFAULT_TIMEOUT_MS,
   type ChromiumFamily,
   type OsDefaultFamily,
-} from './chrome-os-default.js';
-import { chromeTtlMsForSpec, parseChromeAuthorizeArg } from './chrome-profile-auth.js';
-import { DEFAULT_WEB_READ_MAX_CHARS, validateWebRequest } from './web-contract.js';
-import { DEFAULT_WEB_AGENT_TIMEOUT_MS } from './web-agent-report.js';
-import { DESKTOP_ACTIONS } from './desktop-contract.js';
-import { desktopEnabled } from './desktop-policy.js';
-import { BROWSER_ACTIONS } from './browser-policy.js';
+} from './chrome/chrome-os-default.js';
+import { chromeTtlMsForSpec, parseChromeAuthorizeArg } from './chrome/chrome-profile-auth.js';
+import { buildFetchRoute, type FetchRouteParams } from './web/web-fetch-route.js';
+import { buildSearchRoute, type SearchRouteParams } from './web/web-search-route.js';
+import { diffbotConfigured } from './diffbot/diffbot-search.js';
+import { DESKTOP_ACTIONS } from './desktop/desktop-contract.js';
+import { desktopEnabled } from './desktop/desktop-policy.js';
+import { BROWSER_ACTIONS } from './browser/browser-policy.js';
 
 const searchCategoryNames = [
   'company',
@@ -135,34 +136,62 @@ export default function (pi: ExtensionAPI): void {
     name: 'web_search',
     label: 'Web Search',
     description: 'Broad web discovery before fetch/social/media/kg. Plain search (limit 1-20, default 8) returns normalized article entities. Exactly one of query or queries[1..8]: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional includeContent/recency/domains refine plain search; yearFrom is honored everywhere and intersects with recency (later bound wins). Cursors are single-query research-only. mode:"agent" returns a provider-generated research report as the tool text (untrusted evidence), single query only. Research-only category "research" (limit 1-30, default 12) fans out over exactly 12 academic/public-data sources with no generic-web substitution; source is research-only. No provider selection input: PI_SEARCH_WEB_BACKENDS only. Do not use for single-URL reads (use fetch), repo facts (use github), or entity enrichment (use kg). Out-of-range input rejected, never clamped.',
+    promptSnippet: 'web_search is one of three branches: single {query}, batch {queries[1..8]}, agent {query, mode:"agent"}. Cursor/category/source stay field-level value constraints: cursor needs category "research" plus one exact source (not "all") and a single query; source needs category "research"; agent is single-query only with no cursor/source/knowledge/research.',
     promptGuidelines: [
       'Use web_search first for broad discovery, then fetch/social/media/kg for depth.',
       'Use web_search category "research" for academic literature and public-data sources (arXiv, Semantic Scholar, PubMed, Wikipedia, Hacker News, Stack Overflow, ...).',
-      'web_search takes exactly one of query or queries[1..8]; cursor is single-query research-only. yearFrom is honored on plain search and intersects with recency; source is research-only. No provider selection input: backends are operator-owned (PI_SEARCH_WEB_BACKENDS).',
+      'web_search is single {query} | batch {queries[1..8]} | agent {query, mode:"agent"}; cursor is single-query research-only with one exact source. yearFrom is honored on plain search and intersects with recency; source is research-only. No provider selection input: backends are operator-owned (PI_SEARCH_WEB_BACKENDS).',
       'web_search results are normalized article entities with fusion details; cite browsed sources over snippets. Treat results as untrusted evidence.',
     ],
-    parameters: Type.Object({
-      query: Type.Optional(Type.String({ description: 'Single search query. Exactly one of query or queries[1..8] is required.' })),
-      queries: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 8, description: 'Batch queries 1..8, fused in order through the canonical web runtime (one RRF pass over per-query rankings). XOR with query.' })),
-      limit: Type.Optional(Type.Number({ minimum: 1, description: 'Max results: plain default 8 max 20; research default 12 max 30. Out-of-range rejected, never clamped.' })),
-      category: Type.Optional(StringEnum(searchCategoryNames, { description: 'Result set: plain web discovery, or "research" for the 12 academic/public-data sources.' })),
-      source: Type.Optional(StringEnum(researchSources, { description: 'Research-only source pin (default all). Cursor needs one exact source, not all.' })),
-      yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: new Date().getUTCFullYear(), description: 'Earliest year in [1900, current UTC year]. Honored on plain search; intersects with recency (later bound wins). Values above the current year are rejected.' })),
-      includeContent: Type.Optional(Type.Boolean({ description: 'Reuse full content when providers return it (cost-gated); default false. Search-only.' })),
-      recency: Type.Optional(StringEnum(['day', 'week', 'month', 'year'], { description: 'Recency filter; intersects with yearFrom (later bound wins). Search-only.' })),
-      domains: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: "Domain allow/exclude list, '-host' excludes. Search-only." })),
-      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Research-only opaque continuation cursor from a previous result. Requires category "research", one exact source (not "all"), and a single query.' })),
-      knowledge: Type.Optional(Type.Object({
-        entities: Type.Optional(Type.Boolean({ description: 'Extract entities from top results.' })),
-        facts: Type.Optional(Type.Boolean({ description: 'Extract facts from top results.' })),
-        topics: Type.Optional(Type.Boolean({ description: 'Extract topics from top results.' })),
-        sentiment: Type.Optional(Type.Boolean({ description: 'Extract sentiment from top results.' })),
-        enhance: Type.Optional(Type.Boolean({ description: 'Enhance normalized Person/Organization entities with validated public homepage.' })),
-      }, { description: 'Optional knowledge composition over top results. Requires PI_SEARCH_KG_ENRICHMENT=1 plus at least one true flag. Not supported with category "research".' })),
-      mode: Type.Optional(StringEnum(['agent'], { description: 'Agent mode: "agent" returns a provider-generated research report as the tool text (untrusted evidence); omitted keeps current search behavior.' })),
-    }),
+    parameters: Type.Union([
+      Type.Object({
+        query: Type.String({ minLength: 1, description: 'Single search query.' }),
+        limit: Type.Optional(Type.Number({ minimum: 1, description: 'Max results: plain default 8 max 20; research default 12 max 30. Out-of-range rejected, never clamped.' })),
+        category: Type.Optional(StringEnum(searchCategoryNames, { description: 'Result set: plain web discovery, or "research" for the 12 academic/public-data sources.' })),
+        source: Type.Optional(StringEnum(researchSources, { description: 'Research-only source pin (default all). Cursor needs one exact source, not all.' })),
+        yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: new Date().getUTCFullYear(), description: 'Earliest year in [1900, current UTC year]. Honored on plain search; intersects with recency (later bound wins). Values above the current year are rejected.' })),
+        includeContent: Type.Optional(Type.Boolean({ description: 'Reuse full content when providers return it (cost-gated); default false. Search-only.' })),
+        recency: Type.Optional(StringEnum(['day', 'week', 'month', 'year'], { description: 'Recency filter; intersects with yearFrom (later bound wins). Search-only.' })),
+        domains: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: "Domain allow/exclude list, '-host' excludes. Search-only." })),
+        cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Research-only opaque continuation cursor from a previous result. Requires category "research", one exact source (not "all"), and a single query.' })),
+        knowledge: Type.Optional(Type.Object({
+          entities: Type.Optional(Type.Boolean({ description: 'Extract entities from top results.' })),
+          facts: Type.Optional(Type.Boolean({ description: 'Extract facts from top results.' })),
+          topics: Type.Optional(Type.Boolean({ description: 'Extract topics from top results.' })),
+          sentiment: Type.Optional(Type.Boolean({ description: 'Extract sentiment from top results.' })),
+          enhance: Type.Optional(Type.Boolean({ description: 'Enhance normalized Person/Organization entities with validated public homepage.' })),
+        }, { description: 'Optional knowledge composition over top results. Requires PI_SEARCH_KG_ENRICHMENT=1 plus at least one true flag. Not supported with category "research".' })),
+      }, { description: 'single: one query with plain/research filters, optional cursor and knowledge.' }),
+      Type.Object({
+        queries: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, description: 'Batch queries 1..8, fused in order through the canonical web runtime (one RRF pass over per-query rankings).' }),
+        limit: Type.Optional(Type.Number({ minimum: 1, description: 'Max results: plain default 8 max 20; research default 12 max 30. Out-of-range rejected, never clamped.' })),
+        category: Type.Optional(StringEnum(searchCategoryNames, { description: 'Result set: plain web discovery, or "research" for the 12 academic/public-data sources.' })),
+        source: Type.Optional(StringEnum(researchSources, { description: 'Research-only source pin (default all).' })),
+        yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: new Date().getUTCFullYear(), description: 'Earliest year in [1900, current UTC year]. Honored on plain search; intersects with recency (later bound wins). Values above the current year are rejected.' })),
+        includeContent: Type.Optional(Type.Boolean({ description: 'Reuse full content when providers return it (cost-gated); default false. Search-only.' })),
+        recency: Type.Optional(StringEnum(['day', 'week', 'month', 'year'], { description: 'Recency filter; intersects with yearFrom (later bound wins). Search-only.' })),
+        domains: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: "Domain allow/exclude list, '-host' excludes. Search-only." })),
+        knowledge: Type.Optional(Type.Object({
+          entities: Type.Optional(Type.Boolean({ description: 'Extract entities from top results.' })),
+          facts: Type.Optional(Type.Boolean({ description: 'Extract facts from top results.' })),
+          topics: Type.Optional(Type.Boolean({ description: 'Extract topics from top results.' })),
+          sentiment: Type.Optional(Type.Boolean({ description: 'Extract sentiment from top results.' })),
+          enhance: Type.Optional(Type.Boolean({ description: 'Enhance normalized Person/Organization entities with validated public homepage.' })),
+        }, { description: 'Optional knowledge composition over top results. Requires PI_SEARCH_KG_ENRICHMENT=1 plus at least one true flag. Not supported with category "research".' })),
+      }, { description: 'batch: 1..8 queries fused in order; no cursor (single-query only).' }),
+      Type.Object({
+        query: Type.String({ minLength: 1, description: 'Single agent-report query.' }),
+        mode: Type.Literal('agent', { description: 'Agent mode: returns a provider-generated research report as the tool text (untrusted evidence). Single-query only; no cursor/source/knowledge/research.' }),
+        limit: Type.Optional(Type.Number({ minimum: 1, description: 'Max results: plain default 8 max 20. Out-of-range rejected, never clamped.' })),
+        category: Type.Optional(StringEnum(searchCategoryNames, { description: 'Plain web discovery categories only; "research" rejected with mode "agent".' })),
+        yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: new Date().getUTCFullYear(), description: 'Earliest year in [1900, current UTC year]. Intersects with recency (later bound wins).' })),
+        includeContent: Type.Optional(Type.Boolean({ description: 'Reuse full content when providers return it (cost-gated); default false. Search-only.' })),
+        recency: Type.Optional(StringEnum(['day', 'week', 'month', 'year'], { description: 'Recency filter; intersects with yearFrom (later bound wins). Search-only.' })),
+        domains: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: "Domain allow/exclude list, '-host' excludes. Search-only." })),
+      }, { description: 'agent: single-query provider-generated research report; no queries batch, cursor, source, knowledge, or research category.' }),
+    ]),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const route = buildSearchRoute(params);
+      const route = buildSearchRoute(params as SearchRouteParams);
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
   });
@@ -170,28 +199,68 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Read one URL (no query: full readable text) or crawl for passages (with query: ranked chunks). siteMap:true lists discovered same-origin URLs under url (optional query ranks, maxPages caps). Needs url or searchQuery — query alone discovers nothing and throws without one. Prefer query over full-page reads. followLinks crawls same-domain pages within maxPages. maxChars <= 50000 both paths; topK <= 20, maxPages <= 25. Out-of-range rejected, never clamped. urls[1..8] reads many URLs (readable-only, input order, per-URL isolation); action retrieve/source_check serves cached corpus only, no network.',
-    promptSnippet: 'Fetch URL content — compose with web_search first for URLs, then fetch with url (or searchQuery) plus query for semantic chunks. query alone without url/searchQuery fails. Prefer query over full-page reads. Use followLinks with url + query for same-domain crawls. urls[1..8] for multi-URL reads; action retrieve/source_check for cached responseId corpus (no network).',
-    parameters: Type.Object({
-      query: Type.Optional(Type.String({ description: 'Passage selector. Omit for full readable text of url; with url/searchQuery returns ranked chunks only.' })),
-      url: Type.Optional(Type.String({ description: 'URL to read/crawl. Required when query omitted; one of url/searchQuery required with query.' })),
-      searchQuery: Type.Optional(Type.String({ description: 'Web discovery query when no url known. Required with query unless url given; no default, query alone does not discover.' })),
-      topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Chunks to return, default 8. Crawl paths only.' })),
-      maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Pages to crawl, default 10. Crawl paths only.' })),
-      maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget both paths, default 30000.' })),
-      followLinks: Type.Optional(Type.Boolean({ description: 'Same-domain crawl from url (maxDepth 3, within maxPages). Requires url + query; output always semantically packed.' })),
-      siteMap: Type.Optional(Type.Boolean({ description: 'Sitemap mode: list discovered URLs under url (same origin only). Requires url; optional query ranks URLs, maxPages caps them (default 10, max 25). Rejects searchQuery/followLinks/topK/maxChars.' })),
-      urls: Type.Optional(Type.Array(Type.String(), { maxItems: 8, description: 'URL array (1-8). XOR with url/searchQuery+query for normal fetch.' })),
-      action: Type.Optional(Type.Union([Type.Literal('retrieve'), Type.Literal('source_check')], { description: 'Cached-corpus actions. retrieve requires responseId; source_check requires responseId + claims[1..20]. No network.' })),
-      responseId: Type.Optional(Type.String({ description: 'Cached response id for retrieve/source_check (1h TTL).' })),
-      sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: 'Optional s-<queryIndex>-<hitIndex> source filter.' })),
-      claims: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 20, description: 'source_check claims[1..20].' })),
-      offset: Type.Optional(Type.Number({ minimum: 0, description: 'retrieve offset (ignored when findText present).' })),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'retrieve limit 1..50000 (ignored when findText present).' })),
-      findText: Type.Optional(Type.String({ description: 'retrieve findText wins over offset/limit.' })),
-    }),
+    description: 'Fetch runs one of 8 branches. read {url}: full readable text of one URL. crawl {source, query}: ranked chunks via source {type:url url followLinks?} or {type:search searchQuery}; followLinks crawls same-domain pages (maxDepth 3). batch_read {urls[1..8]}: full readable text per URL in input order with per-URL isolation (no query, no crawl). batch_crawl {urls[1..8], query}: ranked chunks per URL. sitemap {url, siteMap:true}: discovered same-origin URLs (optional query ranks, maxPages caps). retrieve {action:retrieve, responseId}: cached corpus slice only, no network. source_check {action:source_check, responseId, claims[1..20]}: cached claim verification only, no network. maxChars <= 50000; topK <= 20; maxPages <= 25. Out-of-range rejected, never clamped.',
+    promptSnippet: 'Fetch URL content — compose with web_search first for URLs. read needs url only; crawl needs source ({type:url url} or {type:search searchQuery}) plus query for semantic chunks; use source followLinks for same-domain crawls. urls[1..8] without query is batch_read (full text per URL); with query it is batch_crawl (ranked chunks per URL). sitemap needs url + siteMap:true. action retrieve/source_check serve the cached responseId corpus (no network).',
+    parameters: Type.Union([
+      Type.Object({
+        url: Type.String({ minLength: 1, description: 'URL to read as full readable text.' }),
+        maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget, default 30000.' })),
+      }, { description: 'read: full readable text of one URL.' }),
+      Type.Object({
+        source: Type.Object({
+          type: Type.Literal('url'),
+          url: Type.String({ minLength: 1, description: 'Crawl root URL.' }),
+          followLinks: Type.Optional(Type.Boolean({ description: 'Same-domain crawl from url (maxDepth 3, within maxPages).' })),
+        }, { description: 'Crawl seed: explicit url.' }),
+        query: Type.String({ minLength: 1, description: 'Passage selector; crawl returns ranked chunks only.' }),
+        topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Chunks to return, default 8.' })),
+        maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Pages to crawl, default 10.' })),
+        maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget.' })),
+      }, { description: 'crawl_url: ranked chunks from an explicit url seed.' }),
+      Type.Object({
+        source: Type.Object({
+          type: Type.Literal('search'),
+          searchQuery: Type.String({ minLength: 1, description: 'Web discovery query when no url known.' }),
+        }, { description: 'Crawl seed: search discovery.' }),
+        query: Type.String({ minLength: 1, description: 'Passage selector; crawl returns ranked chunks only.' }),
+        topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Chunks to return, default 8.' })),
+        maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Pages to crawl, default 10.' })),
+        maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget.' })),
+      }, { description: 'crawl_search: ranked chunks from a search seed.' }),
+      Type.Object({
+        urls: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, description: 'URL array (1-8) read as full text in input order with per-URL isolation.' }),
+        maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget, default 30000.' })),
+      }, { description: 'batch_read: full readable text per URL (no query, no crawl).' }),
+      Type.Object({
+        urls: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, description: 'URL array (1-8) crawled for ranked chunks per URL.' }),
+        query: Type.String({ minLength: 1, description: 'Passage selector applied per URL.' }),
+        topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Chunks to return per URL, default 8.' })),
+        maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Pages to crawl per URL, default 10.' })),
+        maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget.' })),
+      }, { description: 'batch_crawl: ranked chunks per URL.' }),
+      Type.Object({
+        url: Type.String({ minLength: 1, description: 'Base URL whose same-origin URLs are listed.' }),
+        siteMap: Type.Literal(true, { description: 'Sitemap mode marker.' }),
+        query: Type.Optional(Type.String({ minLength: 1, description: 'Optional query ranking the discovered URLs.' })),
+        maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Cap on listed URLs, default 10.' })),
+      }, { description: 'sitemap: list discovered same-origin URLs under url.' }),
+      Type.Object({
+        action: Type.Literal('retrieve'),
+        responseId: Type.String({ minLength: 1, description: 'Cached response id (1h TTL).' }),
+        sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: 'Optional s-<queryIndex>-<hitIndex> source filter.' })),
+        offset: Type.Optional(Type.Number({ minimum: 0, description: 'Slice offset (ignored when findText present).' })),
+        limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Slice limit 1..50000 (ignored when findText present).' })),
+        findText: Type.Optional(Type.String({ minLength: 1, description: 'findText wins over offset/limit.' })),
+      }, { description: 'retrieve: cached-corpus slice only, no network.' }),
+      Type.Object({
+        action: Type.Literal('source_check'),
+        responseId: Type.String({ minLength: 1, description: 'Cached response id (1h TTL).' }),
+        claims: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20, description: 'Claims to verify [1..20].' }),
+        sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: 'Optional s-<queryIndex>-<hitIndex> source filter.' })),
+      }, { description: 'source_check: cached claim verification only, no network.' }),
+    ]),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const route = buildFetchRoute(params);
+      const route = buildFetchRoute(params as FetchRouteParams);
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
   });
@@ -570,6 +639,10 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     },
   });
 
+  // DIFFBOT-gated tools: kg/graph enter model context only when DIFFBOT_TOKEN
+  // is present (same omit-when-unconfigured pattern as the browser tool below).
+  // Without a token the schemas are absent, not erroring at call time.
+  if (diffbotConfigured(env)) {
   pi.registerTool({
     name: 'kg',
     label: 'Knowledge',
@@ -643,6 +716,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       return callSearchMcpTool(client, 'graph', params, signal, 120_000, env);
     },
   });
+  } // end diffbotConfigured gate: kg/graph absent from context without DIFFBOT_TOKEN
 
   if (!browserToolConfigured(env)) return;
 
@@ -704,7 +778,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       }, { description: 'Batch multiple browser commands. Sensitive-gated; requires PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1. Cannot target loopback URLs.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const { browser } = await import('./browser-tools.js');
+      const { browser } = await import('./browser/browser-tools.js');
       const opts: { signal?: AbortSignal; env?: Record<string, string | undefined> } = { env };
       if (signal) opts.signal = signal;
       const result = await browser(params as Record<string, unknown>, opts);
@@ -720,116 +794,9 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   });
 }
 
-export interface SearchRouteParams {
-  query?: string | undefined;
-  queries?: string[] | undefined;
-  category?: string | undefined;
-  source?: string | undefined;
-  yearFrom?: number | undefined;
-  limit?: number | undefined;
-  cursor?: string | undefined;
-  knowledge?: { entities?: boolean; facts?: boolean; topics?: boolean; sentiment?: boolean; enhance?: boolean } | undefined;
-  mode?: string | undefined;
-  includeContent?: boolean | undefined;
-  recency?: string | undefined;
-  domains?: string[] | undefined;
-}
+export { buildSearchRoute, type SearchRouteParams } from './web/web-search-route.js';
 
-export function buildSearchRoute(params: SearchRouteParams): { tool: string; args: Record<string, unknown>; timeout: number } {
-  if (params.mode === 'agent' && (params.category === 'research' || params.category === 'academic')) {
-    throw new Error(`mode "agent" is not supported with category "${params.category}"`);
-  }
-  if (params.mode === 'agent' && params.knowledge !== undefined) {
-    throw new Error('knowledge is not supported with mode "agent"');
-  }
-  // Knowledge composition is web-only; reject research/academic combinations
-  // before dispatch. Mirrors isResearchCategory in web-contract (not exported;
-  // web-contract must stay untouched) so academic cannot slip to the web route
-  // where web.ts early-returns an empty envelope and silently drops knowledge.
-  if (params.knowledge !== undefined && (params.category === 'research' || params.category === 'academic')) {
-    throw new Error(`knowledge is not supported with category "${params.category}"`);
-  }
-  // Continuation cursors are research-only by contract; reject non-research
-  // cursor use before any dispatch.
-  if (params.cursor !== undefined && params.category !== 'research') {
-    throw new Error('cursor requires category "research"');
-  }
-  // Per-category caps enforced by the web contract: out-of-range limits reject
-  // with invalid_request instead of silently clamping. The contract also owns
-  // XOR query|queries, single-query cursor, and search-only field guards.
-  const contractInput: {
-    action: string;
-    query?: string;
-    queries?: unknown;
-    limit?: number;
-    includeContent?: unknown;
-    recency?: unknown;
-    domains?: unknown;
-    yearFrom?: unknown;
-    category?: string;
-    cursor?: string;
-    knowledge?: unknown;
-    mode?: unknown;
-  } = { action: 'search' };
-  if (params.query !== undefined) contractInput.query = params.query;
-  if (params.queries !== undefined) contractInput.queries = params.queries;
-  if (params.limit !== undefined) contractInput.limit = params.limit;
-  if (params.includeContent !== undefined) contractInput.includeContent = params.includeContent;
-  if (params.recency !== undefined) contractInput.recency = params.recency;
-  if (params.domains !== undefined) contractInput.domains = params.domains;
-  if (params.yearFrom !== undefined) contractInput.yearFrom = params.yearFrom;
-  if (params.category !== undefined) contractInput.category = params.category;
-  // Cursor rides route-level only: the web contract rejects every cursor
-  // (research cursors belong to the research adapters). Single-query only.
-  if (params.cursor !== undefined) {
-    const queryCount = params.queries !== undefined ? params.queries.length : 1;
-    if (queryCount !== 1) throw new Error('cursor is only supported with a single query');
-  }
-  if (params.knowledge !== undefined) contractInput.knowledge = params.knowledge;
-  if (params.mode !== undefined) contractInput.mode = params.mode;
-  if (params.category === 'research') {
-    const { request } = validateWebRequest({ ...contractInput, limit: contractInput.limit ?? 12 });
-    if (request.queries.length !== 1) {
-      throw new Error('queries batch is not supported with category "research": pass a single query');
-    }
-    const single = request.queries[0]!;
-    return {
-      tool: 'research',
-      args: {
-        action: 'academic',
-        query: single,
-        source: params.source ?? 'all',
-        limit: request.limit,
-        ...(request.yearFrom !== undefined ? { yearFrom: request.yearFrom } : {}),
-        ...(params.cursor ? { cursor: params.cursor } : {}),
-      },
-      timeout: 120_000,
-    };
-  }
-  const { request } = validateWebRequest(contractInput);
-  // Agent ceiling shares its source with the report deadline (which clamps
-  // operator values to this same default) so env can never outrun the route.
-  const timeout = request.agentMode ? DEFAULT_WEB_AGENT_TIMEOUT_MS : 120_000;
-  const single = request.queries.length === 1 ? request.queries[0]! : undefined;
-  return {
-    tool: 'web_search',
-    args: {
-      // No provider selection input: backends stay operator-owned
-      // (PI_SEARCH_WEB_BACKENDS). Batch order rides the canonical runtime.
-      ...(single !== undefined ? { query: single } : { queries: [...request.queries] }),
-      limit: request.limit,
-      resultFormat: 'collated',
-      ...(params.category ? { category: params.category } : {}),
-      ...(request.includeContent ? { includeContent: true } : {}),
-      ...(request.recency !== undefined ? { recency: request.recency } : {}),
-      ...(request.domains !== undefined ? { domains: [...request.domains] } : {}),
-      ...(request.yearFrom !== undefined ? { yearFrom: request.yearFrom } : {}),
-      ...(params.knowledge !== undefined ? { knowledge: params.knowledge } : {}),
-      ...(request.agentMode ? { mode: 'agent' } : {}),
-    },
-    timeout,
-  };
-}
+export { buildFetchRoute, buildBrowseArgs, buildSemanticSource, type FetchRouteParams } from './web/web-fetch-route.js';
 
 export function buildMediaRoute(params: { platform?: string; action?: string; url?: string; query?: string; id?: string; limit?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
   if (params.platform === 'rss' || params.action === 'feed') {
@@ -851,103 +818,4 @@ export function buildMediaRoute(params: { platform?: string; action?: string; ur
     args: videoParams,
     timeout: 300_000,
   };
-}
-
-export function buildFetchRoute(params: { query?: string; url?: string; urls?: string[]; searchQuery?: string; topK?: number; maxPages?: number; maxChars?: number; followLinks?: boolean; siteMap?: boolean; action?: string; responseId?: string; sourceIds?: string[]; claims?: string[]; offset?: number; limit?: number; findText?: string }): { tool: string; args: Record<string, unknown>; timeout: number } {
-  if (params.action === 'retrieve' || params.action === 'source_check') {
-    if (params.action === 'retrieve') {
-      if (!params.responseId?.trim()) throw new Error('retrieve requires responseId');
-      if (params.url !== undefined || params.urls !== undefined || params.searchQuery !== undefined || params.query !== undefined || params.topK !== undefined || params.maxPages !== undefined || params.maxChars !== undefined || params.followLinks !== undefined || params.siteMap !== undefined || params.claims !== undefined) throw new Error('retrieve accepts only responseId/sourceIds/offset/limit/findText');
-      return { tool: 'fetch', args: { action: 'retrieve', responseId: params.responseId, ...(params.sourceIds !== undefined ? { sourceIds: params.sourceIds } : {}), ...(params.offset !== undefined ? { offset: params.offset } : {}), ...(params.limit !== undefined ? { limit: params.limit } : {}), ...(params.findText !== undefined ? { findText: params.findText } : {}) }, timeout: 60_000 };
-    }
-    if (!params.responseId?.trim()) throw new Error('source_check requires responseId');
-    if (!Array.isArray(params.claims) || params.claims.length < 1 || params.claims.length > 20) throw new Error('source_check requires claims[1..20]');
-    if (params.url !== undefined || params.urls !== undefined || params.searchQuery !== undefined || params.query !== undefined || params.topK !== undefined || params.maxPages !== undefined || params.maxChars !== undefined || params.followLinks !== undefined || params.siteMap !== undefined || params.offset !== undefined || params.limit !== undefined || params.findText !== undefined) throw new Error('source_check accepts only responseId/claims/sourceIds');
-    return { tool: 'fetch', args: { action: 'source_check', responseId: params.responseId, claims: params.claims, ...(params.sourceIds !== undefined ? { sourceIds: params.sourceIds } : {}) }, timeout: 60_000 };
-  }
-  if (params.action !== undefined) throw new Error('action must be one of: retrieve, source_check (or omitted)');
-  if (params.urls !== undefined) {
-    if (params.url !== undefined || params.searchQuery !== undefined) throw new Error('fetch requires exactly one of: url, urls, or searchQuery+query');
-    if (!Array.isArray(params.urls) || params.urls.length < 1 || params.urls.length > 8) throw new Error('urls must contain 1-8 entries');
-    if (params.followLinks !== undefined || params.siteMap !== undefined) throw new Error('urls array supports readable fetch only (no followLinks/sitemap)');
-    return { tool: 'fetch', args: { urls: params.urls, ...(params.query !== undefined ? { query: params.query } : {}), ...(params.topK !== undefined ? { topK: params.topK } : {}), ...(params.maxPages !== undefined ? { maxPages: params.maxPages } : {}), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }, timeout: 120_000 };
-  }
-  if (params.siteMap !== undefined) {
-    if (typeof params.siteMap !== 'boolean') throw new Error('siteMap must be a boolean');
-    if (params.siteMap) {
-      for (const key of ['searchQuery', 'followLinks', 'topK', 'maxChars'] as const) {
-        if (params[key] !== undefined) throw new Error(`${key} is not supported with siteMap`);
-      }
-      if (!params.url?.trim()) throw new Error('url is required with siteMap');
-      // Route ceiling sits above the fixed 150s Tavily Map provider bound.
-      return {
-        tool: 'fetch',
-        args: {
-          url: params.url.trim(),
-          siteMap: true,
-          ...(params.query !== undefined ? { query: params.query } : {}),
-          ...(params.maxPages !== undefined ? { maxPages: params.maxPages } : {}),
-        },
-        timeout: 180_000,
-      };
-    }
-  }
-  const followLinks = Boolean(params.followLinks);
-
-  if (followLinks) {
-    // followLinks requires both url and query
-    if (!params.url?.trim()) throw new Error('followLinks requires url — specify a crawl root URL');
-    if (!params.query?.trim()) throw new Error('followLinks requires a query — site-wide crawls always return semantically packed results');
-    const source = buildSemanticSource(params.url, undefined);
-    return {
-      tool: 'semantic_crawl',
-      args: {
-        source,
-        query: params.query,
-        topK: params.topK ?? 8,
-        maxPages: params.maxPages ?? 10,
-        ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}),
-        followLinks: true,
-        maxDepth: 3,
-      },
-      timeout: 300_000,
-    };
-  }
-
-  if (!params.query?.trim()) {
-    if (!params.url?.trim()) throw new Error('url is required when query is omitted');
-    return {
-      tool: 'agentic_browse',
-      args: buildBrowseArgs({ url: params.url.trim(), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }),
-      timeout: 120_000,
-    };
-  }
-  const source = buildSemanticSource(params.url, params.searchQuery);
-  return {
-    tool: 'semantic_crawl',
-    args: {
-      source,
-      query: params.query,
-      topK: params.topK ?? 8,
-      maxPages: params.maxPages ?? 10,
-      ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}),
-      maxDepth: source.type === 'url' ? 1 : 0,
-    },
-    timeout: 300_000,
-  };
-}
-
-export function buildBrowseArgs(params: { url: string; maxChars?: number }): Record<string, unknown> {
-  return {
-    action: 'read',
-    url: params.url,
-    maxChars: params.maxChars ?? DEFAULT_WEB_READ_MAX_CHARS,
-  };
-}
-
-export function buildSemanticSource(url: string | undefined, searchQuery: string | undefined): Record<string, unknown> {
-  if (url?.trim()) return { type: 'url', url: url.trim() };
-  if (searchQuery?.trim()) return { type: 'search', query: searchQuery.trim(), maxSeedUrls: 8 };
-
-  throw new Error('Provide either url or searchQuery.');
 }

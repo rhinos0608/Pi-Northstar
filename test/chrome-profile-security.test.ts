@@ -2,12 +2,12 @@
 // absence, revoke race, screenshot image-only, unknown-action compatibility.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ChromeProfileAdapter } from '../src/chrome-profile-adapter.js';
-import { ChromeProfileAuth } from '../src/chrome-profile-auth.js';
+import { ChromeProfileAdapter } from '../src/chrome/chrome-profile-adapter.js';
+import { ChromeProfileAuth } from '../src/chrome/chrome-profile-auth.js';
 import type {
   ChromeBridgeCommand,
   ChromeBridgeResult,
-} from '../src/chrome-profile-contract.js';
+} from '../src/chrome/chrome-profile-contract.js';
 
 function fakeClock(start = 2_000_000) {
   let t = start;

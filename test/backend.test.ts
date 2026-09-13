@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createSearchBackend, resultToText } from '../src/backend.js';
-import { buildCliEnvironment } from '../src/cli-backend.js';
+import { buildCliEnvironment } from '../src/cli/cli-backend.js';
 
 test('createSearchBackend returns backend interface', () => {
   const backend = createSearchBackend({

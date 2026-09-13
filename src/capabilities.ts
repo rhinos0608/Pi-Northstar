@@ -9,8 +9,8 @@
 // Instagram has no post-detail action until a verified read-only adapter
 // exists; OpenCLI download is intentionally disabled.
 
-import type { SocialAction as Stage2SocialAction, SocialPlatform as Stage2SocialPlatform } from './social-contract.js';
-import { SOCIAL_CANONICAL_ACTIONS as STAGE2_CANONICAL_ACTIONS } from './social-contract.js';
+import type { SocialAction as Stage2SocialAction, SocialPlatform as Stage2SocialPlatform } from './social/social-contract.js';
+import { SOCIAL_CANONICAL_ACTIONS as STAGE2_CANONICAL_ACTIONS } from './social/social-contract.js';
 
 export type ReachFamily = 'social' | 'media' | 'web' | 'dev' | 'research' | 'browser';
 

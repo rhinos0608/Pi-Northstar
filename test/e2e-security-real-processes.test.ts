@@ -21,15 +21,15 @@ import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { runCommand } from '../src/agent-browser-process.js';
+import { runCommand } from '../src/browser/agent-browser-process.js';
 import {
   CHROME_BRIDGE_HOST,
   ChromeBridgeClient,
   ChromeBridgeServer,
   extensionOriginForId,
-} from '../src/chrome-profile-bridge.js';
-import type { ChromeBridgeCommand } from '../src/chrome-profile-contract.js';
-import { fetchText } from '../src/http.js';
+} from '../src/chrome/chrome-profile-bridge.js';
+import type { ChromeBridgeCommand } from '../src/chrome/chrome-profile-contract.js';
+import { fetchText } from '../src/core/http.js';
 
 const EXTENSION_ID = 'abcdefghijklmnopqrstuvwxyzabcdef';
 const EXTENSION_ORIGIN = extensionOriginForId(EXTENSION_ID);

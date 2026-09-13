@@ -82,8 +82,8 @@ test('urls fetch isolates per-URL failures instead of aborting the array', async
 });
 
 test('bridgeless chrome authorize fails closed, never reports authorized', async () => {
-  const { ChromeProfileAdapter } = await import('../src/chrome-profile-adapter.js');
-  const { ChromeProfileAuth } = await import('../src/chrome-profile-auth.js');
+  const { ChromeProfileAdapter } = await import('../src/chrome/chrome-profile-adapter.js');
+  const { ChromeProfileAuth } = await import('../src/chrome/chrome-profile-auth.js');
   const adapter = new ChromeProfileAdapter({ auth: new ChromeProfileAuth() });
   const result = await adapter.authorize(15 * 60 * 1000, true);
   const body = JSON.stringify(result);
@@ -91,15 +91,20 @@ test('bridgeless chrome authorize fails closed, never reports authorized', async
   assert.equal(adapter.status().state, 'locked');
 });
 
-test('retrieve/source_check reject non-corpus fields at route and contract', async () => {
+test('retrieve/source_check reject non-corpus fields at contract; route serves narrow branches', async () => {
   const { buildFetchRoute } = await import('../src/index.js');
-  const { parseWebAccessFetchRequest } = await import('../src/web-access-contract.js');
-  assert.throws(() => buildFetchRoute({ action: 'retrieve', responseId: 'r1', topK: 5 }), /retrieve accepts only/);
-  assert.throws(() => buildFetchRoute({ action: 'retrieve', responseId: 'r1', followLinks: true }), /retrieve accepts only/);
+  const { parseWebAccessFetchRequest } = await import('../src/web/access/web-access-contract.js');
+  assert.throws(() => parseWebAccessFetchRequest({ action: 'retrieve', responseId: 'r1', topK: 5 }), /retrieve accepts only/);
   assert.throws(
-    () => buildFetchRoute({ action: 'source_check', responseId: 'r1', claims: ['c'], query: 'x' }),
+    () => parseWebAccessFetchRequest({ action: 'retrieve', responseId: 'r1', source: { type: 'url', url: 'https://example.com' } }),
+    /retrieve accepts only/,
+  );
+  assert.throws(
+    () => parseWebAccessFetchRequest({ action: 'source_check', responseId: 'r1', claims: ['c'], query: 'x' }),
     /source_check accepts only/,
   );
+  const retrieveRoute = buildFetchRoute({ action: 'retrieve', responseId: 'r1' });
+  assert.equal(retrieveRoute.tool, 'fetch');
   assert.throws(
     () => parseWebAccessFetchRequest({ action: 'source_check', responseId: 'r1', claims: ['c'], url: 'https://example.com' }),
     /source_check accepts only/,

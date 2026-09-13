@@ -2,11 +2,11 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { createWebAccessContentStore, buildWebAccessStoredEntry } from '../src/web-access-content-store.js';
-import { retrieveWebAccessCorpus } from '../src/web-access-retrieve.js';
-import { validateWebRequest } from '../src/web-contract.js';
-import { selectCompanion, type SelectCompanionInput } from '../src/chrome-companion-selection.js';
-import { PROVIDER_DESCRIPTOR_SOURCE } from '../src/providers.js';
+import { createWebAccessContentStore, buildWebAccessStoredEntry } from '../src/web/access/web-access-content-store.js';
+import { retrieveWebAccessCorpus } from '../src/web/access/web-access-retrieve.js';
+import { validateWebRequest } from '../src/web/web-contract.js';
+import { selectCompanion, type SelectCompanionInput } from '../src/chrome/chrome-companion-selection.js';
+import { PROVIDER_DESCRIPTOR_SOURCE } from '../src/setup/providers.js';
 import { cacheWebSearchForRetrieve } from '../src/native-tools.js';
 
 describe('review round3 regressions', () => {
@@ -42,7 +42,7 @@ describe('review round3 regressions', () => {
   });
 
   test('cached corpus preserves raw backend instead of mapping to parallel', async () => {
-    const { populateCliCorpus, tryServeCliCorpusAction } = await import('../src/cli-backend.js');
+    const { populateCliCorpus, tryServeCliCorpusAction } = await import('../src/cli/cli-backend.js');
     const store = createWebAccessContentStore();
     const result = populateCliCorpus(store, 'web_search', {
       content: [{ type: 'text', text: 'hits' }],

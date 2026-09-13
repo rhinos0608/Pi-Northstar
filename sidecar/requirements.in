@@ -1,0 +1,21 @@
+# Sidecar direct dependencies. Locked into sidecar/requirements.lock (full transitive
+# closure + sha256 hashes) via the script in the lock header: resolve the closure
+# from a working sidecar env, fetch digests from the PyPI JSON API.
+# (pip-compile does not finish here: torch backtracking over the CPU+PyPI indexes
+# hangs; do not "fix" this by unpinning.)
+# Policy: exact `==` pins here. No lower-bound flexibility — a silent
+# torch / sentence-transformers / numpy drift previously shipped a materially different
+# runtime with no CI signal. Bump pins deliberately, recompile, then re-verify.
+#
+# Torch CPU note: on Linux the default PyPI torch wheel bundles CUDA (~GBs, slow CI).
+# The CPU index below makes the small CPU-only wheel available; CI installs torch from
+# it first (pip then sees the pin as satisfied and skips the CUDA wheel).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi==0.135.1
+uvicorn==0.41.0
+sentence-transformers==5.2.3
+torch==2.13.0
+pydantic==2.12.3
+numpy==2.3.5
+scipy==1.17.0

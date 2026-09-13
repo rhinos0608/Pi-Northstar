@@ -9,19 +9,19 @@ import {
   CHROME_BRIDGE_HOST,
   ChromeBridgeClient,
   ChromeBridgeServer,
-} from '../src/chrome-profile-bridge.js';
+} from '../src/chrome/chrome-profile-bridge.js';
 import {
   parseChromeBridgeCommand,
   type ChromeBridgeCommand,
-} from '../src/chrome-profile-contract.js';
-import { ChromeProfileAdapter } from '../src/chrome-profile-adapter.js';
-import { ChromeProfileAuth } from '../src/chrome-profile-auth.js';
+} from '../src/chrome/chrome-profile-contract.js';
+import { ChromeProfileAdapter } from '../src/chrome/chrome-profile-adapter.js';
+import { ChromeProfileAuth } from '../src/chrome/chrome-profile-auth.js';
 import {
   buildCliEnvironment,
   populateCliCorpus,
   tryServeCliCorpusAction,
-} from '../src/cli-backend.js';
-import { createWebAccessContentStore } from '../src/web-access-content-store.js';
+} from '../src/cli/cli-backend.js';
+import { createWebAccessContentStore } from '../src/web/access/web-access-content-store.js';
 
 const EXTENSION_ID = 'abcdefghijklmnopqrstuvwxyzabcdef';
 const TARGET_A = 'inst-target-aaa1';

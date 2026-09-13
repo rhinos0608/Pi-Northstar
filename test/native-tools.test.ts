@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { callNativeTool } from '../src/native-tools.js';
 import { runCommand, sanitizeExternalOutput } from '../src/reach-tools.js';
-import { writeCookieState } from '../src/cookie-jar.js';
+import { writeCookieState } from '../src/chrome/cookie-jar.js';
 
 // Windows-only skip flag: the tests below spawn extensionless `#!/bin/sh`
 // fixture CLIs (opencli/rdt/yt-dlp) through raw spawn(..., { shell: false })
@@ -44,7 +44,7 @@ test('callNativeTool rejects unsupported tools', async () => {
 });
 
 test('native browse rejects localhost and private URLs — SSRF defense-in-depth', async () => {
-  const { validatePublicHttpUrl } = await import('../src/http.js');
+  const { validatePublicHttpUrl } = await import('../src/core/http.js');
   assert.throws(() => validatePublicHttpUrl('http://localhost:3000'), /Blocked hostname/);
   assert.throws(() => validatePublicHttpUrl('http://10.0.0.1/'), /Private\/reserved/);
   assert.throws(() => validatePublicHttpUrl('http://192.168.1.1/'), /Private\/reserved/);
@@ -56,7 +56,7 @@ test('native browse rejects localhost and private URLs — SSRF defense-in-depth
 });
 
 test('native browse rejects IPv6 link-local, ULAs, and mapped loopback', async () => {
-  const { validatePublicHttpUrl } = await import('../src/http.js');
+  const { validatePublicHttpUrl } = await import('../src/core/http.js');
   assert.throws(() => validatePublicHttpUrl('http://[fe80::1]/'), /Private\/reserved/);
   assert.throws(() => validatePublicHttpUrl('http://[fd00::1]/'), /Private\/reserved/);
   assert.throws(() => validatePublicHttpUrl('http://[fc00::1]/'), /Private\/reserved/);
@@ -66,7 +66,7 @@ test('native browse rejects IPv6 link-local, ULAs, and mapped loopback', async (
 });
 
 test('social and video wrappers reject non-http URL schemes', async () => {
-  const { validatePublicHttpUrl } = await import('../src/http.js');
+  const { validatePublicHttpUrl } = await import('../src/core/http.js');
   assert.equal(validatePublicHttpUrl('https://twitter.com/tweet/1'), 'https://twitter.com/tweet/1');
   assert.throws(() => validatePublicHttpUrl('file:///tmp/tweet'), /scheme/);
   assert.throws(() => validatePublicHttpUrl('ftp://example.com/rss'), /scheme/);
@@ -1623,8 +1623,8 @@ test('kg enhance aligns distinct names sharing external id with opaque conflict 
 });
 
 test('kg search hostile cursor from rejects cursor_invalid with zero fetch', async () => {
-  const { fingerprintKgRequest, issueKgCursor } = await import('../src/knowledge-domain.js');
-  const { DIFFBOT_KG_ADAPTER_CURSOR_V, DIFFBOT_KG_MAX_FROM } = await import('../src/diffbot-kg.js');
+  const { fingerprintKgRequest, issueKgCursor } = await import('../src/knowledge/knowledge-domain.js');
+  const { DIFFBOT_KG_ADAPTER_CURSOR_V, DIFFBOT_KG_MAX_FROM } = await import('../src/diffbot/diffbot-kg.js');
   const query = 'type:Person';
   const pageSize = 10;
   const fingerprint = fingerprintKgRequest({ action: 'search', query, limit: pageSize, providers: 'auto' });
@@ -1657,8 +1657,8 @@ test('kg search hostile cursor from rejects cursor_invalid with zero fetch', asy
 });
 
 test('kg search terminal page at exact bound reports hasMore false with no cursor', async () => {
-  const { fingerprintKgRequest, issueKgCursor } = await import('../src/knowledge-domain.js');
-  const { DIFFBOT_KG_ADAPTER_CURSOR_V, DIFFBOT_KG_MAX_FROM } = await import('../src/diffbot-kg.js');
+  const { fingerprintKgRequest, issueKgCursor } = await import('../src/knowledge/knowledge-domain.js');
+  const { DIFFBOT_KG_ADAPTER_CURSOR_V, DIFFBOT_KG_MAX_FROM } = await import('../src/diffbot/diffbot-kg.js');
   assert.equal(DIFFBOT_KG_MAX_FROM, 10000);
   const query = 'type:Person';
   const pageSize = 50;

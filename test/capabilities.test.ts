@@ -18,13 +18,13 @@ import {
   socialCanonicalActions,
   socialPlatforms,
 } from '../src/capabilities.js';
-import { GITHUB_ACTIONS } from '../src/github-contract.js';
+import { GITHUB_ACTIONS } from '../src/github/github-contract.js';
 import {
   SOCIAL_CANONICAL_ACTIONS,
   SOCIAL_PLATFORMS,
   selectorSpecFor,
   type SocialPlatform,
-} from '../src/social-contract.js';
+} from '../src/social/social-contract.js';
 
 const AVAILABLE_SOCIAL_IDS = ['v2ex', 'twitter', 'reddit', 'xiaohongshu', 'facebook', 'instagram', 'linkedin'] as const;
 

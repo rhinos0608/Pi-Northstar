@@ -1,9 +1,8 @@
-import { spawn } from 'node:child_process';
-import { resolveCliCommand } from './cli-command.js';
+import { spawnCliCommand } from './process/cli-command.js';
 import type { BackendCallResult } from './backend.js';
-import { callSetupTool } from './bootstrap.js';
-import { cookieAuthEnvironment, cookieEnvKeysForProvider, cookieHeaderForUrl, cookieProviderForCommand, COOKIE_ENV_KEYS } from './cookie-jar.js';
-import { authForChannel, PROVIDER_DESCRIPTORS } from './providers.js';
+import { callSetupTool } from './setup/bootstrap.js';
+import { cookieAuthEnvironment, cookieEnvKeysForProvider, cookieHeaderForUrl, cookieProviderForCommand, COOKIE_ENV_KEYS } from './chrome/cookie-jar.js';
+import { authForChannel, PROVIDER_DESCRIPTORS } from './setup/providers.js';
 import {
   backendCapability,
   canonicalActionsFor,
@@ -11,9 +10,9 @@ import {
   CHANNEL_CAPABILITIES,
 } from './capabilities.js';
 import type { DnsLookup } from './network-policy.js';
-import { guardResult, jsonTextResult } from './tool-output.js';
-import { executeMedia } from './media.js';
-import { executeSocial } from './social.js';
+import { guardResult, jsonTextResult } from './core/tool-output.js';
+import { executeMedia } from './media/media.js';
+import { executeSocial } from './social/social.js';
 
 export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds' | 'media';
 
@@ -349,11 +348,13 @@ export async function runCommand(command: string, args: string[], options: Reach
     let stderr = '';
     let aborted = false;
     let timedOut = false;
-    // win32: CreateProcess skips PATHEXT lookup, so resolve bare commands to
-    // their on-disk .cmd/.exe path first. Spawn stays shell:false — argv must
-    // never reach cmd.exe parsing (shell:true concatenates args unescaped).
-    const child = spawn(resolveCliCommand(command), args, {
-      env: externalEnvironment(command, options.env ?? process.env),
+    // win32: bare commands resolve via PATHEXT; .cmd/.bat shims run through
+    // cmd.exe with pre-quoted argv (shell:false cannot execute them — spawn
+    // EINVAL; shell:true concatenates args unescaped). See cli-command.ts.
+    // Probes run credential-free (probeEnvironment): --help/--version checks
+    // never need tokens or cookies. Real executions use externalEnvironment.
+    const child = spawnCliCommand(command, args, {
+      env: probeEnvironment(options.env ?? process.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let killTimer: NodeJS.Timeout | undefined;
@@ -438,27 +439,75 @@ function setupMessage(channel: ChannelDefinition): string {
   return channel.backends.map((backend) => `${backend.name}: ${backend.setup ?? 'built in'}`).join('; ');
 }
 
-export function externalEnvironment(command: string, env: Record<string, string | undefined>): Record<string, string> {
-  // Probe-only environment (reach_status installed/responding checks run
-  // --help/--version/status argv that need no credentials): locale, path,
-  // temp, and proxy base plus the probed command's own needs — OPENCLI_*
-  // for opencli, cookie keys for mapped cookie consumers. Unrelated API
-  // keys never reach a probe subprocess. Cookie env vars derive from the
-  // cookie-jar single source of truth: only commands with a real
-  // cookie-consuming provider mapping receive them.
-  const cookieProvider = cookieProviderForCommand(command);
-  const allowed = [
-    'PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
-    'SystemRoot', 'windir', 'COMSPEC', 'PATHEXT',
-    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-    ...(command === 'opencli' ? ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN'] : []),
-    ...(cookieProvider ? cookieEnvKeysForProvider(cookieProvider) : []),
-  ];
-  const base = Object.fromEntries(allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key] as string]] : []))) as Record<string, string>;
+// Shared benign base: locale, path, temp, win32 essentials, and proxy base.
+// Never carries credentials on its own; credentials are per-context additions.
+const BASE_ENV_KEYS = [
+  'PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
+  'SystemRoot', 'windir', 'COMSPEC', 'PATHEXT',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+];
+
+function pickBaseEnv(env: Record<string, string | undefined>, keys: readonly string[]): Record<string, string> {
+  const base = Object.fromEntries(keys.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key] as string]] : []))) as Record<string, string>;
   if (base.PATH === undefined) {
     const alt = env.Path ?? env.path;
     if (typeof alt === 'string') base.PATH = alt;
   }
+  return base;
+}
+
+/** Strip userinfo (`user:pass@`) from a proxy URL so probe subprocesses
+ * never receive proxy credentials. Absolute URLs parse directly;
+ * scheme-less values fall back to cutting at the last `@`. */
+function stripProxyCredentials(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username.length === 0 && parsed.password.length === 0) return value;
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    const at = value.lastIndexOf('@');
+    if (at < 0) return value;
+    const schemeEnd = value.indexOf('://');
+    const scheme = schemeEnd >= 0 ? value.slice(0, schemeEnd + 3) : '';
+    const host = value.slice(at + 1);
+    // No host (e.g. `http://user:pass@`): drop the variable rather than
+    // return credential-bearing input to the probe child.
+    return host.length > 0 ? `${scheme}${host}` : '';
+  }
+}
+
+const PROXY_URL_KEYS = new Set([
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+]);
+
+/** Credential-free probe environment for reach_status installed/responding
+ * checks (`--help`/`--version` argv need no credentials): base keys only —
+ * no OPENCLI_* (not even HOST/PORT), no cookie keys, no cookie-auth session.
+ * Cookie/token env never reaches a probe subprocess. Proxy URLs are carried
+ * without userinfo (stripped above): probes need the proxy host, not its creds. */
+export function probeEnvironment(env: Record<string, string | undefined>): Record<string, string> {
+  const base = pickBaseEnv(env, BASE_ENV_KEYS);
+  for (const key of Object.keys(base)) {
+    if (PROXY_URL_KEYS.has(key)) base[key] = stripProxyCredentials(base[key]!);
+  }
+  return base;
+}
+
+export function externalEnvironment(command: string, env: Record<string, string | undefined>): Record<string, string> {
+  // Execution environment: base plus the command's own credential needs —
+  // OPENCLI_* for opencli, cookie keys for mapped cookie consumers. Unrelated
+  // API keys never reach an execution subprocess. Cookie env vars derive from
+  // the cookie-jar single source of truth: only commands with a real
+  // cookie-consuming provider mapping receive them.
+  const cookieProvider = cookieProviderForCommand(command);
+  const allowed = [
+    ...BASE_ENV_KEYS,
+    ...(command === 'opencli' ? ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN'] : []),
+    ...(cookieProvider ? cookieEnvKeysForProvider(cookieProvider) : []),
+  ];
+  const base = pickBaseEnv(env, allowed);
   return { ...(cookieProvider ? cookieAuthEnvironment(cookieProvider, env) : {}), ...base };
 }
 

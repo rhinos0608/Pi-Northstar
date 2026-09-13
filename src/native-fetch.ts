@@ -1,20 +1,20 @@
 import type { BackendCallResult } from './backend.js';
-import { createAnalyzeBudget } from './diffbot-extract.js';
-import { callGithubTool } from './github-domain.js';
-import { northstarTextResult, textResult } from './tool-output.js';
+import { createAnalyzeBudget } from './diffbot/diffbot-extract.js';
+import { callGithubTool } from './github/github-domain.js';
+import { northstarTextResult, textResult } from './core/tool-output.js';
 import { callReachTool } from './reach-tools.js';
-import { ScraplingBridge } from './scrapling-bridge.js';
-import { buildWebAccessStoredEntry, createWebAccessContentStore } from './web-access-content-store.js';
-import { WEB_ACCESS_RETRIEVAL_MAX_CHARS, parseWebAccessFetchRequest, WebAccessContractError, type WebAccessProviderId, type WebAccessQueryResult } from './web-access-contract.js';
-import { retrieveWebAccessCorpus } from './web-access-retrieve.js';
-import { runWebAccessCachedSourceCheck } from './web-access-cached-source-check.js';
-import { formatWebAccessSourceCheck } from './web-access-presentation.js';
-import { isPdfUrl, extractWebAccessPdfText, loadUnpdfExtractor, WEB_ACCESS_PDF_MAX_BYTES } from './web-access-pdf.js';
-import { selectWebAccessReaderKind } from './web-access-specialization.js';
-import { validateHttpUrl } from './http.js';
+import { ScraplingBridge } from './web/access/scrapling-bridge.js';
+import { buildWebAccessStoredEntry, createWebAccessContentStore } from './web/access/web-access-content-store.js';
+import { WEB_ACCESS_RETRIEVAL_MAX_CHARS, parseWebAccessFetchRequest, WebAccessContractError, type WebAccessProviderId, type WebAccessQueryResult } from './web/access/web-access-contract.js';
+import { retrieveWebAccessCorpus } from './web/access/web-access-retrieve.js';
+import { runWebAccessCachedSourceCheck } from './web/access/web-access-cached-source-check.js';
+import { formatWebAccessSourceCheck } from './web/access/web-access-presentation.js';
+import { isPdfUrl, extractWebAccessPdfText, loadUnpdfExtractor, WEB_ACCESS_PDF_MAX_BYTES } from './web/access/web-access-pdf.js';
+import { selectWebAccessReaderKind } from './web/access/web-access-specialization.js';
+import { validateHttpUrl } from './core/http.js';
 import { resolvePublicHostname } from './network-policy.js';
 import { buildNorthstarResult, parseEntity } from './result-contract.js';
-import { resolveWebActionForTool, validateWebRequest } from './web-contract.js';
+import { resolveWebActionForTool, validateWebRequest } from './web/web-contract.js';
 import {
   boundPageText,
   fetchReadablePage,
@@ -23,7 +23,7 @@ import {
   siteMapFetch,
   wordCount,
   type WebToolOptions,
-} from './web.js';
+} from './web/web.js';
 
 export interface NativeFetchOptions extends WebToolOptions {}
 
@@ -479,16 +479,28 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
   // Contract-first routing: query-less fetch is read, fetch with a query
   // is crawl. resolveWebActionForTool validates before dispatch.
   // Crawl results populate the retrieve cache best-effort (never throws).
-  const action = resolveWebActionForTool('fetch', args);
+  // Discriminated crawl carries the seed in source (followLinks nested for
+  // url seeds); lift it so semanticCrawl sees the top-level flag.
+  const sourceRecord = typeof args.source === 'object' && args.source !== null && !Array.isArray(args.source)
+    ? args.source as Record<string, unknown>
+    : undefined;
+  const crawlArgs = sourceRecord?.followLinks === true && args.followLinks === undefined
+    ? { ...args, followLinks: true as const }
+    : args;
+  const action = resolveWebActionForTool('fetch', crawlArgs);
   if (action === 'read') return agenticBrowse(args, options);
-  const crawled = await semanticCrawl(args, options);
+  const crawled = await semanticCrawl(crawlArgs, options);
   const crawlLabel =
     typeof args.query === 'string' && args.query.trim().length > 0
       ? args.query.trim()
       : typeof args.searchQuery === 'string'
         ? args.searchQuery
         : 'fetch';
-  const crawlUrl = typeof args.url === 'string' ? args.url : crawlLabel;
+  const crawlUrl = typeof args.url === 'string'
+    ? args.url
+    : typeof sourceRecord?.url === 'string' && (sourceRecord.url as string).trim().length > 0
+      ? (sourceRecord.url as string).trim()
+      : crawlLabel;
   const crawlBody = resultToSingleText(crawled);
   return withFetchResponseId(crawled, cacheFetchForRetrieve({
     query: crawlLabel,

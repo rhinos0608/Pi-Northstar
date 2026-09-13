@@ -1,0 +1,206 @@
+const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
+
+import { assertPublicHostname, resolvePublicHostname, type DnsLookup } from '../network-policy.js';
+
+/**
+ * Validate a URL is HTTP or HTTPS with a public hostname.
+ *
+ * Rejects private/reserved IP ranges, localhost, metadata, and Docker hostnames.
+ * Defense-in-depth: does not cover DNS rebinding, redirects, or Chromium DNS TOCTOU.
+ * Container egress is the authoritative outer boundary.
+ */
+export function validateHttpUrl(raw: string): string {
+  const url = new URL(raw.trim());
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Disallowed URL scheme: ${url.protocol}`);
+  if (url.username || url.password) throw new Error(`URL credentials are not allowed: ${url.href}`);
+  assertPublicHostname(url.hostname);
+  return url.href;
+}
+
+/**
+ * @deprecated Use {@link validateHttpUrl} instead. Kept as alias for backward compatibility.
+ */
+export const validatePublicHttpUrl = validateHttpUrl;
+
+export async function fetchJson(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, lookup?: DnsLookup): Promise<unknown> {
+  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs, 10, lookup);
+  return safeResponseJson(response, url);
+}
+
+export async function fetchText(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, lookup?: DnsLookup): Promise<string> {
+  const response = await fetchFollowingRedirects(url, headersOrSignal, signal, timeoutMs, 10, lookup);
+  return safeResponseText(response, url);
+}
+
+/**
+ * Fetch with manual redirect handling so each hop's target gets static
+ * validation plus DNS preflight (prevents SSRF via redirect chains to
+ * hostnames resolving to private/internal addresses). Max 10 hops;
+ * a missing/invalid Location rejects.
+ */
+async function fetchFollowingRedirects(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, maxRedirects = 10, lookup?: DnsLookup): Promise<Response> {
+  const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
+  // Single choke point: initial host gets static + DNS preflight here, and
+  // every redirect hop below gets static + DNS preflight. Caller preflights
+  // that guard non-helper paths (e.g. the Scrapling bridge in
+  // fetchReadablePage) stay; helper-path duplicates are harmless.
+  // Residual TOCTOU remains (fetch resolves independently); container egress stays outer boundary.
+  let currentUrl = validatePublicHttpUrl(url);
+  // A pre-aborted signal dispatches nothing, so there is nothing to preflight:
+  // skip straight to fetch and let it surface AbortError as before (keeps
+  // caller abort semantics and dispatch counting unchanged).
+  // DNS budget precedes the fetch timeout: without a caller signal, arm a
+  // timeout signal from timeoutMs so DNS preflight cannot outlive the fetch.
+  const dnsSignal = composeSignal(effectiveSignal, timeoutMs);
+  if (!effectiveSignal?.aborted) {
+    await resolvePublicHostname(new URL(currentUrl).hostname, dnsSignal, lookup);
+  }
+  // Credential-class headers must never ride a cross-origin hop: a compromised
+  // upstream redirect target would otherwise exfiltrate API keys/cookies.
+  // Same-origin hops keep headers (session cookies stay functional).
+  let hopHeaders: Record<string, string> = { ...headers };
+  for (let hop = 0; ; hop++) {
+    const response = await fetch(currentUrl, fetchInit(hopHeaders, effectiveSignal, timeoutMs, 'manual'));
+    if (response.status < 300 || response.status >= 400) return response;
+    if (hop >= maxRedirects) throw new Error(`Too many redirects for ${url}`);
+    const location = response.headers.get('location');
+    if (!location) throw new Error(`Redirect without Location header for ${currentUrl}`);
+    const nextUrl = validatePublicHttpUrl(new URL(location, currentUrl).href);
+    if (new URL(nextUrl).origin !== new URL(currentUrl).origin) {
+      hopHeaders = stripCredentialHeaders(hopHeaders);
+    }
+    // DNS preflight every hop: static literal check above is not enough —
+    // a redirect hostname can resolve to private/reserved space. Fail closed.
+    // Residual TOCTOU remains (fetch resolves independently); container egress stays outer boundary.
+    await resolvePublicHostname(new URL(nextUrl).hostname, dnsSignal, lookup);
+    currentUrl = nextUrl;
+  }
+}
+
+/** Credential-class headers stripped on cross-origin redirect hops
+ * (case-insensitive). Same-origin hops keep all headers. */
+const CREDENTIAL_HEADER_NAMES = new Set([
+  'authorization',
+  'x-subscription-token',
+  'x-api-key',
+  'cookie',
+  'set-cookie',
+  'proxy-authorization',
+]);
+
+function stripCredentialHeaders(headers: Record<string, string>): Record<string, string> {
+  const kept: Record<string, string> = {};
+  for (const name of Object.keys(headers)) {
+    if (!CREDENTIAL_HEADER_NAMES.has(name.toLowerCase())) kept[name] = headers[name]!;
+  }
+  return kept;
+}
+
+/**
+ * JSON fetch that rejects redirects instead of following them. Cookie-bearing
+ * requests must use this so credentials are never forwarded off the initial
+ * host (credential-routing control, not SSRF-policy restoration).
+ */
+export async function fetchJsonNoRedirect(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, lookup?: DnsLookup): Promise<unknown> {
+  const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
+  const validated = validatePublicHttpUrl(url);
+  // Same DNS preflight as the redirect-following path: a hostile DNS answer
+  // for even a fixed vendor hostname must fail closed before credentials move.
+  if (!effectiveSignal?.aborted) {
+    await resolvePublicHostname(new URL(validated).hostname, composeSignal(effectiveSignal, timeoutMs), lookup);
+  }
+  const response = await fetch(validated, fetchInit(headers, effectiveSignal, timeoutMs, 'manual'));
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error(`Redirect rejected for ${url}: credentials are never forwarded off the fixed host`);
+  }
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  return safeResponseJson(response, url);
+}
+
+export async function unsafeFetchJson(url: string, headersOrSignal: Record<string, string> | AbortSignal = {}, signal?: AbortSignal, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<unknown> {
+  const { headers, effectiveSignal } = requestOptions(headersOrSignal, signal);
+  const response = await fetch(url, fetchInit(headers, effectiveSignal, timeoutMs));
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  return safeResponseJson(response, url);
+}
+
+export function fetchInit(headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, redirect?: RequestRedirect): RequestInit {
+  assertByteStringHeaders(headers);
+  return {
+    headers,
+    signal: composeSignal(signal, timeoutMs),
+    ...(redirect ? { redirect } : {}),
+  };
+}
+
+// Defense-in-depth: header values are HTTP ByteStrings (RFC 7230) and fetch
+// rejects any character > 255 deep inside undici. Fail fast with a nameable
+// error so the offending header is identified (e.g. a pasted REDDIT_COOKIE
+// or leaked stored state that bypassed the cookie-jar filters).
+function assertByteStringHeaders(headers: Record<string, string>): void {
+  for (const name of Object.keys(headers)) {
+    if (!isByteStringSafe(name) || !isByteStringSafe(headers[name]!)) {
+      throw new TypeError(`Header "${name}" contains non-latin1 characters and cannot be sent as an HTTP ByteString. Re-import browser cookies if this value came from stored cookie state.`);
+    }
+  }
+}
+
+function isByteStringSafe(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 255) return false;
+  }
+  return true;
+}
+
+export async function safeResponseJson(response: Response, url: string, maxBytes = DEFAULT_MAX_RESPONSE_BYTES): Promise<unknown> {
+  return JSON.parse(await safeResponseText(response, url, maxBytes));
+}
+
+export function requestOptions(headersOrSignal: Record<string, string> | AbortSignal, signal?: AbortSignal): { headers: Record<string, string>; effectiveSignal?: AbortSignal } {
+  if (headersOrSignal instanceof AbortSignal) return { headers: {}, effectiveSignal: headersOrSignal };
+  return signal ? { headers: headersOrSignal, effectiveSignal: signal } : { headers: headersOrSignal };
+}
+
+export async function safeResponseText(response: Response, url: string, maxBytes = DEFAULT_MAX_RESPONSE_BYTES): Promise<string> {
+  const contentLength = response.headers.get('content-length');
+  if (contentLength) {
+    const length = Number.parseInt(contentLength, 10);
+    if (Number.isFinite(length) && length > maxBytes) throw new Error(`Response from ${url} is too large (${length} bytes, max ${maxBytes})`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) throw new Error(`Response from ${url} exceeded size limit`);
+    return text;
+  }
+
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`Response from ${url} exceeded size limit`);
+    }
+    chunks.push(value);
+  }
+
+  const merged = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+function composeSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
+
+

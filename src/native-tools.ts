@@ -9,11 +9,11 @@ import {
   type DiffbotKgOutcome,
   type DiffbotKgSpend,
   type DiffbotNlpOutcome,
-} from './diffbot-kg.js';
-import { DiffbotError, resolveDiffbotSpend, type DiffbotSpend } from './diffbot-transport.js';
-import { callGithubTool } from './github-domain.js';
-import type { KgIdentitySignals } from './knowledge-normalize.js';
-import { aggregateKgTextAnalysis, dedupeKgEntities, groupKgEntitiesByIdentity, partitionEnhanceClaims, rrfRankKgEntities } from './knowledge-aggregate.js';
+} from './diffbot/diffbot-kg.js';
+import { DiffbotError, resolveDiffbotSpend, type DiffbotSpend } from './diffbot/diffbot-transport.js';
+import { callGithubTool } from './github/github-domain.js';
+import type { KgIdentitySignals } from './knowledge/knowledge-normalize.js';
+import { aggregateKgTextAnalysis, dedupeKgEntities, groupKgEntitiesByIdentity, partitionEnhanceClaims, rrfRankKgEntities } from './knowledge/knowledge-aggregate.js';
 import {
   buildKnowledgeResult,
   KgContractError,
@@ -28,7 +28,7 @@ import {
   type KgError,
   type KgPartition,
   type KgSourceOutcome,
-} from './knowledge-contract.js';
+} from './knowledge/knowledge-contract.js';
 import {
   decodePinnedKgCursor,
   fingerprintKgRequest,
@@ -39,11 +39,11 @@ import {
   runKgAuto,
   runKgFanout,
   selectAutoProviders,
-} from './knowledge-domain.js';
-import { callGraphTool } from './graph-tools.js';
-import { guardResult, northstarTextResult, textResult } from './tool-output.js';
-import { wrapUntrustedText } from './untrusted-content.js';
-import { searchResearchPage } from './research-sources.js';
+} from './knowledge/knowledge-domain.js';
+import { callGraphTool } from './graph/graph-tools.js';
+import { guardResult, northstarTextResult, textResult } from './core/tool-output.js';
+import { wrapUntrustedText } from './core/untrusted-content.js';
+import { searchResearchPage } from './research/research-sources.js';
 import { callReachTool } from './reach-tools.js';
 import {
   agenticBrowse,
@@ -59,13 +59,13 @@ export {
   dispatchSpecializedUrl,
   parseGithubFetchUrl,
 } from './native-fetch.js';
-import { validateWebRequest } from './web-contract.js';
+import { validateWebRequest } from './web/web-contract.js';
 import {
   requireString,
   semanticCrawl,
   webSearch,
   type WebToolOptions,
-} from './web.js';
+} from './web/web.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'github' | 'kg' | 'graph';
 

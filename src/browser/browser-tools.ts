@@ -1,0 +1,379 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import type { BackendCallResult } from '../backend.js'
+import { isBrowserAutomationDisabled } from './cdp.js'
+
+import { textResult as guardedTextResult } from '../core/tool-output.js'
+import { AgentBrowserAdapter } from './agent-browser.js'
+import { agentBrowserExecutableConfigured, resolveAgentBrowserExecutable, verifyVersion, type AgentBrowserResolveSeams } from './agent-browser-process.js'
+import { parseLoopbackDebugTarget, type LoopbackDebugPolicy } from './loopback-debug-policy.js'
+import { LoopbackProxy } from './loopback-proxy.js'
+import { ChromeProfileAdapter, type ChromeProfileBridgeTransport } from '../chrome/chrome-profile-adapter.js'
+import { ChromeProfileAuth, type ChromeRevokeReason } from '../chrome/chrome-profile-auth.js'
+import { ChromeBridgeClient } from '../chrome/chrome-profile-bridge.js'
+import type { DnsLookup } from '../network-policy.js'
+
+export type BrowserAction = 'status' | 'tabs' | 'navigate' | 'evaluate' | 'text' | 'html' | 'screenshot' | 'click' | 'type' | 'scroll' | 'close' | 'cookies' | 'set_cookies'
+
+// ── Node package entry preference ──
+//
+// Single-spawner direction: npm-provided JS entries should run through
+// process.execPath (node) instead of bouncing through npm .cmd shims.
+// spawnAgentBrowser (src/agent-browser-process.ts) is sibling-owned —
+// read-only use here, no edits — so full [node, entry, ...args] argv
+// routing waits on that owner. What this call site can do now: prefer the
+// package JS entry path over the .bin shim when resolving (on POSIX the
+// entry's `#!/usr/bin/env node` shebang already routes via node, no shim).
+
+/** Absolute path of a package JS entry when present, else undefined. */
+export function nodePackageEntryPath(
+  packageDir: string,
+  binJsRelativePath: string,
+  exists: (path: string) => boolean = existsSync,
+): string | undefined {
+  const entry = join(packageDir, binJsRelativePath)
+  return exists(entry) ? entry : undefined
+}
+
+/**
+ * Prefer the package JS entry run through node: returns
+ * [process.execPath, entryJs, ...args] when the entry exists, else falls
+ * back to [shimPath, ...args] (shimPath defaults to the unresolved entry).
+ */
+export function resolveNodePackageEntry(
+  packageDir: string,
+  binJsRelativePath: string,
+  args: readonly string[] = [],
+  options: { shimPath?: string; exists?: (path: string) => boolean } = {},
+): string[] {
+  const exists = options.exists ?? existsSync
+  const entry = nodePackageEntryPath(packageDir, binJsRelativePath, exists)
+  if (entry !== undefined) return [process.execPath, entry, ...args]
+  return [options.shimPath ?? join(packageDir, binJsRelativePath), ...args]
+}
+
+const AGENT_BROWSER_PACKAGE_DIR = 'agent-browser'
+const AGENT_BROWSER_BIN_JS = join('bin', 'agent-browser.js')
+
+/**
+ * Resolve the agent-browser executable preferring the package JS entry
+ * (node shebang, no .bin shim bounce) with fallback to the canonical
+ * resolver. Explicit operator paths always win, unchanged.
+ */
+async function resolvePreferredAgentBrowserExecutable(
+  explicitPath?: string,
+  seams: AgentBrowserResolveSeams = {},
+): Promise<string> {
+  if (explicitPath) return resolveAgentBrowserExecutable(explicitPath, seams)
+  const cwd = seams.cwd ?? process.cwd()
+  const exists = seams.exists ?? existsSync
+  const entry = nodePackageEntryPath(join(cwd, 'node_modules', AGENT_BROWSER_PACKAGE_DIR), AGENT_BROWSER_BIN_JS, exists)
+  if (entry !== undefined) {
+    try {
+      await verifyVersion(entry)
+      return entry
+    } catch {
+      // Version mismatch or unrunnable entry — fall through to default resolution.
+    }
+  }
+  return resolveAgentBrowserExecutable(undefined, seams)
+}
+
+export function browserToolConfigured(env: Record<string, string | undefined> = process.env): boolean {
+  if (isBrowserAutomationDisabled(env)) return false
+  return agentBrowserExecutableConfigured(env.BROWSER_EXECUTABLE_PATH, env)
+}
+
+// ── Persistent adapter ──
+
+let _adapter: AgentBrowserAdapter | null = null
+let _adapterInit: Promise<AgentBrowserAdapter> | null = null
+let _loopbackPolicy: LoopbackDebugPolicy | null = null
+let _loopbackProxy: LoopbackProxy | null = null
+
+// Guards fresh loopback entry to prevent concurrent transitions
+let _transitionBusy = false
+
+async function getAdapter(env?: Record<string, string | undefined>): Promise<AgentBrowserAdapter | BackendCallResult> {
+  if (_loopbackPolicy) {
+    // Loopback mode active — never create a normal adapter that could overwrite the confined one
+    if (_adapter) return _adapter
+    return textResult({ error: 'Loopback mode active but no adapter available. Wait for loopback transition to complete.', failureCategory: 'domain-blocked' })
+  }
+  if (_adapter) return _adapter
+  if (_adapterInit) return _adapterInit
+  _adapterInit = (async () => {
+    const executablePath = await resolvePreferredAgentBrowserExecutable(env?.BROWSER_EXECUTABLE_PATH)
+    _adapter = new AgentBrowserAdapter({ env, executablePath })
+    _adapterInit = null
+    return _adapter
+  })()
+  return _adapterInit
+}
+
+async function disposeCurrentAdapter(): Promise<void> {
+  _loopbackPolicy = null
+  if (_adapter) {
+    const a = _adapter
+    _adapter = null
+    _adapterInit = null
+    await a.close()
+  }
+  if (_loopbackProxy) {
+    const p = _loopbackProxy
+    _loopbackProxy = null
+    await p.close()
+  }
+}
+
+export async function closeBrowserSession(): Promise<void> {
+  await disposeCurrentAdapter()
+  if (_chrome !== null) {
+    const chrome = _chrome
+    _chrome = null
+    await chrome.adapter.shutdown()
+  }
+}
+
+// ── User-Chromium runtime (bridge-backed, isolated fallback) ──
+
+export interface UserChromeController {
+  auth: ChromeProfileAuth
+  adapter: ChromeProfileAdapter
+}
+
+export interface UserChromeControllerDeps {
+  auth?: ChromeProfileAuth | undefined
+  bridge?: ChromeProfileBridgeTransport | undefined
+  targetInstanceId?: string | undefined
+  bridgeToken?: string | (() => string | undefined) | undefined
+  now?: (() => number) | undefined
+  randomId?: (() => string) | undefined
+  dnsLookup?: DnsLookup | undefined
+  automationEnabled?: boolean | undefined
+}
+
+/** Instantiate-compatible controller: same adapter/auth/bridge shapes as slash registration. */
+export function createUserChromeController(deps?: UserChromeControllerDeps): UserChromeController {
+  const auth =
+    deps?.auth ??
+    new ChromeProfileAuth({
+      ...(deps?.now ? { now: deps.now } : {}),
+      ...(deps?.randomId ? { randomId: deps.randomId } : {}),
+      automationEnabled: deps?.automationEnabled ?? true,
+    })
+  if (deps?.automationEnabled !== undefined && deps?.auth !== undefined) {
+    auth.setAutomationEnabled(deps.automationEnabled)
+  }
+  const bridge = deps?.bridge ?? new ChromeBridgeClient()
+  const adapter = new ChromeProfileAdapter({
+    auth,
+    bridge,
+    ...(deps?.targetInstanceId !== undefined ? { targetInstanceId: deps.targetInstanceId } : {}),
+    ...(deps?.bridgeToken !== undefined ? { bridgeToken: deps.bridgeToken } : {}),
+    ...(deps?.now ? { now: deps.now } : {}),
+    ...(deps?.randomId ? { randomId: deps.randomId } : {}),
+    ...(deps?.dnsLookup ? { dnsLookup: deps.dnsLookup } : {}),
+  })
+  return { auth, adapter }
+}
+
+let _chrome: UserChromeController | null = null
+
+/** Canonical lazy singleton. Syncs the automation kill switch on every access. */
+export function getUserChromeController(env: Record<string, string | undefined> = process.env): UserChromeController {
+  if (_chrome === null) {
+    _chrome = createUserChromeController({ automationEnabled: !isBrowserAutomationDisabled(env) })
+    return _chrome
+  }
+  _chrome.adapter.setAutomationEnabled(!isBrowserAutomationDisabled(env))
+  return _chrome
+}
+
+/** Test-only seam: replace or clear the lazy singleton. */
+export function resetUserChromeForTest(controller?: UserChromeController | null): void {
+  _chrome = controller ?? null
+}
+
+export function userChromeStatus(env?: Record<string, string | undefined>): { state: string; backend: 'user-chrome' | 'isolated'; expiresAt?: number | null } {
+  const state = getUserChromeController(env).auth.status()
+  if (state.state === 'authorized') return { state: state.state, backend: 'user-chrome', expiresAt: state.expiresAt }
+  return { state: state.state, backend: 'isolated' }
+}
+
+export async function authorizeUserChrome(
+  ttlMs: number | null,
+  confirmed: boolean,
+  env?: Record<string, string | undefined>,
+  targetInstanceId?: string | undefined,
+): Promise<BackendCallResult> {
+  return getUserChromeController(env).adapter.authorize(ttlMs, confirmed, targetInstanceId)
+}
+
+export async function revokeUserChrome(
+  reason: ChromeRevokeReason = 'user',
+  env?: Record<string, string | undefined>,
+): Promise<BackendCallResult> {
+  return getUserChromeController(env).adapter.revoke(reason)
+}
+
+/** Renew the companion lease when inside the renewal window; no-op otherwise. */
+export async function renewUserChromeLeaseIfDue(env?: Record<string, string | undefined>): Promise<BackendCallResult> {
+  const controller = getUserChromeController(env)
+  if (!controller.auth.leaseRenewalDue()) return textResult({ ok: true, renewed: false })
+  return controller.adapter.renewLease()
+}
+
+// ── Main entry point ──
+
+export async function browser(
+  args: Record<string, unknown>,
+  options: { signal?: AbortSignal; env?: Record<string, string | undefined> } = {},
+): Promise<BackendCallResult> {
+  const env = options.env ?? process.env
+
+  if (isBrowserAutomationDisabled(env)) {
+    return textResult({ ok: false, message: 'Browser automation disabled by PI_SEARCH_BROWSER_AUTOMATION. Set it to 1 or unset to enable.' })
+  }
+
+  // User-Chromium path: authorized grants route to the companion bridge.
+  // Loopback debug sessions always stay on the isolated backend: the
+  // user-chrome adapter rejects private targets pre-dispatch by design.
+  const chromeAction = typeof args.action === 'string' ? args.action : ''
+  const chromeUrl = typeof args.url === 'string' ? args.url : ''
+  const loopbackForced = _loopbackPolicy !== null || (chromeAction === 'navigate' && chromeUrl !== '' && parseLoopbackDebugTarget(chromeUrl) !== null)
+  if (!loopbackForced) {
+    const chrome = getUserChromeController(env)
+    if (chrome.auth.canExecute()) {
+      if (chromeAction === 'close') {
+        await disposeCurrentAdapter()
+      }
+      return chrome.adapter.execute(args, { ...(options.signal ? { signal: options.signal } : {}) })
+    }
+  }
+
+  return agentBrowserRoute(args, options)
+}
+
+// ── Agent-browser route ──
+
+async function agentBrowserRoute(
+  args: Record<string, unknown>,
+  options: { signal?: AbortSignal; env?: Record<string, string | undefined> },
+): Promise<BackendCallResult> {
+  const env = options.env ?? process.env
+  const action = typeof args.action === 'string' ? args.action : ''
+  const url = typeof args.url === 'string' ? args.url.trim() : ''
+
+  // Reject credentialed URLs — prevents bypass of loopback detection.
+  // Parse the URL so '@' in the path/query does not false-positive.
+  if (url) {
+    let hasCredentials = false
+    try {
+      const parsedUrl = new URL(url)
+      hasCredentials = parsedUrl.username !== '' || parsedUrl.password !== ''
+    } catch { /* invalid URL handled downstream */ }
+    if (hasCredentials) {
+      return textResult({
+        error: 'URLs with credentials (user:pass@host) are not allowed. Remove userinfo from the URL.',
+        failureCategory: 'domain-blocked',
+      })
+    }
+  }
+
+  // Detect loopback navigate: parse target, start proxy if needed
+  if (action === 'navigate' && url) {
+    const policy = parseLoopbackDebugTarget(url)
+    if (policy) {
+      // Loopback navigate requested
+      if (_loopbackPolicy && _adapter) {
+        // Already in loopback mode — check same origin
+        if (_loopbackPolicy.origin !== policy.origin) {
+          return textResult({
+            error: `Different loopback origin rejected. Close confined session before navigating elsewhere. Current: ${_loopbackPolicy.origin}, requested: ${policy.origin}`,
+            failureCategory: 'domain-blocked',
+          })
+        }
+        // Same origin — reuse adapter, navigate
+        return _adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+      }
+
+      // Fresh loopback entry: guarded via boolean flag to prevent concurrent transitions
+      if (_transitionBusy) {
+        return textResult({ error: 'Loopback transition already in progress', failureCategory: 'domain-blocked' })
+      }
+      _transitionBusy = true;
+      try {
+        await disposeCurrentAdapter()
+        const proxy = new LoopbackProxy(policy)
+        let proxyUrl: string;
+        try {
+          proxyUrl = await proxy.start()
+        } catch (err) {
+          await proxy.close();
+          return textResult({ ok: false, error: `Failed to start loopback proxy: ${err instanceof Error ? err.message : String(err)}`, failureCategory: 'domain-blocked' });
+        }
+        _loopbackProxy = proxy
+        _loopbackPolicy = policy
+
+        try {
+          const executablePath = await resolvePreferredAgentBrowserExecutable(env?.BROWSER_EXECUTABLE_PATH)
+          const freshAdapter = new AgentBrowserAdapter({
+            env,
+            executablePath,
+            loopbackMode: {
+              proxyUrl,
+              origin: policy.origin,
+            },
+          })
+          _adapter = freshAdapter
+
+          // Execute navigate (adapter will send open + navigate via confined process)
+          return freshAdapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+        } catch (err) {
+          // Cleanup: proxy started but adapter/execute failed
+          _loopbackProxy = null;
+          _loopbackPolicy = null;
+          await proxy.close();
+          return textResult({ ok: false, error: `Loopback adapter failed: ${err instanceof Error ? err.message : String(err)}`, failureCategory: 'domain-blocked' });
+        }
+      } finally {
+        _transitionBusy = false;
+      }
+    }
+  }
+
+  // Close action: clean up loopback state + adapter
+  if (action === 'close') {
+    await disposeCurrentAdapter()
+    return textResult('Browser session closed')
+  }
+
+  // Non-navigate action: if in loopback mode, validate the adapter is loopback
+  if (_loopbackPolicy && _adapter) {
+    // Loopback mode active — all actions go through the confined adapter
+    return _adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+  }
+
+  const adapterOrResult = await getAdapter(env)
+  if (isAgentBrowserAdapter(adapterOrResult)) {
+    return adapterOrResult.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+  }
+  return adapterOrResult
+}
+
+/** Narrowing guard for the adapter/result union returned by getAdapter. */
+function isAgentBrowserAdapter(value: AgentBrowserAdapter | BackendCallResult): value is AgentBrowserAdapter {
+  return typeof (value as AgentBrowserAdapter).execute === 'function'
+}
+
+// ── Helpers ──
+
+function textResult(data: unknown): BackendCallResult {
+  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2) ?? String(data)
+  const result = guardedTextResult(text, data)
+  if (typeof data === 'object' && data !== null && 'failureCategory' in data) {
+    return { ...result, failureCategory: (data as Record<string, unknown>).failureCategory }
+  }
+  return result
+}

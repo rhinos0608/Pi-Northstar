@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fetchText } from '../src/http.js';
-import { ObservationStore, COORDINATE_MUTATION_FRESHNESS_MS } from '../src/desktop-contract.js';
-import { DesktopService } from '../src/desktop-tools.js';
+import { fetchText } from '../src/core/http.js';
+import { ObservationStore, COORDINATE_MUTATION_FRESHNESS_MS } from '../src/desktop/desktop-contract.js';
+import { DesktopService } from '../src/desktop/desktop-tools.js';
 
 const publicLookup = async (_h: string) => [{ address: '93.184.216.34', family: 4 as const }];
 const evilLookup = async (h: string) => h === 'redirect-dns.attacker.example'
