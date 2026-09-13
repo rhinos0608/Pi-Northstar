@@ -37,7 +37,7 @@ const fields: Record<GithubActionField, TSchema> = {
 function actionBranch(action: GithubAction): TSchema {
   const spec = GITHUB_ACTION_FIELD_SPECS[action];
   const properties: Record<string, TSchema> = { action: Type.Literal(action) };
-  if (spec.repoSelector) {
+  if (spec.repoSelector === true) {
     properties.owner = Type.Optional(fields.owner);
     properties.repo = Type.Optional(fields.repo);
     properties.repository = Type.Optional(fields.repository);
@@ -46,6 +46,11 @@ function actionBranch(action: GithubAction): TSchema {
   for (const field of spec.required) properties[field] = fields[field]!;
   const body = Type.Object(properties, { description: `${action} operation.`, additionalProperties: false });
   if (!spec.repoSelector) return body;
+  if (spec.repoSelector === 'optional') {
+    const pairBody = Type.Object({ ...properties, owner: fields.owner, repo: fields.repo }, { description: `${action} operation.`, additionalProperties: false });
+    const slugBody = Type.Object({ ...properties, repository: fields.repository }, { description: `${action} operation.`, additionalProperties: false });
+    return Type.Union([body, pairBody, slugBody], { description: `${action} operation.` });
+  }
   const selector = Type.Union([
     Type.Object({ owner: fields.owner, repo: fields.repo }),
     Type.Object({ repository: fields.repository }),

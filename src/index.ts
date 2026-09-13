@@ -635,6 +635,8 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
         Type.Object({ action: Type.Literal('click'), selector: Type.String() }),
         Type.Object({ action: Type.Literal('type'), selector: Type.String(), text: Type.String() }),
         Type.Object({ action: Type.Literal('scroll'), selector: Type.Optional(Type.String()), x: Type.Optional(Type.Number()), y: Type.Optional(Type.Number()) }),
+        Type.Object({ action: Type.Literal('close') }),
+        Type.Object({ action: Type.Literal('cookies'), urls: Type.Optional(Type.Array(Type.String())) }),
         Type.Object({ action: Type.Literal('set_cookies'), cookies: Type.Array(Type.Any()), urls: Type.Optional(Type.Array(Type.String())) }),
         Type.Object({ action: Type.Literal('snapshot'), compact: Type.Optional(Type.Boolean()) }),
         Type.Object({ action: Type.Literal('fill'), selector: Type.String(), text: Type.String() }),

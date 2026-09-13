@@ -44,7 +44,7 @@ export type GithubActionField =
 export interface GithubActionFieldSpec {
   readonly required: readonly GithubActionField[];
   readonly optional: readonly GithubActionField[];
-  readonly repoSelector: boolean;
+  readonly repoSelector: boolean | 'optional';
 }
 
 /** Schema-generation input. validateGithubRequest remains enforcement authority. */
@@ -52,7 +52,7 @@ export const GITHUB_ACTION_FIELD_SPECS: Readonly<Record<GithubAction, GithubActi
   repo: { required: [], optional: ['includeReadme'], repoSelector: true },
   file: { required: ['path'], optional: ['paths', 'branch', 'ref'], repoSelector: true },
   tree: { required: [], optional: ['path', 'branch', 'ref', 'recursive'], repoSelector: true },
-  search: { required: ['query'], optional: ['owner', 'repo', 'repository', 'language', 'limit', 'perPage', 'cursor'], repoSelector: false },
+  search: { required: ['query'], optional: ['language', 'limit', 'perPage', 'cursor'], repoSelector: 'optional' },
   trending: { required: [], optional: ['language', 'since', 'limit', 'perPage'], repoSelector: false },
   issues: { required: [], optional: ['number', 'state', 'labels', 'limit', 'perPage', 'cursor'], repoSelector: true },
   pulls: { required: [], optional: ['number', 'state', 'labels', 'files', 'limit', 'perPage', 'cursor'], repoSelector: true },
@@ -257,6 +257,7 @@ export interface GithubRequestInput {
   repo?: string;
   repository?: string;
   path?: string;
+  paths?: string[];
   branch?: string;
   ref?: string;
   query?: string;
@@ -269,6 +270,12 @@ export interface GithubRequestInput {
   state?: string;
   labels?: unknown;
   tag?: string;
+  latest?: boolean;
+  files?: boolean;
+  author?: string;
+  recursive?: boolean;
+  includeReadme?: boolean;
+  jobs?: boolean;
   workflow?: string;
   status?: string;
   cursor?: string;
@@ -279,6 +286,7 @@ export interface GithubRequest {
   owner?: string;
   repo?: string;
   path?: string;
+  paths?: string[];
   ref?: string;
   query?: string;
   language?: string;
@@ -289,6 +297,12 @@ export interface GithubRequest {
   state?: string;
   labels?: string[];
   tag?: string;
+  latest?: boolean;
+  files?: boolean;
+  author?: string;
+  recursive?: boolean;
+  includeReadme?: boolean;
+  jobs?: boolean;
   workflow?: string;
   status?: string;
   cursor?: string;
@@ -360,6 +374,22 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   }
   const path = rawPath !== undefined ? validateGithubPath(rawPath) : undefined;
 
+  let paths: string[] | undefined;
+  if (input.paths !== undefined) {
+    if (action !== 'file') throw githubError('invalid_request', 'paths is only supported for github file');
+    if (rawPath !== undefined) throw githubError('invalid_request', 'path and paths are mutually exclusive');
+    if (!Array.isArray(input.paths) || input.paths.length === 0) {
+      throw githubError('invalid_request', 'paths must be a non-empty array of strings');
+    }
+    if (input.paths.length > 10) throw githubError('invalid_request', 'paths exceeds maximum of 10 entries');
+    paths = input.paths.map((entry) => {
+      if (typeof entry !== 'string' || entry.trim().length === 0) {
+        throw githubError('invalid_request', 'paths entries must be non-empty strings');
+      }
+      return validateGithubPath(entry.replace(/^\/+/, ''));
+    });
+  }
+
   // branch and ref are one selector; both present must agree.
   const branch = cleanField(input.branch);
   const refField = cleanField(input.ref);
@@ -423,6 +453,30 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   }
   const validatedTag = tag === undefined ? undefined : validateGithubRef(tag, 'tag');
 
+  function validateBooleanFlag(raw: unknown, flag: string): boolean | undefined {
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'boolean') throw githubError('invalid_request', `${flag} must be a boolean: ${echo(raw)}`);
+    return raw;
+  }
+  const latest = validateBooleanFlag(input.latest, 'latest');
+  if (latest !== undefined && action !== 'releases') throw githubError('invalid_request', 'latest is only supported for github releases');
+  const files = validateBooleanFlag(input.files, 'files');
+  if (files !== undefined && action !== 'pulls') throw githubError('invalid_request', 'files is only supported for github pulls');
+  const recursive = validateBooleanFlag(input.recursive, 'recursive');
+  if (recursive !== undefined && action !== 'tree') throw githubError('invalid_request', 'recursive is only supported for github tree');
+  const includeReadme = validateBooleanFlag(input.includeReadme, 'includeReadme');
+  if (includeReadme !== undefined && action !== 'repo') throw githubError('invalid_request', 'includeReadme is only supported for github repo');
+  const jobs = validateBooleanFlag(input.jobs, 'jobs');
+  if (jobs !== undefined && action !== 'runs') throw githubError('invalid_request', 'jobs is only supported for github runs');
+
+  const author = cleanField(input.author);
+  if (typeof input.author === 'string' && author === undefined) {
+    throw githubError('invalid_request', 'author must be a non-empty string when provided');
+  }
+  if (author !== undefined && action !== 'commits' && action !== 'runs') {
+    throw githubError('invalid_request', 'author is only supported for github commits and runs');
+  }
+
   const workflowRaw = cleanField(input.workflow);
   if (typeof input.workflow === 'string' && workflowRaw === undefined) {
     throw githubError('invalid_request', 'workflow must be a non-empty string when provided');
@@ -476,6 +530,13 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   if (state !== undefined) request.state = state;
   if (labels !== undefined) request.labels = labels;
   if (validatedTag !== undefined) request.tag = validatedTag;
+  if (latest !== undefined) request.latest = latest;
+  if (files !== undefined) request.files = files;
+  if (author !== undefined) request.author = author;
+  if (recursive !== undefined) request.recursive = recursive;
+  if (includeReadme !== undefined) request.includeReadme = includeReadme;
+  if (jobs !== undefined) request.jobs = jobs;
+  if (paths !== undefined) request.paths = paths;
   if (workflow !== undefined) request.workflow = workflow;
   if (status !== undefined) request.status = status;
   if (cursor !== undefined) request.cursor = cursor;

@@ -103,7 +103,7 @@ test('retrieve/source_check reject non-corpus fields at contract; route serves n
     () => parseWebAccessFetchRequest({ action: 'source_check', responseId: 'r1', claims: ['c'], query: 'x' }),
     /source_check accepts only/,
   );
-  const retrieveRoute = buildFetchRoute({ mode: 'retrieve', action: 'retrieve', responseId: 'r1' });
+  const retrieveRoute = buildFetchRoute({ mode: 'retrieve', responseId: 'r1' });
   assert.equal(retrieveRoute.tool, 'fetch');
   assert.throws(
     () => parseWebAccessFetchRequest({ action: 'source_check', responseId: 'r1', claims: ['c'], url: 'https://example.com' }),

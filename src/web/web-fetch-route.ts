@@ -1,13 +1,13 @@
 import { DEFAULT_WEB_READ_MAX_CHARS } from './web-contract.js';
 
 export interface FetchReadParams {
-  mode?: 'read';
+  mode: 'read';
   url: string;
   maxChars?: number;
 }
 
 export interface FetchCrawlUrlParams {
-  mode?: 'crawl';
+  mode: 'crawl';
   source: { type: 'url'; url: string; followLinks?: boolean };
   query: string;
   topK?: number;
@@ -16,7 +16,7 @@ export interface FetchCrawlUrlParams {
 }
 
 export interface FetchCrawlSearchParams {
-  mode?: 'crawl';
+  mode: 'crawl';
   source: { type: 'search'; searchQuery: string };
   query: string;
   topK?: number;
@@ -25,13 +25,13 @@ export interface FetchCrawlSearchParams {
 }
 
 export interface FetchBatchReadParams {
-  mode?: 'batch_read';
+  mode: 'batch_read';
   urls: string[];
   maxChars?: number;
 }
 
 export interface FetchBatchCrawlParams {
-  mode?: 'batch_crawl';
+  mode: 'batch_crawl';
   urls: string[];
   query: string;
   topK?: number;
@@ -40,7 +40,7 @@ export interface FetchBatchCrawlParams {
 }
 
 export interface FetchSitemapParams {
-  mode?: 'sitemap';
+  mode: 'sitemap';
   url: string;
   siteMap: true;
   query?: string;
@@ -48,8 +48,7 @@ export interface FetchSitemapParams {
 }
 
 export interface FetchRetrieveParams {
-  mode?: 'retrieve';
-  action: 'retrieve';
+  mode: 'retrieve';
   responseId: string;
   sourceIds?: string[];
   offset?: number;
@@ -58,8 +57,7 @@ export interface FetchRetrieveParams {
 }
 
 export interface FetchSourceCheckParams {
-  mode?: 'source_check';
-  action: 'source_check';
+  mode: 'source_check';
   responseId: string;
   claims: string[];
   sourceIds?: string[];

@@ -4,13 +4,13 @@ import { buildFetchRoute } from '../../../src/index.js';
 import { callNativeTool } from '../../../src/native-tools.js';
 
 test('buildFetchRoute registers retrieve union', () => {
-  const route = buildFetchRoute({ mode: 'retrieve', action: 'retrieve', responseId: 'r1', findText: 'x' });
+  const route = buildFetchRoute({ mode: 'retrieve', responseId: 'r1', findText: 'x' });
   assert.equal(route.tool, 'fetch');
   assert.equal((route.args as { action: string }).action, 'retrieve');
 });
 
 test('buildFetchRoute registers source_check union', () => {
-  const route = buildFetchRoute({ mode: 'source_check', action: 'source_check', responseId: 'r1', claims: ['c1'] });
+  const route = buildFetchRoute({ mode: 'source_check', responseId: 'r1', claims: ['c1'] });
   assert.equal((route.args as { action: string }).action, 'source_check');
 });
 

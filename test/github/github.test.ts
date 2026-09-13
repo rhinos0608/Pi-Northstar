@@ -37,7 +37,7 @@ test('github tool nests canonical action union under request', async () => {
   assert.equal(tool.name, 'github');
   const request = tool.parameters.properties.request;
   assert.equal(request.anyOf?.length, GITHUB_ACTIONS.length);
-  assert.deepEqual(request.anyOf.map((branch: any) => branch.properties?.action?.const ?? branch.allOf?.[0]?.properties?.action?.const).sort(), [...GITHUB_ACTIONS].sort());
+  assert.deepEqual(request.anyOf.map((branch: any) => branch.properties?.action?.const ?? branch.anyOf?.[0]?.properties?.action?.const ?? branch.allOf?.[0]?.properties?.action?.const).sort(), [...GITHUB_ACTIONS].sort());
 });
 
 test('anthropic object flattening preserves nested github action union', async () => {
