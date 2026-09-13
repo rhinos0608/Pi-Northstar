@@ -21,7 +21,8 @@
   "scripts": {
     "cli": "node --import tsx src/cli/cli.ts",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench:cli-spawn": "node --import tsx bench/cli-spawn-bench.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
