@@ -10,7 +10,7 @@ import { type DnsLookup, resolvePublicHostname } from './network-policy.js';
 import { BM25Index } from './bm25.js';
 import { EmbeddingClient } from './embedding-client.js';
 import { rrfMerge } from './fusion.js';
-import { SidecarManager } from './sidecar-manager.js';
+import { acquireEmbeddingSidecar, type AcquiredSidecar } from './shared-sidecar.js';
 import { VectorIndex } from './vector-index.js';
 
 export const TAVILY_MAP_ENDPOINT = 'https://api.tavily.com/map';
@@ -191,26 +191,21 @@ async function rankSitemapUrls(
       ranking: 'bm25',
     };
   }
-  let sidecar: SidecarManager | undefined;
+  // Shared persistent sidecar: released (not stopped) so the Python process
+  // is reused across calls. External EMBEDDING_SIDECAR_BASE_URL bypasses
+  // the local lifecycle.
+  let acquired: AcquiredSidecar | undefined;
   try {
     signal?.throwIfAborted();
-    const externalSidecarUrl = env.EMBEDDING_SIDECAR_BASE_URL;
-    let embeddingClient: EmbeddingClient;
-    if (externalSidecarUrl) {
-      embeddingClient = new EmbeddingClient({
-        baseUrl: externalSidecarUrl,
-        ...(signal !== undefined ? { signal } : {}),
-      });
-      await embeddingClient.health();
-    } else {
-      sidecar = new SidecarManager();
-      await sidecar.ensureRunning();
-      signal?.throwIfAborted();
-      embeddingClient = new EmbeddingClient({
-        baseUrl: sidecar.getBaseUrl(),
-        ...(signal !== undefined ? { signal } : {}),
-      });
-    }
+    acquired = await acquireEmbeddingSidecar(env);
+    signal?.throwIfAborted();
+    const embeddingClient = new EmbeddingClient({
+      baseUrl: acquired.baseUrl,
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    // External sidecars are caller-managed — verify reachability; the local
+    // singleton is already health-poll verified by ensureRunning.
+    if (acquired.external) await embeddingClient.health();
     const vectorIndex = new VectorIndex();
     const vectors = await embeddingClient.embedBatch(docs.map((doc) => doc.text));
     signal?.throwIfAborted();
@@ -224,12 +219,12 @@ async function rankSitemapUrls(
       ],
       { keyFn: (item: { id: string }) => item.id },
     );
-    if (sidecar) await sidecar.stop().catch(() => undefined);
+    acquired?.release();
     return { urls: withUnmatched(fused.map((entry) => byId.get(entry.item.id)!)), ranking: 'bm25+embedding+rrf' };
   } catch (error) {
     // Caller abort always propagates; embedding failures fall back to BM25.
     // The ranking field exposes the fallback — no error text is logged.
-    if (sidecar) await sidecar.stop().catch(() => undefined);
+    acquired?.release();
     if ((error as { name?: unknown })?.name === 'AbortError' || signal?.aborted) throw error;
     return {
       urls: withUnmatched(index.search(query, urls.length).map((hit) => byId.get(hit.id)!)),

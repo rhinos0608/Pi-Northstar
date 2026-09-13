@@ -40,7 +40,7 @@ import { BM25Index } from './bm25.js';
 import { chunkText as chunkTextSmart } from './chunker.js';
 import { VectorIndex } from './vector-index.js';
 import { EmbeddingClient } from './embedding-client.js';
-import { SidecarManager } from './sidecar-manager.js';
+import { acquireEmbeddingSidecar, type AcquiredSidecar } from './shared-sidecar.js';
 import { ScraplingBridge } from './scrapling-bridge.js';
 import { extractLinksFromHtml } from './link-extraction.js';
 import { diffbotConfigured, searchDiffbot } from './diffbot-search.js';
@@ -958,23 +958,18 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
     if (v === undefined) return true;
     return v !== '0' && v !== 'false';
   })();
-  const externalSidecarUrl = embeddingEnv.EMBEDDING_SIDECAR_BASE_URL;
-
-  // Per-call sidecar stops in the finally below so the spawned Python child
-  // never outlives the CLI worker that started it (no orphan processes).
-  let sidecar: SidecarManager | undefined;
+  // Shared persistent sidecar: acquired per call, released (not stopped) so
+  // the Python + SentenceTransformers process is reused across calls.
+  // External EMBEDDING_SIDECAR_BASE_URL bypasses the local lifecycle.
+  // Shutdown hooks in shared-sidecar.ts stop the child on process exit.
+  let acquired: AcquiredSidecar | undefined;
   if (embeddingEnabled) {
     try {
-      if (externalSidecarUrl) {
-        // External sidecar already running — use it directly
-        embeddingClient = new EmbeddingClient({ baseUrl: externalSidecarUrl });
-        await embeddingClient.health();
-      } else {
-        // Try spawning local sidecar
-        sidecar = new SidecarManager();
-        await sidecar.ensureRunning();
-        embeddingClient = new EmbeddingClient({ baseUrl: sidecar.getBaseUrl() });
-      }
+      acquired = await acquireEmbeddingSidecar(embeddingEnv);
+      embeddingClient = new EmbeddingClient({ baseUrl: acquired.baseUrl });
+      // External sidecars are caller-managed — verify reachability; the
+      // local singleton is already health-poll verified by ensureRunning.
+      if (acquired.external) await embeddingClient.health();
       vectorIndex = new VectorIndex();
 
       // Embed all chunks
@@ -1037,7 +1032,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
       .filter((x): x is NonNullable<typeof x> => x != null)
       .slice(0, topK);
   }
-  if (sidecar) await sidecar.stop().catch(() => undefined);
+  acquired?.release();
 
   const fullText = resultChunks.length
     ? resultChunks.map((chunk, index) => `## ${index + 1}. ${chunk.title || chunk.url}\n${chunk.url}\n\n${chunk.content}`).join('\n\n')
