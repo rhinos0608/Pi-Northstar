@@ -52,6 +52,16 @@ test('DNS: dnsPreflight rejects private address', async () => {
   );
 });
 
+test('observe field policy allows only matching read fields', () => {
+  for (const what of ['status','tabs','get_url','get_title','text','html','snapshot','screenshot']) {
+    assert.equal(validateBrowserRequest({ what }).action, what);
+  }
+  assert.equal(validateBrowserRequest({ what: 'text', selector: '#main' }).selector, '#main');
+  assert.equal(validateBrowserRequest({ what: 'snapshot', compact: true }).compact, true);
+  assert.throws(() => validateBrowserRequest({ what: 'status', selector: '#main' }), /selector is not allowed/);
+  assert.throws(() => validateBrowserRequest({ what: 'text', compact: true }), /compact is not allowed/);
+});
+
 test('request action union and no-op sensitive classification', () => {
   assert.equal(validateBrowserRequest({ action: 'snapshot' }).action, 'snapshot');
   assert.throws(() => validateBrowserRequest({ action: 'shell' }), /Unsupported/);

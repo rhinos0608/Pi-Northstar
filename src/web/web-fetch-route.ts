@@ -1,11 +1,13 @@
 import { DEFAULT_WEB_READ_MAX_CHARS } from './web-contract.js';
 
 export interface FetchReadParams {
+  mode?: 'read';
   url: string;
   maxChars?: number;
 }
 
 export interface FetchCrawlUrlParams {
+  mode?: 'crawl';
   source: { type: 'url'; url: string; followLinks?: boolean };
   query: string;
   topK?: number;
@@ -14,6 +16,7 @@ export interface FetchCrawlUrlParams {
 }
 
 export interface FetchCrawlSearchParams {
+  mode?: 'crawl';
   source: { type: 'search'; searchQuery: string };
   query: string;
   topK?: number;
@@ -22,11 +25,13 @@ export interface FetchCrawlSearchParams {
 }
 
 export interface FetchBatchReadParams {
+  mode?: 'batch_read';
   urls: string[];
   maxChars?: number;
 }
 
 export interface FetchBatchCrawlParams {
+  mode?: 'batch_crawl';
   urls: string[];
   query: string;
   topK?: number;
@@ -35,6 +40,7 @@ export interface FetchBatchCrawlParams {
 }
 
 export interface FetchSitemapParams {
+  mode?: 'sitemap';
   url: string;
   siteMap: true;
   query?: string;
@@ -42,6 +48,7 @@ export interface FetchSitemapParams {
 }
 
 export interface FetchRetrieveParams {
+  mode?: 'retrieve';
   action: 'retrieve';
   responseId: string;
   sourceIds?: string[];
@@ -51,6 +58,7 @@ export interface FetchRetrieveParams {
 }
 
 export interface FetchSourceCheckParams {
+  mode?: 'source_check';
   action: 'source_check';
   responseId: string;
   claims: string[];
@@ -153,28 +161,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function buildFetchRoute(params: FetchRouteParams): FetchRoute {
   if (!isRecord(params)) throw new Error('fetch requires exactly one of: url, urls, source, or url+siteMap:true');
-  const action = (params as { action?: unknown }).action;
-  if (action !== undefined) {
-    if (action === 'retrieve') return buildRetrieveFetchRoute(params as FetchRetrieveParams);
-    if (action === 'source_check') return buildSourceCheckFetchRoute(params as FetchSourceCheckParams);
-    throw new Error('action must be one of: retrieve, source_check (or omitted)');
+  const mode = (params as { mode?: unknown }).mode;
+  if (mode !== undefined) {
+    if (mode === 'retrieve') return buildRetrieveFetchRoute(params as FetchRetrieveParams);
+    if (mode === 'source_check') return buildSourceCheckFetchRoute(params as FetchSourceCheckParams);
+    if (mode === 'read') return buildReadFetchRoute(params as FetchReadParams);
+    if (mode === 'crawl') {
+      const source = (params as FetchCrawlUrlParams | FetchCrawlSearchParams).source;
+      if (source.type === 'url') return buildCrawlUrlFetchRoute(params as FetchCrawlUrlParams);
+      if (source.type === 'search') return buildCrawlSearchFetchRoute(params as FetchCrawlSearchParams);
+    }
+    if (mode === 'batch_read') return buildBatchReadFetchRoute(params as FetchBatchReadParams);
+    if (mode === 'batch_crawl') return buildBatchCrawlFetchRoute(params as FetchBatchCrawlParams);
+    if (mode === 'sitemap') return buildSitemapFetchRoute(params as FetchSitemapParams);
+    throw new Error('mode must be one of: read, crawl, batch_read, batch_crawl, sitemap, retrieve, source_check');
   }
-  if (isRecord((params as { source?: unknown }).source)) {
-    const source = (params as { source: Record<string, unknown> }).source;
-    if (source.type === 'url') return buildCrawlUrlFetchRoute(params as FetchCrawlUrlParams);
-    if (source.type === 'search') return buildCrawlSearchFetchRoute(params as FetchCrawlSearchParams);
-    throw new Error('source type must be one of: url, search');
-  }
-  if (Array.isArray((params as { urls?: unknown }).urls)) {
-    if ((params as { query?: unknown }).query !== undefined) return buildBatchCrawlFetchRoute(params as FetchBatchCrawlParams);
-    return buildBatchReadFetchRoute(params as FetchBatchReadParams);
-  }
-  if ((params as { siteMap?: unknown }).siteMap !== undefined) {
-    if ((params as { siteMap?: unknown }).siteMap !== true) throw new Error('siteMap must be true');
-    return buildSitemapFetchRoute(params as FetchSitemapParams);
-  }
-  if ((params as { url?: unknown }).url !== undefined) return buildReadFetchRoute(params as FetchReadParams);
-  throw new Error('fetch requires exactly one of: url, urls, source, or url+siteMap:true');
+  throw new Error('fetch requires explicit mode: read, crawl, batch_read, batch_crawl, sitemap, retrieve, or source_check');
 }
 
 export function buildBrowseArgs(params: { url: string; maxChars?: number }): Record<string, unknown> {

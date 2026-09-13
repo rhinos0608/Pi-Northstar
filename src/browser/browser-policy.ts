@@ -37,6 +37,11 @@ export const BROWSER_ACTIONS: readonly BrowserAction[] = [
   'semanticAction', 'job', 'batch',
 ] as const;
 
+type ObserveWhat = 'status' | 'tabs' | 'get_url' | 'get_title' | 'text' | 'html' | 'snapshot' | 'screenshot';
+const OBSERVE_FIELDS: Record<ObserveWhat, readonly ('selector' | 'compact')[]> = {
+  status: [], tabs: [], get_url: [], get_title: [], text: ['selector'], html: ['selector'], snapshot: ['compact'], screenshot: ['compact'],
+};
+
 export const LEGACY_ACTIONS: readonly BrowserAction[] = [
   'status', 'tabs', 'navigate', 'evaluate', 'text', 'html', 'screenshot',
   'click', 'type', 'scroll', 'close', 'cookies', 'set_cookies',
@@ -585,9 +590,14 @@ export interface BrowserRequest {
 }
 
 export function validateBrowserRequest(raw: Record<string, unknown>): BrowserRequest {
-  const actionRaw = typeof raw.action === 'string' ? raw.action : 'status';
+  const actionRaw = typeof raw.action === 'string' ? raw.action : typeof raw.what === 'string' ? raw.what : 'status';
   if (!(BROWSER_ACTIONS as readonly string[]).includes(actionRaw)) {
     throw new Error(`Unsupported browser action: ${actionRaw}`);
+  }
+  if (typeof raw.what === 'string') {
+    const allowed = OBSERVE_FIELDS[actionRaw as ObserveWhat] ?? [];
+    if (raw.selector !== undefined && !allowed.includes('selector')) throw new Error(`selector is not allowed for observe what '${actionRaw}'`);
+    if (raw.compact !== undefined && !allowed.includes('compact')) throw new Error(`compact is not allowed for observe what '${actionRaw}'`);
   }
   const action = actionRaw as BrowserAction;
 

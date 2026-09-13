@@ -35,6 +35,34 @@ export const GITHUB_ACTIONS = [
 
 export type GithubAction = (typeof GITHUB_ACTIONS)[number];
 
+export type GithubActionField =
+  | 'owner' | 'repo' | 'repository' | 'path' | 'paths' | 'branch' | 'ref'
+  | 'recursive' | 'includeReadme' | 'query' | 'language' | 'limit' | 'perPage'
+  | 'number' | 'sha' | 'since' | 'state' | 'labels' | 'tag' | 'latest'
+  | 'files' | 'author' | 'workflow' | 'status' | 'jobs' | 'cursor';
+
+export interface GithubActionFieldSpec {
+  readonly required: readonly GithubActionField[];
+  readonly optional: readonly GithubActionField[];
+  readonly repoSelector: boolean;
+}
+
+/** Schema-generation input. validateGithubRequest remains enforcement authority. */
+export const GITHUB_ACTION_FIELD_SPECS: Readonly<Record<GithubAction, GithubActionFieldSpec>> = {
+  repo: { required: [], optional: ['includeReadme'], repoSelector: true },
+  file: { required: ['path'], optional: ['paths', 'branch', 'ref'], repoSelector: true },
+  tree: { required: [], optional: ['path', 'branch', 'ref', 'recursive'], repoSelector: true },
+  search: { required: ['query'], optional: ['owner', 'repo', 'repository', 'language', 'limit', 'perPage', 'cursor'], repoSelector: false },
+  trending: { required: [], optional: ['language', 'since', 'limit', 'perPage'], repoSelector: false },
+  issues: { required: [], optional: ['number', 'state', 'labels', 'limit', 'perPage', 'cursor'], repoSelector: true },
+  pulls: { required: [], optional: ['number', 'state', 'labels', 'files', 'limit', 'perPage', 'cursor'], repoSelector: true },
+  releases: { required: [], optional: ['tag', 'latest', 'limit', 'perPage', 'cursor'], repoSelector: true },
+  commits: { required: [], optional: ['path', 'branch', 'ref', 'sha', 'since', 'author', 'limit', 'perPage', 'cursor'], repoSelector: true },
+  search_repos: { required: ['query'], optional: ['language', 'limit', 'perPage', 'cursor'], repoSelector: false },
+  workflows: { required: [], optional: ['workflow', 'limit', 'perPage', 'cursor'], repoSelector: true },
+  runs: { required: [], optional: ['workflow', 'status', 'number', 'jobs', 'limit', 'perPage', 'cursor'], repoSelector: true },
+};
+
 export function isGithubAction(value: unknown): value is GithubAction {
   return typeof value === 'string' && (GITHUB_ACTIONS as readonly string[]).includes(value);
 }

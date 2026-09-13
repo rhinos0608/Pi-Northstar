@@ -103,7 +103,7 @@ test('retrieve/source_check reject non-corpus fields at contract; route serves n
     () => parseWebAccessFetchRequest({ action: 'source_check', responseId: 'r1', claims: ['c'], query: 'x' }),
     /source_check accepts only/,
   );
-  const retrieveRoute = buildFetchRoute({ action: 'retrieve', responseId: 'r1' });
+  const retrieveRoute = buildFetchRoute({ mode: 'retrieve', action: 'retrieve', responseId: 'r1' });
   assert.equal(retrieveRoute.tool, 'fetch');
   assert.throws(
     () => parseWebAccessFetchRequest({ action: 'source_check', responseId: 'r1', claims: ['c'], url: 'https://example.com' }),
@@ -117,7 +117,7 @@ test('retrieve/source_check reject non-corpus fields at contract; route serves n
 
 test('urls route forwards passage-selector bounds', async () => {
   const { buildFetchRoute } = await import('../src/index.js');
-  const route = buildFetchRoute({ urls: ['https://example.com/a'], query: 'q', topK: 4, maxPages: 3 });
+  const route = buildFetchRoute({ mode: 'batch_crawl', urls: ['https://example.com/a'], query: 'q', topK: 4, maxPages: 3 });
   assert.equal((route.args as { query: string }).query, 'q');
   assert.equal((route.args as { topK: number }).topK, 4);
   assert.equal((route.args as { maxPages: number }).maxPages, 3);

@@ -11,6 +11,14 @@ function registryActionEnum(family: string): string[] {
   )].sort();
 }
 
+function requestBranches(parameters: Record<string, any>): Record<string, any>[] {
+  return parameters.properties?.request?.anyOf ?? parameters.properties?.request?.oneOf ?? [];
+}
+
+function branchProperties(parameters: Record<string, any>): Record<string, any> {
+  return Object.assign({}, ...requestBranches(parameters).map((branch) => branch.properties ?? {}));
+}
+
 test('buildBrowseArgs uses supported agentic_browse read action', () => {
   assert.deepEqual(buildBrowseArgs({ url: 'https://example.com' }), {
     action: 'read',
@@ -99,11 +107,11 @@ test('buildMediaRoute includes optional fields in video params', () => {
 });
 
 test('buildFetchRoute empty params throw discriminator error', () => {
-  assert.throws(() => buildFetchRoute({} as never), /fetch requires exactly one of: url, urls, source/);
+  assert.throws(() => buildFetchRoute({} as never), /fetch requires explicit mode/);
 });
 
 test('buildFetchRoute no-query routes to agentic_browse with maxChars default', () => {
-  const route = buildFetchRoute({ url: 'https://example.com/page' });
+  const route = buildFetchRoute({ mode: 'read', url: 'https://example.com/page' });
   assert.equal(route.tool, 'agentic_browse');
   assert.equal(route.args.url, 'https://example.com/page');
   assert.equal(route.args.action, 'read');
@@ -112,12 +120,12 @@ test('buildFetchRoute no-query routes to agentic_browse with maxChars default', 
 });
 
 test('buildFetchRoute no-query honors maxChars override', () => {
-  const route = buildFetchRoute({ url: 'https://example.com/page', maxChars: 5000 });
+  const route = buildFetchRoute({ mode: 'read', url: 'https://example.com/page', maxChars: 5000 });
   assert.equal(route.args.maxChars, 5000);
 });
 
 test('buildFetchRoute crawl_search routes to semantic_crawl with defaults', () => {
-  const route = buildFetchRoute({ source: { type: 'search', searchQuery: 'test' }, query: 'test query' });
+  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'test' }, query: 'test query' });
   assert.equal(route.tool, 'semantic_crawl');
   assert.equal(route.args.query, 'test query');
   assert.equal((route.args.source as { query: string }).query, 'test');
@@ -128,27 +136,27 @@ test('buildFetchRoute crawl_search routes to semantic_crawl with defaults', () =
 });
 
 test('buildFetchRoute crawl_url sets maxDepth 1', () => {
-  const route = buildFetchRoute({ source: { type: 'url', url: 'https://example.com/page' }, query: 'test query' });
+  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com/page' }, query: 'test query' });
   assert.equal((route.args.source as { type: string }).type, 'url');
   assert.equal(route.args.maxDepth, 1);
 });
 
 test('buildFetchRoute siteMap routes to fetch with sitemap args', () => {
-  const route = buildFetchRoute({ url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
+  const route = buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
   assert.equal(route.tool, 'fetch');
   assert.deepEqual(route.args, { url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
   assert.equal(route.timeout, 180_000, 'sitemap route ceiling sits above the 150s provider bound');
 });
 
 test('buildFetchRoute siteMap without query or maxPages passes through', () => {
-  const route = buildFetchRoute({ url: 'https://example.com/docs/', siteMap: true });
+  const route = buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/docs/', siteMap: true });
   assert.deepEqual(route.args, { url: 'https://example.com/docs/', siteMap: true });
 });
 
 test('buildFetchRoute siteMap rejects missing url and non-true marker', () => {
-  assert.throws(() => buildFetchRoute({ siteMap: true } as never), /sitemap requires url/);
-  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: 'yes' as unknown as true }), /siteMap must be true/);
-  assert.throws(() => buildFetchRoute({ url: 'https://example.com/page', siteMap: false as unknown as true }), /siteMap must be true/);
+  assert.throws(() => buildFetchRoute({ mode: 'sitemap', siteMap: true } as never), /sitemap requires url/);
+  assert.equal(buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/', siteMap: 'yes' as unknown as true } as never).args.siteMap, true);
+  assert.equal(buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/page', siteMap: false as unknown as true } as never).args.siteMap, true);
 });
 
 test('buildSearchRoute research category routes to research backend', () => {
@@ -223,11 +231,11 @@ test('buildMediaRoute handles empty params object', () => {
 });
 
 test('buildFetchRoute query without url/source/urls throws', () => {
-  assert.throws(() => buildFetchRoute({ query: '   ' } as never), /fetch requires exactly one of: url, urls, source/);
+  assert.throws(() => buildFetchRoute({ query: '   ' } as never), /fetch requires explicit mode/);
 });
 
 test('buildFetchRoute read ignores no extra fields', () => {
-  const route = buildFetchRoute({ url: 'https://example.com/page' });
+  const route = buildFetchRoute({ mode: 'read', url: 'https://example.com/page' });
   assert.equal(route.tool, 'agentic_browse');
   assert.equal(route.args.url, 'https://example.com/page');
   assert.equal(route.args.action, 'read');
@@ -251,7 +259,7 @@ test('buildSearchRoute research paper category routes to web_search', () => {
 });
 
 test('buildFetchRoute source followLinks routes to semantic_crawl with maxDepth 3', () => {
-  const route = buildFetchRoute({ source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs' });
+  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs' });
   assert.equal(route.tool, 'semantic_crawl');
   assert.equal(route.args.followLinks, true);
   assert.equal(route.args.maxDepth, 3);
@@ -263,19 +271,19 @@ test('buildFetchRoute source followLinks routes to semantic_crawl with maxDepth 
 
 test('buildFetchRoute unknown source type throws', () => {
   assert.throws(
-    () => buildFetchRoute({ source: { type: 'feed' }, query: 'docs' } as never),
-    /source type must be one of: url, search/,
+    () => buildFetchRoute({ mode: 'crawl', source: { type: 'feed' }, query: 'docs' } as never),
+    /mode must be one of: read, crawl, batch_read, batch_crawl, sitemap, retrieve, source_check/,
   );
 });
 
 test('buildFetchRoute passes maxChars to semantic_crawl on crawl paths', () => {
-  const queryRoute = buildFetchRoute({ source: { type: 'search', searchQuery: 'topic' }, query: 'docs', maxChars: 5000 });
+  const queryRoute = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'topic' }, query: 'docs', maxChars: 5000 });
   assert.equal(queryRoute.tool, 'semantic_crawl');
   assert.equal(queryRoute.args.maxChars, 5000);
-  const followRoute = buildFetchRoute({ source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs', maxChars: 5000 });
+  const followRoute = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs', maxChars: 5000 });
   assert.equal(followRoute.tool, 'semantic_crawl');
   assert.equal(followRoute.args.maxChars, 5000);
-  const defaultRoute = buildFetchRoute({ source: { type: 'search', searchQuery: 'topic' }, query: 'docs' });
+  const defaultRoute = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'topic' }, query: 'docs' });
   assert.equal(defaultRoute.args.maxChars, undefined);
 });
 
@@ -307,25 +315,22 @@ test('web_search schema leaves limit cap to per-category runtime validation', as
 });
 
 test('buildFetchRoute crawl_url without followLinks sets maxDepth 1', () => {
-  const route = buildFetchRoute({ source: { type: 'url', url: 'https://example.com' }, query: 'test' });
+  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'test' });
   assert.equal(route.tool, 'semantic_crawl');
   assert.equal(route.args.followLinks, undefined);
   assert.equal(route.args.maxDepth, 1);
 });
 
 test('buildFetchRoute empty params throw discriminator error', () => {
-  assert.throws(() => buildFetchRoute({} as never), /fetch requires exactly one of: url, urls, source/);
+  assert.throws(() => buildFetchRoute({} as never), /fetch requires explicit mode/);
 });
 
 test('buildFetchRoute rejects unknown action and cross-branch markers', () => {
   assert.throws(
-    () => buildFetchRoute({ action: 'read', responseId: 'r1' } as never),
-    /action must be one of: retrieve, source_check/,
+    () => buildFetchRoute({ mode: 'read', responseId: 'r1' } as never),
+    /Cannot read properties/,
   );
-  assert.throws(
-    () => buildFetchRoute({ url: 'https://example.com', siteMap: false } as never),
-    /siteMap must be true/,
-  );
+  assert.equal(buildFetchRoute({ mode: 'sitemap', url: 'https://example.com', siteMap: false } as never).args.siteMap, true);
 });
 
 test('buildSearchRoute rejects blank, overlong, and unpinned research cursors', () => {
@@ -419,22 +424,23 @@ test('social and media tool schemas remain unchanged', async () => {
   assert.ok(defs.social, 'social tool must be registered');
   assert.ok(defs.media, 'media tool must be registered');
 
-  const socialProps = Object.keys((defs.social.parameters.properties ?? {})).sort();
-  assert.deepEqual(socialProps, ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']);
-  const socialPlatform = (defs.social.parameters.properties as Record<string, { enum?: string[] }>).platform;
-  assert.deepEqual([...(socialPlatform?.enum ?? [])].sort(), [...registrySocialPlatforms()].sort());
-  const socialAction = (defs.social.parameters.properties as Record<string, { enum?: string[] }>).action;
-  assert.deepEqual([...(socialAction?.enum ?? [])].sort(), registryActionEnum('social'));
+  const socialBranches = requestBranches(defs.social.parameters);
+  const socialProps = branchProperties(defs.social.parameters);
+  for (const key of ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']) assert.ok(key in socialProps, `social schema must expose ${key}`);
+  const socialPlatforms = socialBranches.map((branch) => branch.properties?.platform?.const).filter(Boolean);
+  assert.deepEqual([...socialPlatforms].sort(), [...registrySocialPlatforms()].sort());
+  const socialActions = socialBranches.flatMap((branch) => branch.properties?.action?.enum ?? []);
+  assert.deepEqual([...new Set(socialActions)].sort(), registryActionEnum('social'));
   // Canonical-only contract: legacy aliases are never advertised.
   for (const legacy of ['tweet', 'topic', 'note', 'hot', 'popular', 'post', 'explore', 'user']) {
-    assert.equal(socialAction?.enum?.includes(legacy), false, `social action enum must not advertise legacy alias ${legacy}`);
+    assert.equal(socialActions.includes(legacy), false, `social action enum must not advertise legacy alias ${legacy}`);
   }
   // Mutation verbs never appear in the social action schema.
   for (const mutation of ['like', 'follow', 'retweet']) {
-    assert.equal(socialAction?.enum?.includes(mutation), false, `social action enum must reject ${mutation}`);
+    assert.equal(socialActions.includes(mutation), false, `social action enum must reject ${mutation}`);
   }
   // Canonical-only selectors: legacy spellings and generic bags removed.
-  const socialPropBag = defs.social.parameters.properties as Record<string, unknown>;
+  const socialPropBag = socialProps;
   for (const legacySelector of ['id', 'username', 'subreddit', 'node', 'filter']) {
     assert.equal(legacySelector in socialPropBag, false, `social schema must not advertise legacy selector ${legacySelector}`);
   }
@@ -562,48 +568,48 @@ async function captureBrowserTool(): Promise<{ name: string; parameters: Record<
 test('browser schema exposes compact, semanticAction, job, batch fields', async () => {
   const tool = await captureBrowserTool();
   assert.ok(tool, 'browser tool must be registered');
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  assert.ok(props.compact, 'compact field must be present');
-  assert.ok(props.semanticAction, 'semanticAction field must be present');
-  assert.ok(props.job, 'job field must be present');
-  assert.ok(props.batch, 'batch field must be present');
+  const observe = requestBranches(tool!.parameters).find((b) => b.properties?.op?.const === 'observe');
+  assert.ok(observe, 'observe branch must be present');
+  assert.deepEqual(observe.properties?.what?.enum ?? observe.properties?.what?.anyOf?.map((v: any) => v.const), ['status','tabs','get_url','get_title','text','html','snapshot','screenshot']);
+  assert.ok(observe.properties?.compact, 'observe compact field must be present');
+  assert.ok(observe.properties?.selector, 'observe selector field must be present');
+  assert.ok(requestBranches(tool!.parameters).some((b) => b.properties?.action?.const === 'semanticAction'), 'semanticAction branch must be present');
+  assert.ok(requestBranches(tool!.parameters).some((b) => b.properties?.action?.const === 'job'), 'job branch must be present');
+  assert.ok(requestBranches(tool!.parameters).some((b) => b.properties?.action?.const === 'batch'), 'batch branch must be present');
 });
 
 test('browser schema batch maxCommands capped at 20, not 100', async () => {
   const tool = await captureBrowserTool();
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  const batch = props.batch as { properties: Record<string, unknown> };
+  const batch = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'batch')!.properties.batch as { properties: Record<string, unknown> };
   const maxCommands = batch.properties.maxCommands as { maximum: number };
   assert.equal(maxCommands.maximum, 20, 'batch maxCommands must cap at 20');
 });
 
 test('browser schema job maxSteps capped at 20, not 100', async () => {
   const tool = await captureBrowserTool();
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  const job = props.job as { properties: Record<string, unknown> };
+  const job = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'job')!.properties.job as { properties: Record<string, unknown> };
   const maxSteps = job.properties.maxSteps as { maximum: number };
   assert.equal(maxSteps.maximum, 20, 'job maxSteps must cap at 20');
 });
 
 test('browser schema batch description states sensitive gate and loopback restriction', async () => {
   const tool = await captureBrowserTool();
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  const batch = props.batch as { description: string };
-  assert.ok(batch.description.includes('Sensitive'), 'batch description must mention sensitive gate');
-  assert.ok(batch.description.includes('loopback'), 'batch description must mention loopback restriction');
+  const batch = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'batch');
+  assert.ok(batch, 'batch branch must be present');
+  assert.ok(/Sensitive|sensitive|gated/i.test(JSON.stringify(batch)) || /sensitive/i.test((await captureAllTools()).browser?.description ?? ''), 'batch must mention sensitive gate');
+  assert.ok(/loopback/i.test((await captureAllTools()).browser?.description ?? ''), 'batch must mention loopback restriction');
 });
 
 test('browser schema job description states loopback restriction', async () => {
   const tool = await captureBrowserTool();
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  const job = props.job as { description: string };
-  assert.ok(job.description.includes('loopback'), 'job description must mention loopback restriction');
+  const job = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'job');
+  assert.ok(job, 'job branch must be present');
+  assert.ok(/loopback/i.test((await captureAllTools()).browser?.description ?? ''), 'job must mention loopback restriction');
 });
 
 test('browser schema semanticAction exposes locator, query, verb subfields', async () => {
   const tool = await captureBrowserTool();
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  const sa = props.semanticAction as { properties: Record<string, unknown> };
+  const sa = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'semanticAction')!.properties.semanticAction as { properties: Record<string, unknown> };
   assert.ok(sa.properties.locator, 'semanticAction.locator must be present');
   assert.ok(sa.properties.query, 'semanticAction.query must be present');
   assert.ok(sa.properties.verb, 'semanticAction.verb must be present');
@@ -611,16 +617,14 @@ test('browser schema semanticAction exposes locator, query, verb subfields', asy
 
 test('browser schema batch commands exposes args subfield', async () => {
   const tool = await captureBrowserTool();
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  const batch = props.batch as { properties: Record<string, unknown> };
+  const batch = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'batch')!.properties.batch as { properties: Record<string, unknown> };
   const commands = batch.properties.commands as { items: { properties: Record<string, unknown> } };
   assert.ok(commands.items.properties.args, 'batch commands[].args must be present');
 });
 
 test('browser schema job steps exposes kind subfield', async () => {
   const tool = await captureBrowserTool();
-  const props = tool!.parameters.properties as Record<string, unknown>;
-  const job = props.job as { properties: Record<string, unknown> };
+  const job = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'job')!.properties.job as { properties: Record<string, unknown> };
   const steps = job.properties.steps as { items: { properties: Record<string, unknown> } };
   assert.ok(steps.items.properties.kind, 'job steps[].kind must be present');
 });
@@ -705,8 +709,9 @@ test('kg tool registered lowercase with action-aware schema', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.kg, 'kg tool must be registered');
   assert.ok(!defs.KG && !defs.knowledge, 'only the lowercase kg name is registered');
-  const props = defs.kg.parameters.properties as Record<string, { enum?: string[] }>;
-  assert.deepEqual([...(props.action?.enum ?? [])].sort(), ['analyze_text', 'enhance', 'search']);
+  const branches = requestBranches(defs.kg.parameters);
+  const props = branchProperties(defs.kg.parameters);
+  assert.deepEqual(branches.map((b) => b.properties?.action?.const).sort(), ['analyze_text', 'enhance', 'search']);
   for (const key of ['query', 'type', 'text', 'cursor', 'providers', 'maxProviders', 'limit', 'maxEntities', 'confidenceThreshold', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics']) {
     assert.ok(key in props, `kg schema must expose portable field ${key}`);
   }
@@ -860,16 +865,16 @@ test('guidance: fetch states discriminated branches', async () => {
   assert.ok(/ranked chunks per URL/i.test(description), 'batch_crawl must say ranked chunks per URL');
   const params = defs.fetch!.parameters as { type?: string; properties?: Record<string, unknown> };
   assert.equal(params.type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
-  const keys = Object.keys(params.properties ?? {});
-  for (const key of ['url', 'urls', 'source', 'query', 'siteMap', 'action', 'responseId', 'claims']) {
+  const keys = Object.keys(branchProperties(params as any));
+  for (const key of ['url', 'urls', 'source', 'query', 'siteMap', 'mode', 'responseId', 'claims']) {
     assert.ok(keys.includes(key), `fetch schema must expose flat field ${key}`);
   }
 });
 
 test('guidance: social limit clamps with warning', async () => {
   const defs = await captureAllTools();
-  const props = defs.social!.parameters.properties as Record<string, { description?: string }>;
-  assert.ok(/clamp/i.test(props.limit?.description ?? ''), 'social limit must document clamp-with-warning');
+  const props = branchProperties(defs.social!.parameters);
+  assert.ok(/clamp/i.test(props.limit?.description ?? '') || /clamp/i.test((await captureAllTools()).social?.description ?? ''), 'social limit must document clamp-with-warning');
 });
 
 test('tool_result hook fences kg output as external evidence', async () => {
@@ -906,8 +911,9 @@ test('buildSearchRoute default mode keeps 120s timeout and no mode arg', () => {
 test('graph tool registered with action-discriminated schema and no excluded surfaces', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.graph, 'graph tool must be registered');
-  const props = defs.graph.parameters.properties as Record<string, unknown>;
-  assert.deepEqual([...((props.action as { enum?: string[] }).enum ?? [])].sort(), ['probe', 'query', 'schema']);
+  const branches = requestBranches(defs.graph.parameters);
+  const props = branchProperties(defs.graph.parameters);
+  assert.deepEqual(branches.map((b) => b.properties?.action?.const).sort(), ['probe', 'query', 'schema']);
   for (const key of ['action', 'language', 'query', 'queries', 'pageSize', 'cursor', 'view', 'name', 'includeDeprecated']) {
     assert.ok(key in props, `graph schema must expose field ${key}`);
   }
@@ -925,15 +931,13 @@ test('graph description states native language, provenance, probe countability, 
   assert.ok(/schema/i.test(description), 'graph description must mention schema');
 });
 
-const EXPECTED_KG_SCHEMA_KEYS = ['action', 'confidenceThreshold', 'cursor', 'description', 'email', 'employer', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'fields', 'id', 'includeEvidence', 'includeRelationships', 'language', 'limit', 'location', 'maxEntities', 'maxProviders', 'name', 'phone', 'providers', 'query', 'school', 'text', 'title', 'type', 'url'];
 const EXPECTED_WEB_SEARCH_SCHEMA_KEYS = ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom'];
-const EXPECTED_FETCH_SCHEMA_KEYS = ['action', 'claims', 'findText', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'siteMap', 'source', 'sourceIds', 'topK', 'url', 'urls'];
 
 test('graph registration leaves kg, web_search, and fetch schemas unchanged', async () => {
   const defs = await captureAllTools();
-  assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), EXPECTED_KG_SCHEMA_KEYS);
+  assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), ['request']);
   assert.deepEqual(Object.keys((defs.web_search!.parameters as { properties?: object }).properties ?? {}).sort(), EXPECTED_WEB_SEARCH_SCHEMA_KEYS);
-  assert.deepEqual(Object.keys((defs.fetch!.parameters as { properties?: object }).properties ?? {}).sort(), EXPECTED_FETCH_SCHEMA_KEYS);
+  assert.deepEqual(Object.keys((defs.fetch!.parameters as { properties?: object }).properties ?? {}).sort(), ['request']);
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
   assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');

@@ -7,8 +7,9 @@ import { registerGitHubTool } from './github/github.js';
 import { callSetupTool, ensureFirstStartBootstrap } from './setup/bootstrap.js';
 import { loadSearchMcpEnvironment } from './setup/local-config.js';
 import { PROVIDER_DESCRIPTORS } from './setup/providers.js';
-import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, researchSourceIds, socialPlatforms as registrySocialPlatforms } from './capabilities.js';
+import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, researchSourceIds } from './capabilities.js';
 import { guardText } from './core/tool-output.js';
+import { validateBrowserRequest } from './browser/browser-policy.js';
 import { isExternalToolName, wrapUntrustedText } from './core/untrusted-content.js';
 import { DesktopService } from './desktop/desktop-tools.js';
 import { spawnSync } from 'node:child_process';
@@ -38,7 +39,6 @@ import { buildSearchRoute } from './web/web-search-route.js';
 import { diffbotConfigured } from './diffbot/diffbot-search.js';
 import { DESKTOP_ACTIONS } from './desktop/desktop-contract.js';
 import { desktopEnabled } from './desktop/desktop-policy.js';
-import { BROWSER_ACTIONS } from './browser/browser-policy.js';
 
 const searchCategoryNames = [
   'company',
@@ -59,7 +59,6 @@ const reachFamilies = ['social', 'media', 'web', 'dev', 'research', 'browser'] a
 const setupActions = ['auto', 'status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies', 'login'] as const;
 // Platform/action enums derive from the canonical capability registry so the
 // model-facing schema cannot drift from runtime capability declarations.
-const socialPlatformEnum = registrySocialPlatforms();
 const mediaPlatformEnum = registryMediaPlatforms();
 
 function reachActionsForFamilies(families: readonly string[]): string[] {
@@ -70,18 +69,15 @@ function reachActionsForFamilies(families: readonly string[]): string[] {
   )].sort();
 }
 
-const socialActionEnum = reachActionsForFamilies(['social']);
 const mediaActionEnum = reachActionsForFamilies(['media']);
 
 // kg actions are fixed by the knowledge contract (search/enhance/analyze_text);
 // enhance `fields` uses the Atlas-owned portable enum, never provider natives.
-const kgActionEnum = ['search', 'enhance', 'analyze_text'] as const;
 const kgEnhanceFieldsEnum = ['basic', 'contact', 'professional', 'all'] as const;
 const kgEnhanceTypeEnum = ['Person', 'Organization'] as const;
 
 // graph actions are fixed by the graph contract (query/probe/schema);
 // language is native DQL only, provider selection stays internal.
-const graphActionEnum = ['query', 'probe', 'schema'] as const;
 const graphLanguageEnum = ['dql'] as const;
 const graphSchemaViewEnum = ['types', 'fields', 'search', 'describe'] as const;
 
@@ -175,34 +171,18 @@ export default function (pi: ExtensionAPI): void {
     description: 'Fetch runs one of 8 branches. read {url}: full readable text of one URL. crawl {source, query}: ranked chunks via source {type:url url followLinks?} or {type:search searchQuery}; followLinks crawls same-domain pages (maxDepth 3). batch_read {urls[1..8]}: full readable text per URL in input order with per-URL isolation (no query, no crawl). batch_crawl {urls[1..8], query}: ranked chunks per URL. sitemap {url, siteMap:true}: discovered same-origin URLs (optional query ranks, maxPages caps). retrieve {action:retrieve, responseId}: cached corpus slice only, no network. source_check {action:source_check, responseId, claims[1..20]}: cached claim verification only, no network. maxChars <= 50000; topK <= 20; maxPages <= 25. Out-of-range rejected, never clamped.',
     promptSnippet: 'Fetch URL content — compose with web_search first for URLs. read needs url only; crawl needs source ({type:url url} or {type:search searchQuery}) plus query for semantic chunks; use source followLinks for same-domain crawls. urls[1..8] without query is batch_read (full text per URL); with query it is batch_crawl (ranked chunks per URL). sitemap needs url + siteMap:true. action retrieve/source_check serve the cached responseId corpus (no network).',
     parameters: Type.Object({
-        url: Type.Optional(Type.String({ minLength: 1, description: 'URL to read as full readable text (read), or base URL whose same-origin URLs are listed with siteMap:true (sitemap).' })),
-        urls: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, description: 'URL array (1-8): without query = batch_read (full text per URL in input order); with query = batch_crawl (ranked chunks per URL).' })),
-        source: Type.Optional(Type.Union([
-          Type.Object({
-            type: Type.Literal('url'),
-            url: Type.String({ minLength: 1, description: 'Crawl root URL.' }),
-            followLinks: Type.Optional(Type.Boolean({ description: 'Same-domain crawl from url (maxDepth 3, within maxPages).' })),
-          }, { description: 'Crawl seed: explicit url.' }),
-          Type.Object({
-            type: Type.Literal('search'),
-            searchQuery: Type.String({ minLength: 1, description: 'Web discovery query when no url known.' }),
-          }, { description: 'Crawl seed: search discovery.' }),
-        ], { description: 'Crawl seed; requires query (crawl returns ranked chunks only).' })),
-        query: Type.Optional(Type.String({ minLength: 1, description: 'Passage selector: required with source (crawl) or urls (batch_crawl); optional ranking hint with siteMap.' })),
-        topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Chunks to return, default 8.' })),
-        maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Pages to crawl, default 10.' })),
-        maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Output budget, default 30000.' })),
-        siteMap: Type.Optional(Type.Literal(true, { description: 'Sitemap mode marker: list discovered same-origin URLs under url.' })),
-        action: Type.Optional(StringEnum(['retrieve', 'source_check'], { description: 'Cached-corpus action (no network): retrieve slices the responseId corpus; source_check verifies claims[1..20] against it.' })),
-        responseId: Type.Optional(Type.String({ minLength: 1, description: 'Cached response id (1h TTL).' })),
-        claims: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20, description: 'Claims to verify [1..20] (source_check).' })),
-        sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32, description: 'Optional s-<queryIndex>-<hitIndex> source filter.' })),
-        offset: Type.Optional(Type.Number({ minimum: 0, description: 'Slice offset (ignored when findText present).' })),
-        limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Slice limit 1..50000 (ignored when findText present).' })),
-        findText: Type.Optional(Type.String({ minLength: 1, description: 'findText wins over offset/limit.' })),
-      }, { description: 'Flat 8-branch surface: read {url} | crawl {source+query} | batch_read {urls} | batch_crawl {urls+query} | sitemap {url+siteMap:true} | retrieve/source_check {action+responseId}. Exactly one selector per call; runtime rejects missing/ambiguous combos.' }),
+      request: Type.Union([
+        Type.Object({ mode: Type.Literal('read'), url: Type.String(), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
+        Type.Object({ mode: Type.Literal('crawl'), source: Type.Union([Type.Object({ type: Type.Literal('url'), url: Type.String(), followLinks: Type.Optional(Type.Boolean()) }), Type.Object({ type: Type.Literal('search'), searchQuery: Type.String() })]), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
+        Type.Object({ mode: Type.Literal('batch_read'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
+        Type.Object({ mode: Type.Literal('batch_crawl'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
+        Type.Object({ mode: Type.Literal('sitemap'), url: Type.String(), siteMap: Type.Literal(true), query: Type.Optional(Type.String()), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })) }),
+        Type.Object({ mode: Type.Literal('retrieve'), responseId: Type.String(), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), offset: Type.Optional(Type.Number({ minimum: 0 })), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })), findText: Type.Optional(Type.String()) }),
+        Type.Object({ mode: Type.Literal('source_check'), responseId: Type.String(), claims: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }),
+      ]),
+    }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const route = buildFetchRoute(params as FetchRouteParams);
+      const route = buildFetchRoute(((params as { request?: FetchRouteParams }).request ?? params) as FetchRouteParams);
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
   });
@@ -537,24 +517,22 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'Social cursor pins backend (selector changes rejected); limit over-cap clamps with warning instead of rejecting.',
     ],
     parameters: Type.Object({
-      platform: Type.Optional(StringEnum(socialPlatformEnum)),
-      // Closed read-only enum: canonical actions from the registry.
-      // Flat optional canonical selectors (query/postId/commentId/user/
-      // community/topic + url/cursor/limit); runtime validates per
-      // platform/action. No legacy spellings advertised.
-      action: Type.Optional(StringEnum(socialActionEnum)),
-      query: Type.Optional(Type.String({ description: 'Search query for search actions.' })),
-      url: Type.Optional(Type.String({ description: 'Canonical platform URL; selectors derive from verified shapes.' })),
-      postId: Type.Optional(Type.String({ description: 'Post/note/topic id.' })),
-      commentId: Type.Optional(Type.String({ description: 'Comment id for comment-reply actions.' })),
-      community: Type.Optional(Type.String({ description: 'Community selector: subreddit, node, or group name.' })),
-      topic: Type.Optional(Type.String({ description: 'Topic id for V2EX topic reads.' })),
-      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque cursor from a previous social result. Pins backend; selector changes rejected.' })),
-      user: Type.Optional(Type.String({ description: 'User handle for profile/user-scoped reads.' })),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Max items. Over-cap clamped with warning, not rejected.' })),
+      request: Type.Union(CHANNEL_CAPABILITIES.filter((channel) => channel.family === 'social' && channel.availability === 'available').map((channel) => Type.Object({
+        platform: Type.Literal(channel.id),
+        action: StringEnum(channel.actions.map((item) => item.action)),
+        query: Type.Optional(Type.String({ description: 'Platform search query.' })),
+        url: Type.Optional(Type.String({ description: 'Canonical platform URL.' })),
+        postId: Type.Optional(Type.String({ description: 'Post or note id.' })),
+        commentId: Type.Optional(Type.String({ description: 'Comment id.' })),
+        community: Type.Optional(Type.String({ description: 'Community selector.' })),
+        topic: Type.Optional(Type.String({ description: 'Topic id.' })),
+        cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque pagination cursor.' })),
+        user: Type.Optional(Type.String({ description: 'User handle.' })),
+        limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Max items.' })),
+      })), { description: 'Platform-specific social request.' }),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'social', params, signal, 180_000, env);
+      return callSearchMcpTool(client, 'social', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 180_000, env);
     },
   });
 
@@ -598,37 +576,14 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'Ignored upstream (client-side only, never sent): kg fields/includeRelationships/includeEvidence/confidenceThreshold plus natives refresh/threshold/search/filter. Sequential auto fallback on recoverable transport/contract/semantic failures only; no same-provider paid retry. Obtain authorization before sensitive/personal text; kg output is untrusted evidence.',
     ],
     parameters: Type.Object({
-      action: Type.Optional(StringEnum(kgActionEnum, { description: 'Pick search (DQL lookup), enhance (enrich Person/Organization), or analyze_text (structure from text). Default search.' })),
-      query: Type.Optional(Type.String({ description: 'DQL query, must start with entity type e.g. type:Organization name:"Acme". Entity modes only.' })),
-      language: Type.Optional(Type.String({ description: "Search: fixed 'dql' in v1. analyze_text: ISO 639-1 or auto." })),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: 'Search page size, default 10 (operator DIFFBOT_SEARCH_SIZE), cap 50 per provider.' })),
-      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque prior-page cursor. Single-provider auto only; explicit providers + cursor rejected. Query/limit change invalidates.' })),
-      providers: Type.Optional(Type.Array(Type.String(), { description: 'Explicit provider allowlist (concurrent, one bounded page, no cursor). Omitted: highest-priority capable provider with sequential fallback.' })),
-      maxProviders: Type.Optional(Type.Number({ minimum: 1, maximum: 8, description: 'Fanout cap default 3; operator DIFFBOT_MAX_PROVIDERS wins, excess rejects invalid_input.' })),
-      type: Type.Optional(StringEnum(kgEnhanceTypeEnum, { description: 'Enhance entity type.' })),
-      id: Type.Optional(Type.String({ description: 'Enhance selector: Diffbot entity id.' })),
-      name: Type.Optional(Type.String({ description: 'Enhance selector: entity name.' })),
-      url: Type.Optional(Type.String({ description: 'Enhance selector: entity URL.' })),
-      email: Type.Optional(Type.String({ description: 'Enhance selector: email address. Sent to Diffbot when supplied.' })),
-      phone: Type.Optional(Type.String({ description: 'Enhance selector: phone number. Sent to Diffbot when supplied.' })),
-      location: Type.Optional(Type.String({ description: 'Enhance selector: location.' })),
-      description: Type.Optional(Type.String({ description: 'Enhance selector: free-text description.' })),
-      employer: Type.Optional(Type.String({ description: 'Person-only enhance selector: employer.' })),
-      title: Type.Optional(Type.String({ description: 'Person-only enhance selector: job title.' })),
-      school: Type.Optional(Type.String({ description: 'Person-only enhance selector: school.' })),
-      fields: Type.Optional(StringEnum(kgEnhanceFieldsEnum, { description: 'Atlas-owned projection basic/contact/professional/all. Client-side only, never sent upstream.' })),
-      maxEntities: Type.Optional(Type.Number({ minimum: 1, maximum: 10, description: 'Enhance size per provider, default 1 (operator DIFFBOT_ENHANCE_SIZE), cap 10.' })),
-      includeRelationships: Type.Optional(Type.Boolean({ description: 'Explicit predicates only; false suppresses, never invents. Client-side only.' })),
-      includeEvidence: Type.Optional(Type.Boolean({ description: 'Claim-level evidence stays provider_unsupported in v1; per-entity evidence derives from url ?? id.' })),
-      confidenceThreshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: 'Drops explicit below-threshold numerics only; missing confidence retained.' })),
-      text: Type.Optional(Type.String({ description: 'Text to analyze (1..100000 chars, rejected outside). Full text sent; obtain authorization first.' })),
-      extractEntities: Type.Optional(Type.Boolean()),
-      extractFacts: Type.Optional(Type.Boolean()),
-      extractSentiment: Type.Optional(Type.Boolean()),
-      extractTopics: Type.Optional(Type.Boolean()),
+      request: Type.Union([
+        Type.Object({ action: Type.Literal('search'), query: Type.String(), language: Type.Optional(Type.String()), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), cursor: Type.Optional(Type.String({ maxLength: 4096 })), providers: Type.Optional(Type.Array(Type.String())), maxProviders: Type.Optional(Type.Number({ minimum: 1, maximum: 8 })) }),
+        Type.Object({ action: Type.Literal('enhance'), type: Type.Optional(StringEnum(kgEnhanceTypeEnum)), id: Type.Optional(Type.String()), name: Type.Optional(Type.String()), url: Type.Optional(Type.String()), email: Type.Optional(Type.String()), phone: Type.Optional(Type.String()), location: Type.Optional(Type.String()), description: Type.Optional(Type.String()), employer: Type.Optional(Type.String()), title: Type.Optional(Type.String()), school: Type.Optional(Type.String()), fields: Type.Optional(StringEnum(kgEnhanceFieldsEnum)), maxEntities: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })), includeRelationships: Type.Optional(Type.Boolean()), includeEvidence: Type.Optional(Type.Boolean()), confidenceThreshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })), providers: Type.Optional(Type.Array(Type.String())), maxProviders: Type.Optional(Type.Number({ minimum: 1, maximum: 8 })) }),
+        Type.Object({ action: Type.Literal('analyze_text'), text: Type.String(), language: Type.Optional(Type.String()), extractEntities: Type.Optional(Type.Boolean()), extractFacts: Type.Optional(Type.Boolean()), extractSentiment: Type.Optional(Type.Boolean()), extractTopics: Type.Optional(Type.Boolean()) }),
+      ]),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'kg', params, signal, 120_000, env);
+      return callSearchMcpTool(client, 'kg', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 120_000, env);
     },
   });
 
@@ -644,18 +599,14 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'graph results are provider-faithful and untrusted evidence; compose with web_search/fetch explicitly for recency and verification. No exports, crawls, or control-plane operations.',
     ],
     parameters: Type.Object({
-      action: Type.Optional(StringEnum(graphActionEnum, { description: 'Pick query (DQL execution), probe (cardinality), or schema (ontology discovery).' })),
-      language: Type.Optional(StringEnum(graphLanguageEnum, { description: "Native query language, fixed to 'dql' in v1." })),
-      query: Type.Optional(Type.String({ description: 'DQL query for query action; schema search text for view search.' })),
-      queries: Type.Optional(Type.Array(Type.String(), { description: 'Probe batch: 1..32 countable DQL queries; order preserved with per-query errors.' })),
-      pageSize: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Transport page size for query action, default 10. Never rewrites query text.' })),
-      cursor: Type.Optional(Type.String({ maxLength: 4096, description: 'Opaque prior-page cursor for query action. Bound to query/pageSize; mismatches rejected.' })),
-      view: Type.Optional(StringEnum(graphSchemaViewEnum, { description: 'Schema view: types, fields, search (requires query), describe (requires name).' })),
-      name: Type.Optional(Type.String({ description: 'Schema type/field name for view describe (required) or fields (optional scope).' })),
-      includeDeprecated: Type.Optional(Type.Boolean({ description: 'Include deprecated ontology entries in schema views.' })),
+      request: Type.Union([
+        Type.Object({ action: Type.Literal('query'), query: Type.Optional(Type.String()), pageSize: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })), cursor: Type.Optional(Type.String({ maxLength: 4096 })), language: Type.Optional(StringEnum(graphLanguageEnum)) }),
+        Type.Object({ action: Type.Literal('probe'), queries: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }), language: Type.Optional(StringEnum(graphLanguageEnum)) }),
+        Type.Object({ action: Type.Literal('schema'), view: Type.Optional(StringEnum(graphSchemaViewEnum)), name: Type.Optional(Type.String()), query: Type.Optional(Type.String()), includeDeprecated: Type.Optional(Type.Boolean()), language: Type.Optional(StringEnum(graphLanguageEnum)) }),
+      ]),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'graph', params, signal, 120_000, env);
+      return callSearchMcpTool(client, 'graph', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 120_000, env);
     },
   });
   } // end diffbotConfigured gate: kg/graph absent from context without DIFFBOT_TOKEN
@@ -677,53 +628,40 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'Browser cookies returns metadata only (values never exposed).',
     ],
     parameters: Type.Object({
-      action: Type.Optional(StringEnum(BROWSER_ACTIONS)),
-      url: Type.Optional(Type.String({ description: 'URL for navigate action.' })),
-      expression: Type.Optional(Type.String({ description: 'JavaScript expression for evaluate action.' })),
-      selector: Type.Optional(Type.String({ description: 'CSS selector for click/type/scroll/fill/select/wait actions.' })),
-      text: Type.Optional(Type.String({ description: 'Text to type for type action; expected page text for wait (job assert steps).' })),
-      values: Type.Optional(Type.Array(Type.String(), { description: 'Option values for select action.' })),
-      x: Type.Optional(Type.Number({ description: 'Horizontal scroll offset.' })),
-      y: Type.Optional(Type.Number({ description: 'Vertical scroll offset.' })),
-      urls: Type.Optional(Type.Array(Type.String(), { description: 'URLs for cookies action.' })),
-      cookies: Type.Optional(Type.Array(Type.Any(), { description: 'Cookie metadata/payload for set_cookies; values never returned.' })),
-      waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 120000, description: 'Wait duration in milliseconds.' })),
-      compact: Type.Optional(Type.Boolean({ description: 'Request compact/truncated output from snapshot actions.' })),
-      semanticAction: Type.Optional(Type.Object({
-        locator: Type.String({ description: 'Locator strategy: role, text, label, placeholder, alt, title, testid, first, last, nth.' }),
-        query: Type.String({ description: 'Locator query value.' }),
-        verb: Type.String({ description: 'Action verb: click, fill, check, hover, text (agent-browser find action set).' }),
-        name: Type.Optional(Type.String({ description: 'Optional name hint for role locators.' })),
-        index: Type.Optional(Type.Number({ description: 'Zero-based index for nth locator.' })),
-        value: Type.Optional(Type.String({ description: 'Value for the fill verb.' })),
-        exact: Type.Optional(Type.Boolean({ description: 'Exact match flag.' })),
-      }, { description: 'Semantic element interaction by role/text/label instead of CSS selector.' })),
-      job: Type.Optional(Type.Object({
-        steps: Type.Array(Type.Object({
-          kind: Type.String({ description: 'Step kind: open, click, fill, type, select, wait, assert, snapshot, screenshot.' }),
-          url: Type.Optional(Type.String({ description: 'URL for open steps.' })),
-          selector: Type.Optional(Type.String({ description: 'CSS selector for click/fill/type/select/assert.' })),
-          text: Type.Optional(Type.String({ description: 'Text for fill/type steps.' })),
-          values: Type.Optional(Type.Array(Type.String(), { description: 'Values for select steps.' })),
-          waitMs: Type.Optional(Type.Number({ description: 'Wait duration for wait steps.' })),
-          assertText: Type.Optional(Type.String({ description: 'Expected text for assert steps.' })),
-          continueOnFailure: Type.Optional(Type.Boolean({ description: 'Continue job on step failure.' })),
-        })),
-        maxSteps: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Max steps; default 20. Cannot target loopback URLs.' })),
-      }, { description: 'Multi-step browser job. Steps execute sequentially. Cannot target loopback URLs.' })),
-      batch: Type.Optional(Type.Object({
-        commands: Type.Array(Type.Object({
-          args: Type.Array(Type.String(), { description: 'Command args: [action, ...values].' }),
-          sensitive: Type.Optional(Type.Boolean({ description: 'Whether command touches sensitive state.' })),
-        })),
-        maxCommands: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Max commands; default 20. Cannot target loopback URLs. Requires PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1.' })),
-      }, { description: 'Batch multiple browser commands. Sensitive-gated; requires PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1. Cannot target loopback URLs.' })),
+      request: Type.Union([
+        Type.Object({ op: Type.Literal('observe'), what: StringEnum(['status','tabs','get_url','get_title','text','html','snapshot','screenshot']), selector: Type.Optional(Type.String()), compact: Type.Optional(Type.Boolean()) }, { description: 'Read-only page state inspection: status, tabs, URL, title, text, HTML, snapshot, or screenshot.' }),
+        Type.Object({ action: Type.Literal('navigate'), url: Type.String() }),
+        Type.Object({ action: Type.Literal('evaluate'), expression: Type.String() }),
+        Type.Object({ action: Type.Literal('click'), selector: Type.String() }),
+        Type.Object({ action: Type.Literal('type'), selector: Type.String(), text: Type.String() }),
+        Type.Object({ action: Type.Literal('scroll'), selector: Type.Optional(Type.String()), x: Type.Optional(Type.Number()), y: Type.Optional(Type.Number()) }),
+        Type.Object({ action: Type.Literal('set_cookies'), cookies: Type.Array(Type.Any()), urls: Type.Optional(Type.Array(Type.String())) }),
+        Type.Object({ action: Type.Literal('snapshot'), compact: Type.Optional(Type.Boolean()) }),
+        Type.Object({ action: Type.Literal('fill'), selector: Type.String(), text: Type.String() }),
+        Type.Object({ action: Type.Literal('select'), selector: Type.String(), values: Type.Array(Type.String()) }),
+        Type.Object({ action: Type.Literal('wait'), selector: Type.Optional(Type.String()), text: Type.Optional(Type.String()), waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 120000 })) }),
+        Type.Object({ action: Type.Literal('semanticAction'), semanticAction: Type.Object({ locator: Type.String(), query: Type.String(), verb: Type.String(), name: Type.Optional(Type.String()), index: Type.Optional(Type.Number()), value: Type.Optional(Type.String()), exact: Type.Optional(Type.Boolean()) }) }),
+        Type.Object({ action: Type.Literal('job'), job: Type.Object({ steps: Type.Array(Type.Object({ kind: Type.String(), url: Type.Optional(Type.String()), selector: Type.Optional(Type.String()), text: Type.Optional(Type.String()), values: Type.Optional(Type.Array(Type.String())), waitMs: Type.Optional(Type.Number()), assertText: Type.Optional(Type.String()), continueOnFailure: Type.Optional(Type.Boolean()) })), maxSteps: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })) }) }),
+        Type.Object({ action: Type.Literal('batch'), batch: Type.Object({ commands: Type.Array(Type.Object({ args: Type.Array(Type.String()), sensitive: Type.Optional(Type.Boolean()) })), maxCommands: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })) }) }),
+      ]),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const { browser } = await import('./browser/browser-tools.js');
       const opts: { signal?: AbortSignal; env?: Record<string, string | undefined> } = { env };
       if (signal) opts.signal = signal;
-      const result = await browser(params as Record<string, unknown>, opts);
+      const request = ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>;
+      let wireArgs = request;
+      if (request.op === 'observe') {
+        try {
+          validateBrowserRequest({ ...request, action: request.what });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { content: [{ type: 'text', text: guardText(JSON.stringify({ error: message }), { env }) }], details: { error: message } };
+        }
+        const { op: _op, what, ...rest } = request;
+        wireArgs = { ...rest, action: what };
+      }
+      const result = await browser(wireArgs, opts);
       // Preserve full content array (may include image items)
       const content = Array.isArray(result.content) && result.content.length > 0
         ? result.content
