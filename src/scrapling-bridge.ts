@@ -60,16 +60,24 @@ def main():
                 safe_redirect_kwargs = {"follow_redirects": "safe", "max_redirects": 10}
 
                 # Browser-engine route interception (enforced by Scrapling via
-                # Playwright request abortion, suffix-matched). Mirrors the
-                # Node BLOCKED_HOSTNAMES plus the highest-risk IP literals;
-                # CIDR ranges cannot be expressed here - the static Fetcher
-                # safe mode and the Node final-URL check cover those.
+                # Playwright request abortion, suffix-matched on domain names).
+                # Mirrors the Node BLOCKED_HOSTNAMES plus the highest-risk IP
+                # literals (loopback, link-local, cloud metadata, common gateway
+                # addresses). CIDR ranges cannot be expressed here - only the
+                # static Fetcher safe-redirect mode and the Node final-URL check
+                # cover those. Packets to a redirect target can already have left
+                # the host before Node revalidates: container egress stays the
+                # authoritative boundary for browser-engine fetchers.
                 browser_blocked = {
                     "localhost", "metadata", "metadata.google.internal",
                     "metadata.azure.com", "instance-data",
+                    "instance-data.compute.internal",
                     "host.docker.internal", "gateway.docker.internal",
-                    "127.0.0.1", "::1", "169.254.169.254",
-                    "0.0.0.0", "10.0.0.1",
+                    "127.0.0.1", "::1", "0.0.0.0",
+                    "169.254.169.254", "100.100.100.200",
+                    "10.0.0.1", "10.0.2.2",
+                    "192.168.0.1", "192.168.1.1",
+                    "172.16.0.1", "172.17.0.1",
                 }
 
                 if fetcher_name == "dynamic":
@@ -227,10 +235,15 @@ export class ScraplingBridge {
     const envEnabled = env.PI_SEARCH_SCRAPLING_ENABLED;
     this._enabled = envEnabled === undefined || (envEnabled !== '0' && envEnabled !== 'false' && envEnabled !== '');
 
+    const envFetcher = env.PI_SEARCH_SCRAPLING_FETCHER;
+    const validFetcher = envFetcher === 'fetcher' || envFetcher === 'dynamic' || envFetcher === 'stealthy'
+      ? envFetcher
+      : undefined;
+    const envSolve = env.PI_SEARCH_SCRAPLING_SOLVE_CLOUDFLARE;
     this.options = {
       pythonPath: options?.pythonPath ?? env.PI_SEARCH_SCRAPLING_PYTHON_PATH ?? DEFAULT_PYTHON_PATH,
-      fetcher: options?.fetcher ?? 'stealthy',
-      solveCloudflare: options?.solveCloudflare ?? true,
+      fetcher: options?.fetcher ?? validFetcher ?? 'stealthy',
+      solveCloudflare: options?.solveCloudflare ?? !(envSolve === '0' || envSolve === 'false'),
       proxy: options?.proxy ?? env.PI_SEARCH_SCRAPLING_PROXY ?? undefined,
       fetchTimeout: options?.fetchTimeout ?? DEFAULT_FETCH_TIMEOUT_MS,
       extractLinks: options?.extractLinks ?? false,
@@ -277,6 +290,28 @@ export class ScraplingBridge {
       return this.fallbackFetch(validatedUrl);
     }
 
+    // App-layer SSRF note: static + DNS preflight above run before any
+    // subprocess spawns, and the final-URL check below fails closed without
+    // fallback. Neither can guarantee no packet reaches an internal address:
+    // the Python engine follows redirects / resolves DNS on its own. The
+    // static 'fetcher' path additionally gets safe-redirect kwargs; the
+    // browser-engine paths (dynamic/stealthy) get only suffix-matched
+    // blocked_domains. Container egress is the authoritative boundary.
+    // Proxy passthrough is operator-owned: a proxy can relay anywhere, so a
+    // configured proxy must itself be trusted. Fail closed on malformed proxy.
+    let proxy: string | null = this.options.proxy ?? null;
+    if (proxy !== null) {
+      let scheme = '';
+      try {
+        scheme = new URL(proxy).protocol;
+      } catch {
+        throw new Error('Invalid Scrapling proxy URL');
+      }
+      if (scheme !== 'http:' && scheme !== 'https:') {
+        throw new Error('Invalid Scrapling proxy URL');
+      }
+    }
+
     const scriptPath = ScraplingBridge.ensureScript();
 
     // Serialize fetch calls so queued operations cannot start while a prior
@@ -294,7 +329,7 @@ export class ScraplingBridge {
             url: validatedUrl,
             fetcher: this.options.fetcher,
             solve_cloudflare: this.options.solveCloudflare,
-            proxy: this.options.proxy ?? null,
+            proxy,
             timeout: this.options.fetchTimeout,
             extract_links: this.options.extractLinks ?? false,
           });

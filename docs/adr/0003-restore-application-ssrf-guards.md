@@ -26,6 +26,13 @@ These controls do not claim complete SSRF containment:
 - DNS rebinding can change a hostname after preflight.
 - Chromium performs its own DNS resolution, creating DNS TOCTOU after application checks.
 - Redirect-following paths may reach a target not covered by initial validation.
+- Scrapling Python engine resolves DNS and follows redirects on its own: Node
+  preflight (before spawn) plus final-URL revalidation (fail closed, never
+  served or fallen back) cannot guarantee no packet reached an internal
+  address. The static `fetcher` path additionally enforces safe redirects;
+  browser-engine fetchers (`dynamic`/`stealthy`) get only suffix-matched
+  `blocked_domains` (CIDR ranges are not expressible there). A configured
+  Scrapling proxy is operator-owned and can relay anywhere.
 - A loopback debug server can proxy outbound traffic from its own process.
 - Container egress restrictions remain authoritative outer containment.
 
