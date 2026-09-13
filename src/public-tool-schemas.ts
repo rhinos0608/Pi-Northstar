@@ -9,6 +9,7 @@ import {
   MAX_WEB_QUERY_LENGTH,
   RESEARCH_SEARCH_LIMIT_MAX,
   SEARCH_CATEGORY_NAMES,
+  WEB_MAX_CURSOR_LENGTH,
   WEB_SEARCH_LIMIT_MAX,
   WEB_SEARCH_MAX_BATCH_QUERIES,
   WEB_SEARCH_MAX_DOMAINS,
@@ -50,9 +51,17 @@ function webFilterFields(options?: { agent?: boolean; limitMax?: number; researc
 export function buildWebSearchParameters(): TSchema {
   const queryField = Type.String({ minLength: 1, maxLength: MAX_WEB_QUERY_LENGTH, description: 'Single search query. Provide exactly one of query (single/agent) or queries (batch, 1..8).' });
   const batchField = Type.Array(Type.String({ minLength: 1, maxLength: MAX_WEB_QUERY_LENGTH }), { minItems: 1, maxItems: WEB_SEARCH_MAX_BATCH_QUERIES, description: 'Batch queries 1..8, fused in order through the canonical web runtime (one RRF pass over per-query rankings).' });
+  const cursorField = Type.String({ minLength: 1, maxLength: WEB_MAX_CURSOR_LENGTH, description: 'Opaque research continuation cursor. Single query + category "research" + one exact source only.' });
   return Type.Union([
     Type.Object({ query: queryField, ...webFilterFields({ limitMax: WEB_SEARCH_LIMIT_MAX }) }, { additionalProperties: false, description: 'Single-query web search.' }),
     Type.Object({ query: queryField, ...webFilterFields({ limitMax: RESEARCH_SEARCH_LIMIT_MAX, researchOnly: true }) }, { additionalProperties: false, description: 'Single-query research search (category research, limit max 30).' }),
+    Type.Object({
+      query: queryField,
+      ...webFilterFields({ limitMax: RESEARCH_SEARCH_LIMIT_MAX, researchOnly: true }),
+      category: Type.Literal('research', { description: 'Research category pin for the research limit cap (30).' }),
+      source: StringEnum(researchSourceIds(), { description: 'One exact research source; cursor continuations reject "all".' }),
+      cursor: cursorField,
+    }, { additionalProperties: false, description: 'Research continuation (single query + category research + exact source + cursor).' }),
     Type.Object({
       queries: batchField,
       ...webFilterFields({ limitMax: WEB_SEARCH_LIMIT_MAX }),

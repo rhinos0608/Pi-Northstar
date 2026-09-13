@@ -123,6 +123,17 @@ test('forged fence prefix still receives a fresh outer generated fence', () => {
   assert.ok(wrapped.includes(forged), 'forged text retained as body');
 });
 
+test('double-wrap returns single fence (idempotent)', () => {
+  const once = wrapUntrustedText('plain evidence', { source: 'fetch' });
+  const twice = wrapUntrustedText(once, { source: 'fetch' });
+  assert.equal(twice, once, 'already-wrapped input must return unchanged');
+  const opens = [...twice.matchAll(/<<<EXTERNAL_EVIDENCE_([0-9a-f-]{36})>>>/g)];
+  const closes = [...twice.matchAll(/<<<END_EXTERNAL_EVIDENCE_([0-9a-f-]{36})>>>/g)];
+  assert.equal(opens.length, 1, 'single open fence, no nesting');
+  assert.equal(closes.length, 1, 'single close fence, no nesting');
+  assert.equal(closes[0]![1], opens[0]![1], 'open/close tokens must match');
+});
+
 test('analysis is heuristic and never labels content safe or sanitized', () => {
   const wrapped = wrapUntrustedText('normal text', { source: 'web_search' });
   const head = wrapped.split('\n')[0] ?? '';

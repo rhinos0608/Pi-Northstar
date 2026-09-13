@@ -15,6 +15,10 @@ const PYTHON_CHILD_ALLOWLIST = new Set([
   'PI_SEARCH_SCRAPLING_ENABLED', 'PI_SEARCH_SCRAPLING_PYTHON_PATH',
   'PI_SEARCH_SCRAPLING_FETCHER', 'PI_SEARCH_SCRAPLING_PROXY',
   'PI_SEARCH_SCRAPLING_TIMEOUT',
+  // Embedding sidecar launch config read by sidecar/app.py argparse defaults
+  // (PI_SEARCH_EMBEDDING_MODEL/PORT, SIDECAR_DEVICE). Explicit --model/--port/
+  // --device argv wins; passthrough covers direct launches without options.
+  'PI_SEARCH_EMBEDDING_MODEL', 'PI_SEARCH_EMBEDDING_PORT', 'SIDECAR_DEVICE',
 ]);
 
 const BLOCKED_PATTERN = /^(?:.*(?:TOKEN|KEY|SECRET|COOKIE|PASSWORD|API_KEY|API_SECRET|AUTH|BEARER).*)$|^(?:npm_config_|NODE_OPTIONS$|NODE_PATH$|PYTHONPATH$|GIT_CONFIG_|SSL_CERT_|LD_PRELOAD$|DYLD_)/i;

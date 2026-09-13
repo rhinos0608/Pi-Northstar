@@ -247,6 +247,33 @@ test('query executes prefixed SELECT without misclassifying preamble', async () 
   assert.equal(calls, 1);
 });
 
+test('query classifies SELECT with hash-IRI PREFIX preamble as SELECT', async () => {
+  const payload = { head: { vars: ['s'] }, results: { bindings: [] } };
+  let calls = 0;
+  const fetchFn: SparqlFetchFn = (async () => {
+    calls += 1;
+    return jsonResponse(payload);
+  }) as SparqlFetchFn;
+  const adapter = createSparqlGraphAdapter({ endpoint: ENDPOINT, fetchFn });
+  const cases = [
+    // Hash inside <IRI> in PREFIX preamble must not split into a comment.
+    'PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> SELECT * WHERE { ?s ?p ?o }',
+    // Real full-line and trailing # comments still stripped before classification.
+    '# leading comment\nSELECT * WHERE { ?s ?p ?o }',
+    'SELECT * WHERE { ?s ?p ?o } # trailing comment',
+    // '#' inside quoted strings is data, not a comment.
+    'SELECT * WHERE { ?s ?p "a#b" }',
+    "SELECT * WHERE { ?s ?p 'a#b' }",
+    // '#' inside <IRI> in the pattern body is data, not a comment.
+    'SELECT * WHERE { <http://ex.org/s#frag> ?p ?o }',
+  ];
+  for (const query of cases) {
+    const outcome = await adapter.executeQuery({ query, pageSize: 10, from: 0 }, { token: SENTINEL });
+    assert.equal(outcome.error, undefined, `expected SELECT dispatch for: ${query}`);
+  }
+  assert.equal(calls, cases.length);
+});
+
 test('aborted signal surfaces operation_aborted without token leak', async () => {
   const fetchFn: SparqlFetchFn = (async (_url: string, init?: RequestInit) => {
     const signal = init?.signal;

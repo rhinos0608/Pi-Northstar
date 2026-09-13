@@ -106,6 +106,41 @@ describe('web-search-ledger: in-flight coalescing', () => {
     ledger.completeSuccess(keys[0]!);
     ledger.completeSuccess(extra.key);
   });
+
+  it('untracked bypass completion records nothing (no empty fuzzy entry)', () => {
+    const { ledger } = ledgerAt(2_300_000);
+    const keys: string[] = [];
+    for (let index = 0; index < MAX_LEDGER_ACTIVE_SEARCHES; index += 1) {
+      const begun = ledger.begin([`untracked cap query number ${index} zebra`], { limit: 8 });
+      if (begun.status !== 'run') throw new Error(`expected run at ${index}`);
+      keys.push(begun.key);
+    }
+    const extra = ledger.begin(['untracked bypass query quokka'], { limit: 8 });
+    assert.equal(extra.status, 'run');
+    if (extra.status !== 'run') throw new Error('expected bypass run');
+    // Untracked completion must not store a single:true entry with empty
+    // tokens/options: the bypass query re-runs instead of suppressing.
+    // (Free one tracked slot first: the cap check runs before the
+    // exact/suppression lookup, so re-begin needs active < max.)
+    ledger.completeSuccess(extra.key);
+    ledger.completeSuccess(keys[0]!);
+    // Tracked entries still record and suppress normally after the bypass.
+    assert.equal(ledger.begin(['untracked cap query number 0 zebra'], { limit: 8 }).status, 'suppressed');
+    const rebypass = ledger.begin(['untracked bypass query quokka'], { limit: 8 });
+    assert.equal(rebypass.status, 'run');
+    if (rebypass.status === 'run') ledger.cancel(rebypass.key);
+    // Untracked failure likewise records nothing: no block is stored.
+    // (Refill to cap so the failure probe bypasses tracking, then free a
+    // slot so the re-begin reaches the exact/block lookup.)
+    const filler = ledger.begin(['filler query wombat'], { limit: 8 });
+    assert.equal(filler.status, 'run');
+    const extraFail = ledger.begin(['untracked bypass failure quokka'], { limit: 8 });
+    assert.equal(extraFail.status, 'run');
+    if (extraFail.status !== 'run') throw new Error('expected bypass run');
+    ledger.completeFailure(extraFail.key, { retryable: false, code: 'upstream_error' });
+    if (filler.status === 'run') ledger.cancel(filler.key);
+    assert.equal(ledger.begin(['untracked bypass failure quokka'], { limit: 8 }).status, 'run');
+  });
 });
 
 describe('web-search-ledger: near-duplicate suppression', () => {

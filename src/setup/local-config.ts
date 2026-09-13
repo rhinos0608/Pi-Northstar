@@ -65,7 +65,7 @@ const mappings: Array<[string, string]> = [
   ['embedding.model', 'PI_SEARCH_EMBEDDING_MODEL'],
   ['embedding.dimensions', 'PI_SEARCH_EMBEDDING_DIMENSIONS'],
   ['embedding.port', 'PI_SEARCH_EMBEDDING_PORT'],
-  ['sidecar.device', 'SIDER_DEVICE'],
+  ['sidecar.device', 'SIDECAR_DEVICE'],
 ];
 
 export interface LoginShellSpawnResult {

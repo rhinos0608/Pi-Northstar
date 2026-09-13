@@ -23,6 +23,8 @@ export interface SidecarManagerOptions {
   pythonPath?: string;
   model?: string;
   device?: string;
+  /** Explicit loopback port. When omitted, a free ephemeral port is picked. */
+  port?: number;
   startupTimeout?: number;
   /** @internal Testing hook: initial backoff delay in ms */
   initialBackoffMs?: number;
@@ -49,6 +51,7 @@ export class SidecarManager {
     pythonPath: string;
     model: string;
     device: string;
+    port: number | undefined;
     startupTimeout: number;
     initialBackoffMs: number;
     maxBackoffMs: number;
@@ -71,6 +74,7 @@ export class SidecarManager {
       pythonPath: options?.pythonPath ?? DEFAULT_PYTHON_PATH,
       model: options?.model ?? DEFAULT_MODEL,
       device: options?.device ?? '',
+      port: options?.port,
       startupTimeout: options?.startupTimeout ?? DEFAULT_STARTUP_TIMEOUT_MS,
       initialBackoffMs: options?.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS,
       maxBackoffMs: options?.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
@@ -118,7 +122,7 @@ export class SidecarManager {
         releaseStaleChild();
       };
       try {
-        const port = await this.getRandomPort();
+        const port = this.options.port ?? await this.getRandomPort();
         // stop() raced start() while the port was pending: no spawn. The port
         // belongs to the current generation now — leave it alone.
         if (cancelled()) {

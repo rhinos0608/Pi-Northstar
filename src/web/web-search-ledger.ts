@@ -209,6 +209,11 @@ export class WebSearchLedger {
       // stored completion keeps hashes/counters, never bodies.
       flying.resolve(result);
     }
+    // Untracked bypass (active cap reached in begin()): no pending context
+    // and no shared promise, so tokens/options are unknown. Skip recording
+    // rather than storing a single:true entry with empty tokens/options
+    // that would pollute fuzzy suppression and LRU accounting.
+    if (flying === undefined && context === undefined) return;
     const prior = this.completed.get(key);
     this.storeLocked({
       hash: key,
@@ -232,6 +237,9 @@ export class WebSearchLedger {
       this.inFlight.delete(key);
       flying.reject(Object.assign(new Error(info.code), { name: 'LedgerSearchError' }));
     }
+    // Same untracked-bypass rule as completeSuccess: without a pending
+    // context or shared promise there is nothing safe to record.
+    if (flying === undefined && context === undefined) return;
     const prior = this.completed.get(key);
     // Consecutive failures: retryable allows one retry (second run), then the
     // third attempt blocks. Non-retryable blocks immediately.

@@ -379,7 +379,7 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'PI_SEARCH_SCRAPLING_PYTHON_PATH',
     'PI_SEARCH_WEB_BACKENDS',
     'PI_SEARCH_EMBEDDING_PORT',
-    'SIDER_DEVICE',
+    'SIDECAR_DEVICE',
   ];
   return Object.fromEntries(
     allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),

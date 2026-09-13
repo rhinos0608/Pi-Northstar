@@ -272,8 +272,16 @@ test('buildFetchRoute source followLinks routes to semantic_crawl with maxDepth 
 test('buildFetchRoute unknown source type throws', () => {
   assert.throws(
     () => buildFetchRoute({ mode: 'crawl', source: { type: 'feed' }, query: 'docs' } as never),
+    /crawl source\.type must be one of: url, search/,
+  );
+});
+
+test('buildFetchRoute rejects unknown mode strings', () => {
+  assert.throws(
+    () => buildFetchRoute({ mode: 'delete', url: 'https://example.com' } as never),
     /mode must be one of: read, crawl, batch_read, batch_crawl, sitemap, retrieve, source_check/,
   );
+  assert.throws(() => buildFetchRoute({ mode: 42 } as never), /mode must be one of/);
 });
 
 test('buildFetchRoute passes maxChars to semantic_crawl on crawl paths', () => {
@@ -390,7 +398,7 @@ test('buildFetchRoute empty params throw discriminator error', () => {
 test('buildFetchRoute rejects unknown action and cross-branch markers', () => {
   assert.throws(
     () => buildFetchRoute({ mode: 'read', responseId: 'r1' } as never),
-    /Cannot read properties/,
+    /read requires url/,
   );
   assert.equal(buildFetchRoute({ mode: 'sitemap', url: 'https://example.com', siteMap: false } as never).args.siteMap, true);
 });

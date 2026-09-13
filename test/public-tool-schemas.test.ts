@@ -42,6 +42,24 @@ test('web_search schema mirrors internal bounds', () => {
   assert.equal(Value.Check(schema, { query: 'a', knowledge: { facts: true } }), true);
 });
 
+test('web_search research continuation requires single query + exact source + cursor', () => {
+  const schema = buildWebSearchParameters();
+  // Valid continuation: single query, category research, one exact source, cursor.
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque' }), true);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque', limit: 30 }), true);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque', limit: 31 }), false);
+  // Invalid combos: cursor alone, without source, with aggregate source,
+  // with batch queries, with agent mode, empty cursor, wrong category.
+  assert.equal(Value.Check(schema, { query: 'a', cursor: 'opaque' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', cursor: 'opaque' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'all', cursor: 'opaque' }), false);
+  assert.equal(Value.Check(schema, { queries: ['a'], category: 'research', source: 'arxiv', cursor: 'opaque' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', mode: 'agent', cursor: 'opaque' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: '' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'news', cursor: 'opaque' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'nope', cursor: 'opaque' }), false);
+});
+
 test('graph schema accepts dql and sparql query/probe/schema branches', () => {
   const schema = buildGraphParameters();
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Organization' }), true);

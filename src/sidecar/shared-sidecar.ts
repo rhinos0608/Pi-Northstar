@@ -15,7 +15,7 @@
 // ranking. Shutdown hooks send SIGTERM synchronously on process exit so the
 // child never outlives the CLI worker that started it.
 
-import { SidecarManager } from './sidecar-manager.js';
+import { SidecarManager, type SidecarManagerOptions } from './sidecar-manager.js';
 
 export type SharedSidecarEnv = Record<string, string | undefined>;
 
@@ -30,29 +30,78 @@ export interface AcquiredSidecar {
 
 let singleton: SidecarManager | undefined;
 let refCount = 0;
-let factory: () => SidecarManager = () => new SidecarManager();
+let factory: (env?: SharedSidecarEnv) => SidecarManager = (env) => new SidecarManager(resolveLocalManagerOptions(env));
 let hookInstalled = false;
 
+/** Bounded wait for signal-driven cleanup before explicit exit. */
+const SIGNAL_CLEANUP_TIMEOUT_MS = 2000;
+
 function onProcessExit(): void {
-  // stop() sends SIGTERM synchronously before awaiting exit, so even this
-  // floating promise delivers the kill signal; the wait just won't finish.
+  // 'exit' handlers run synchronously: stop() issues SIGTERM synchronously
+  // before its first await, so even this floating promise kills the child.
   void singleton?.stop().catch(() => undefined);
+}
+
+function onSigint(): void {
+  void handleSignalShutdown(130);
+}
+
+function onSigterm(): void {
+  void handleSignalShutdown(143);
+}
+
+async function handleSignalShutdown(exitCode: number): Promise<void> {
+  // Drop all hooks first: restores default disposition, no re-entry.
+  removeShutdownHook();
+  try {
+    await Promise.race([
+      singleton?.stop() ?? Promise.resolve(),
+      new Promise((resolve) => setTimeout(resolve, SIGNAL_CLEANUP_TIMEOUT_MS)),
+    ]);
+  } catch {
+    // Best-effort cleanup only.
+  }
+  process.exit(exitCode);
 }
 
 function installShutdownHook(): void {
   if (hookInstalled) return;
   hookInstalled = true;
   process.once('exit', onProcessExit);
-  process.once('SIGINT', onProcessExit);
-  process.once('SIGTERM', onProcessExit);
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
 }
 
 function removeShutdownHook(): void {
   if (!hookInstalled) return;
   hookInstalled = false;
   process.removeListener('exit', onProcessExit);
-  process.removeListener('SIGINT', onProcessExit);
-  process.removeListener('SIGTERM', onProcessExit);
+  process.removeListener('SIGINT', onSigint);
+  process.removeListener('SIGTERM', onSigterm);
+}
+
+function readSidecarEnvValue(env: SharedSidecarEnv | undefined, key: string): string | undefined {
+  const trimmed = (env?.[key] ?? process.env[key])?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/** Translate discovery env into local launch options so a locally launched
+ *  sidecar uses the same config observers set for discovery.
+ *  PI_SEARCH_EMBEDDING_DIMENSIONS is intentionally not a spawn arg:
+ *  sidecar/app.py derives dimensions from the model (no --dimensions flag);
+ *  /v1/health reports the actual dims. */
+function resolveLocalManagerOptions(env?: SharedSidecarEnv): SidecarManagerOptions {
+  const options: SidecarManagerOptions = {};
+  const model = readSidecarEnvValue(env, 'PI_SEARCH_EMBEDDING_MODEL');
+  if (model) options.model = model;
+  const device = readSidecarEnvValue(env, 'SIDECAR_DEVICE');
+  if (device) options.device = device;
+  const portRaw = readSidecarEnvValue(env, 'PI_SEARCH_EMBEDDING_PORT');
+  if (portRaw !== undefined) {
+    const port = Number(portRaw);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) options.port = port;
+  }
+  return options;
 }
 
 function externalBaseUrl(env?: SharedSidecarEnv): string | undefined {
@@ -68,7 +117,7 @@ export async function acquireEmbeddingSidecar(env?: SharedSidecarEnv): Promise<A
   if (external) {
     return { baseUrl: external, external: true, release: () => undefined };
   }
-  singleton ??= factory();
+  singleton ??= factory(env);
   // Rejects on startup failure (e.g. Python without Torch) — refcount is
   // only incremented on success so callers fall back to BM25 with nothing
   // to release.
@@ -115,6 +164,6 @@ export function __setSharedSidecarFactoryForTests(next: () => SidecarManager): v
 export function __resetSharedSidecarForTests(): void {
   refCount = 0;
   singleton = undefined;
-  factory = () => new SidecarManager();
+  factory = (env) => new SidecarManager(resolveLocalManagerOptions(env));
   removeShutdownHook();
 }

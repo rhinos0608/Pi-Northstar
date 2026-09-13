@@ -54,15 +54,117 @@ function toSparqlError(code: GraphErrorCode, message: string, retryable: boolean
   return { code, message: redactSparqlAdapterError(message, token), retryable, provider: SPARQL_PROVIDER };
 }
 
+/** Strip `#` comments only outside <IRIs> and quoted strings (incl. triple-quoted). */
+function stripSparqlComments(query: string): string {
+  let out = '';
+  let i = 0;
+  const n = query.length;
+  let inIri = false;
+  let inSingle = false;
+  let inDouble = false;
+  let inTripleSingle = false;
+  let inTripleDouble = false;
+  while (i < n) {
+    const ch = query[i]!;
+    if (inTripleSingle) {
+      if (query.startsWith("'''", i)) {
+        out += "'''";
+        i += 3;
+        inTripleSingle = false;
+      } else if (ch === '\\') {
+        out += query.slice(i, i + 2);
+        i += 2;
+      } else {
+        out += ch;
+        i += 1;
+      }
+      continue;
+    }
+    if (inTripleDouble) {
+      if (query.startsWith('"""', i)) {
+        out += '"""';
+        i += 3;
+        inTripleDouble = false;
+      } else if (ch === '\\') {
+        out += query.slice(i, i + 2);
+        i += 2;
+      } else {
+        out += ch;
+        i += 1;
+      }
+      continue;
+    }
+    if (inSingle) {
+      if (ch === '\\') {
+        out += query.slice(i, i + 2);
+        i += 2;
+      } else {
+        out += ch;
+        i += 1;
+        if (ch === "'") inSingle = false;
+      }
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '\\') {
+        out += query.slice(i, i + 2);
+        i += 2;
+      } else {
+        out += ch;
+        i += 1;
+        if (ch === '"') inDouble = false;
+      }
+      continue;
+    }
+    if (inIri) {
+      out += ch;
+      i += 1;
+      if (ch === '>') inIri = false;
+      continue;
+    }
+    if (query.startsWith("'''", i)) {
+      out += "'''";
+      i += 3;
+      inTripleSingle = true;
+      continue;
+    }
+    if (query.startsWith('"""', i)) {
+      out += '"""';
+      i += 3;
+      inTripleDouble = true;
+      continue;
+    }
+    if (ch === "'") {
+      out += ch;
+      i += 1;
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      out += ch;
+      i += 1;
+      inDouble = true;
+      continue;
+    }
+    if (ch === '<') {
+      out += ch;
+      i += 1;
+      inIri = true;
+      continue;
+    }
+    if (ch === '#') {
+      while (i < n && query[i] !== '\n') i += 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 /** Strip PREFIX/BASE preamble and leading comments, then read first keyword. */
 function firstKeyword(query: string): string {
-  const noComments = query
-    .split('\n')
-    .map((line) => {
-      const hash = line.indexOf('#');
-      return hash >= 0 ? line.slice(0, hash) : line;
-    })
-    .join('\n');
+  const noComments = stripSparqlComments(query);
   const noPreamble = noComments.replace(
     /\b(?:PREFIX\s+[A-Za-z][\w.-]*\s*:\s*<[^>]*>|BASE\s*<[^>]*>)/gi,
     ' ',
@@ -90,13 +192,7 @@ function classifySparqlForm(query: string): SparqlForm {
     .replace(/'''[\s\S]*?'''/g, ' ')
     .replace(/"(?:[^"\\]|\\.)*"/g, ' ')
     .replace(/'(?:[^'\\]|\\.)*'/g, ' ');
-  const noComments = noStrings
-    .split('\n')
-    .map((line) => {
-      const hash = line.indexOf('#');
-      return hash >= 0 ? line.slice(0, hash) : line;
-    })
-    .join('\n');
+  const noComments = stripSparqlComments(noStrings);
   const noIris = noComments.replace(/<[^>]*>/g, ' ');
   if (/\bSERVICE\b/i.test(noIris)) return 'unsupported';
   // firstKeyword needs the IRI-bearing text: PREFIX/BASE preamble stripping
