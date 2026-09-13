@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildCliEnvironment } from '../src/cli-backend.js';
+import { appendCliStdout, buildCliEnvironment, createCliStdoutAccumulator } from '../src/cli-backend.js';
 import { buildPythonChildEnvironment } from '../src/python-child-env.js';
 
 const SENTINEL = 'SENTINEL_DIFFBOT_TOKEN_abc123xyz';
@@ -145,6 +145,26 @@ test('buildCliEnvironment omits new provider keys when unset', () => {
   for (const key of NEW_PROVIDER_KEYS) {
     assert.equal(env[key], undefined, `${key} must be absent when unset`);
   }
+});
+
+test('appendCliStdout head-caps at limit and flags truncation (no tail-slice JSON break)', () => {
+  const acc = createCliStdoutAccumulator();
+  assert.equal(appendCliStdout(acc, '{"ok":true,"data":"', 20), false);
+  assert.equal(appendCliStdout(acc, 'x'.repeat(50), 20), true);
+  assert.equal(acc.truncated, true);
+  assert.equal(acc.text.length, 20);
+  assert.ok(acc.text.startsWith('{"ok":true'), 'head kept, not tail');
+  // Further chunks drain-discarded, flag sticks.
+  assert.equal(appendCliStdout(acc, 'more'), true);
+  assert.equal(acc.text.length, 20);
+});
+
+test('appendCliStdout exact-limit append does not flag truncation', () => {
+  const acc = createCliStdoutAccumulator();
+  assert.equal(appendCliStdout(acc, '12345', 5), false);
+  assert.equal(acc.truncated, false);
+  assert.equal(appendCliStdout(acc, 'x', 5), true);
+  assert.equal(acc.truncated, true);
 });
 
 test('sentinel: new provider keys never leak to the python child env', () => {

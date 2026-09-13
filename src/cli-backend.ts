@@ -25,8 +25,34 @@ interface CliEnvelope {
 }
 
 const TSX_LOADER_URL = import.meta.resolve('tsx');
-const MAX_OUTPUT_CHARS = 1_000_000;
+export const MAX_CLI_OUTPUT_CHARS = 1_000_000;
 const SIGKILL_AFTER_MS = 5_000;
+
+export interface CliStdoutAccumulator {
+  text: string;
+  truncated: boolean;
+}
+
+export function createCliStdoutAccumulator(): CliStdoutAccumulator {
+  return { text: '', truncated: false };
+}
+
+/** Head-cap append: keep first limit chars, flag overflow, discard rest.
+ *  Tail-slicing corrupts JSON envelopes; head-cap fails clean instead. */
+export function appendCliStdout(
+  state: CliStdoutAccumulator,
+  chunk: string,
+  limit: number = MAX_CLI_OUTPUT_CHARS,
+): boolean {
+  if (state.truncated) return true;
+  if (state.text.length + chunk.length > limit) {
+    state.text += chunk.slice(0, Math.max(0, limit - state.text.length));
+    state.truncated = true;
+    return true;
+  }
+  state.text += chunk;
+  return false;
+}
 
 function cliAbortError(): Error {
   const error = new Error('CLI backend aborted');
@@ -74,7 +100,7 @@ export class CliSearchBackend implements SearchBackend {
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      let stdout = '';
+      const stdoutAcc = createCliStdoutAccumulator();
       let stderr = '';
       let timedOut = false;
       let aborted = false;
@@ -105,10 +131,10 @@ export class CliSearchBackend implements SearchBackend {
 
       signal?.addEventListener('abort', onAbort, { once: true });
       child.stdout.on('data', (chunk: Buffer) => {
-        stdout = (stdout + chunk.toString('utf8')).slice(-MAX_OUTPUT_CHARS);
+        if (appendCliStdout(stdoutAcc, chunk.toString('utf8'))) terminate();
       });
       child.stderr.on('data', (chunk: Buffer) => {
-        stderr = (stderr + chunk.toString('utf8')).slice(-MAX_OUTPUT_CHARS);
+        stderr = (stderr + chunk.toString('utf8')).slice(-MAX_CLI_OUTPUT_CHARS);
       });
       child.on('error', (error) => {
         cleanup();
@@ -120,7 +146,7 @@ export class CliSearchBackend implements SearchBackend {
       });
       child.on('close', (code) => {
         cleanup();
-        const output = stdout;
+        const output = stdoutAcc.text;
         const diagnostics = stderr.trim();
         if (aborted || signal?.aborted) {
           reject(cliAbortError());
@@ -128,6 +154,10 @@ export class CliSearchBackend implements SearchBackend {
         }
         if (timedOut) {
           reject(new Error(`CLI backend timed out after ${timeout}ms${diagnostics ? `\n${diagnostics}` : ''}`));
+          return;
+        }
+        if (stdoutAcc.truncated) {
+          reject(new Error(`CLI backend response exceeded ${MAX_CLI_OUTPUT_CHARS} chars and was truncated; child terminated for clean failure${diagnostics ? `\n${diagnostics}` : ''}`));
           return;
         }
         let parsed: CliEnvelope;
