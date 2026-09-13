@@ -109,6 +109,11 @@ export interface WebProviderSearchOutput {
   backend: WebSearchProviderId;
   hits: WebSearchHit[];
   generatedText: WebGeneratedText[];
+  /** Set when the adapter resolved an upstream error envelope to empty hits.
+   *  Status-only provenance (no body, no credentials): distinguishes a
+   *  degraded provider ("one eye closed") from genuine zero results.
+   *  Coordinators record this in failures without changing fusion. */
+  degraded?: { status: number } | undefined;
 }
 
 export interface WebSearchAdapter {

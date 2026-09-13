@@ -129,6 +129,32 @@ test('brave json error envelope resolves empty (fetchJson never gates on status)
   }
 });
 
+test('brave non-2xx envelope marks degraded provenance (status-only, no key/body)', async () => {
+  const { restore } = mockFetch(async () => jsonResponse({ message: 'forbidden' }, 401));
+  try {
+    const out = await braveSearchAdapter.search(input());
+    assert.deepEqual(out.hits, []);
+    assert.deepEqual(out.degraded, { status: 401 });
+    const serialized = JSON.stringify(out);
+    assert.ok(!serialized.includes(SECRET), 'key must not leak into output');
+    assert.ok(!serialized.includes('forbidden'), 'upstream body must not leak into output');
+  } finally {
+    restore();
+  }
+});
+
+test('brave 200 empty stays unmarked genuine zero (no degraded key)', async () => {
+  const { restore } = mockFetch(async () => jsonResponse({ web: { results: [] } }));
+  try {
+    const out = await braveSearchAdapter.search(input());
+    assert.deepEqual(out.hits, []);
+    assert.equal(out.degraded, undefined);
+    assert.ok(!('degraded' in out), 'genuine zero results carry no degraded marker');
+  } finally {
+    restore();
+  }
+});
+
 test('brave redirect rejects without following (key never rides a redirect), oversize rejects, caller abort propagates', async () => {
   const redirect = mockFetch(async () => new Response('', { status: 302 }));
   try {

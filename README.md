@@ -39,8 +39,8 @@ Each public tool validates input, calls into the shared services above, and shap
 `kg` enters model context only when `DIFFBOT_TOKEN` is set; `graph` enters when `DIFFBOT_TOKEN` or `GRAPH_SPARQL_ENDPOINT` is set — without their credential their schemas are absent (not erroring stubs). Auth resolution: explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only when all three omit it does runtime fall back to a login-shell lookup, which fails closed and never logs the token. See `.env.example` for spend caps (`DIFFBOT_SEARCH_SIZE`, `DIFFBOT_ENHANCE_SIZE`, `DIFFBOT_FALLBACK_BUDGET`) and SPARQL keys.
 
 ```ts
-kg({ action: 'search', language: 'dql', query: 'type:Person name:"Ada Lovelace"' })
-kg({ action: 'enhance', type: 'Organization', name: 'Acme', fields: 'basic' })
+kg({ request: { action: 'search', language: 'dql', query: 'type:Person name:"Ada Lovelace"' } })
+kg({ request: { action: 'enhance', type: 'Organization', name: 'Acme', fields: 'basic' } })
 graph({ action: 'query', language: 'dql', query: 'type:Organization name:"Acme"' })
 graph({ action: 'schema', language: 'dql', view: 'types' })
 ```
@@ -415,7 +415,7 @@ When you call `fetch` with a `query` parameter, Pi-Northstar performs **hybrid s
 Set `followLinks: true` to crawl the entire site starting from `url`. The tool performs a bounded BFS across same-domain pages, extracts and indexes all content, then returns only the passages most relevant to your `query`.
 
 ```
-fetch({ query: "pricing tiers", url: "https://example.com", followLinks: true })
+fetch({ request: { mode: "crawl", source: { type: "url", url: "https://example.com", followLinks: true }, query: "pricing tiers" } })
 ```
 
 - **`followLinks` requires both `url` and `query`** — site-wide crawls always use semantic packing; raw page dumps are not supported
@@ -430,7 +430,7 @@ fetch({ query: "pricing tiers", url: "https://example.com", followLinks: true })
 Every layer degrades gracefully: no Python → plain HTTP fetch, no sidecar → BM25-only, no backends → DuckDuckGo fallback.
 
 ```
-fetch({ query: "How does React concurrent rendering work?", searchQuery: "React 18 concurrent rendering" })
+fetch({ request: { mode: "crawl", source: { type: "search", searchQuery: "React 18 concurrent rendering" }, query: "How does React concurrent rendering work?" } })
 ```
 
 - `query` — what you want to find in the crawled pages
@@ -496,7 +496,7 @@ export PI_SEARCH_SCRAPLING_PROXY="http://user:pass@host:port"
 Canonical actions: `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits`, `workflows`, `runs` (REST API only — GraphQL not offered). `workflows` (list/get GitHub Actions workflows) and `runs` (list/get workflow runs, or list a run's jobs with `jobs: true`) are read-only — no `workflow_dispatch` trigger. Results are normalized entities. Out-of-range input is rejected, never clamped. `list_dir` and `code_search` legacy spellings are unsupported.
 
 ```
-github({ action: "releases", repository: "owner/repo" })
+github({ request: { action: "releases", repository: "owner/repo" } })
 ```
 
 `GITHUB_TOKEN` or `GH_TOKEN` is optional: public reads work keyless with harder rate limits. Unauthenticated `/search/code` is heavily rate-limited; `issues`/`pulls`/`releases`/`commits` work keyless for public repos.

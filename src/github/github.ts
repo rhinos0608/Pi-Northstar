@@ -58,7 +58,7 @@ function actionBranch(action: GithubAction): TSchema {
   return Type.Intersect([body, selector], { description: `${action} operation.` });
 }
 
-function buildGithubParameters(): TSchema {
+export function buildGithubParameters(): TSchema {
   return Type.Object({
     request: Type.Union(GITHUB_ACTIONS.map(actionBranch), { description: 'One canonical action request.' }),
   });

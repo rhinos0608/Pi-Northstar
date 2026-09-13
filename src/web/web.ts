@@ -417,6 +417,17 @@ async function dispatchBoundedSearch(
     const adapter = policy.runnable[index]!;
     if (item.status === 'fulfilled') {
       servedBackends.push(adapter.id);
+      // Degraded-but-resolved (e.g. Brave error envelope → empty hits): fusion
+      // is unchanged, but the provenance gap is recorded so "one eye closed"
+      // never reads as "nothing exists". Status-only, never thrown.
+      if (item.value.degraded !== undefined) {
+        failures.push({
+          backend: adapter.id,
+          code: 'upstream_error',
+          message: `${adapter.id} search degraded: HTTP ${item.value.degraded.status} error envelope resolved to empty hits (provider failure, not zero results)`.slice(0, 500),
+          retryable: false,
+        });
+      }
       const filtered = applyWebQueryFieldFilters(item.value.hits, fields);
       if (filtered.length > 0) rankings.push({ backend: adapter.id, hits: filtered });
       generatedRaw.push(...item.value.generatedText);

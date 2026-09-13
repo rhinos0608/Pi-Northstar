@@ -58,7 +58,10 @@ export const braveSearchAdapter: WebSearchAdapter = {
     }
     // Credential-routing control: the vendor key must never ride a redirect off
     // the fixed host, so redirects reject instead of being followed (Exa/Tavily
-    // pattern). No response.ok gate: error envelopes resolve to empty hits.
+    // pattern). No response.ok throw: error envelopes still resolve to empty
+    // hits (fallback providers carry the query), but a non-2xx status sets the
+    // degraded marker so coordinators can tell provider failure apart from
+    // genuine zero results. Status-only; body and key never enter output.
     const validated = fetchInit(
       { Accept: 'application/json', 'X-Subscription-Token': apiKey },
       input.signal,
@@ -67,6 +70,7 @@ export const braveSearchAdapter: WebSearchAdapter = {
     if (response.status >= 300 && response.status < 400) {
       throw new Error('Redirect rejected for brave search');
     }
+    const degraded = response.ok ? undefined : { status: response.status };
     const data = (await safeResponseJson(response, url.href)) as {
       web?: { results?: Array<Record<string, unknown>> };
     };
@@ -83,6 +87,6 @@ export const braveSearchAdapter: WebSearchAdapter = {
         };
       })
       .filter((hit) => hit.url);
-    return { backend: 'brave', hits, generatedText: [] };
+    return { backend: 'brave', hits, generatedText: [], ...(degraded !== undefined ? { degraded } : {}) };
   },
 };

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Value from 'typebox/value';
+import { buildGithubParameters } from '../src/github/github.js';
+import { buildFetchRoute } from '../src/index.js';
 import { buildBrowserParameters, buildDesktopParameters, buildGraphParameters, buildSocialParameters, buildWebSearchParameters } from '../src/public-tool-schemas.js';
 
 test('web_search schema accepts single, batch, and agent branches', () => {
@@ -141,6 +143,23 @@ test('browser semanticAction accepts closed locators/verbs with nth-index and fi
   assert.equal(Value.Check(schema, { action: 'semanticAction', semanticAction: { locator: 'text', query: 'x', verb: 'click', name: 'button' } }), false);
   assert.equal(Value.Check(schema, { action: 'semanticAction', semanticAction: { locator: 'role', query: 'x', verb: 'type' } }), false);
   assert.equal(Value.Check(schema, { action: 'semanticAction', semanticAction: { locator: 'role', query: '', verb: 'click' } }), false);
+});
+
+test('README tool examples validate against registered schemas (no drift)', () => {
+  // github requires the request envelope; the flat form crashes execute.
+  const github = buildGithubParameters();
+  assert.equal(Value.Check(github, { request: { action: 'releases', repository: 'owner/repo' } }), true);
+  assert.equal(Value.Check(github, { action: 'releases', repository: 'owner/repo' }), false);
+  // fetch crawl examples route via the request envelope with mode + source.
+  const crawlUrl = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'pricing tiers' });
+  assert.equal(crawlUrl.tool, 'semantic_crawl');
+  const crawlSearch = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'React 18 concurrent rendering' }, query: 'How does React concurrent rendering work?' });
+  assert.equal(crawlSearch.tool, 'semantic_crawl');
+  assert.throws(() => buildFetchRoute({ mode: 'crawl', query: 'pricing tiers' } as never));
+  // graph stays flat (no envelope); pin the README forms.
+  const graph = buildGraphParameters();
+  assert.equal(Value.Check(graph, { action: 'query', language: 'dql', query: 'type:Organization name:"Acme"' }), true);
+  assert.equal(Value.Check(graph, { action: 'schema', language: 'dql', view: 'types' }), true);
 });
 
 test('browser parameters keep bounded action branches and reject unknown fields', () => {

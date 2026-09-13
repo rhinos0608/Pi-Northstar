@@ -1633,3 +1633,50 @@ test('read path keeps unsafe link targets inert', async () => {
   assert.doesNotMatch(text, /javascript:/);
   assert.match(text, /click here/);
 });
+
+// ── degraded-provider provenance: Brave error envelopes resolve empty but must
+// read as "one eye closed", never as "nothing exists" ──
+
+test('brave 401 alone yields empty results with a degraded failure entry (no throw)', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({ message: 'forbidden' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, { env: { PI_SEARCH_WEB_BACKENDS: 'brave', BRAVE_API_KEY: 'key' } });
+    const details = result.details as {
+      results: Array<{ url: string }>;
+      fusion: { backends: string[]; failures: Array<{ backend: string; error: string }> };
+    };
+    assert.deepEqual(details.results, []);
+    assert.deepEqual(details.fusion.backends, ['brave']);
+    assert.equal(details.fusion.failures.length, 1);
+    assert.equal(details.fusion.failures[0]?.backend, 'brave');
+    assert.match(details.fusion.failures[0]?.error ?? '', /degraded.*401.*provider failure, not zero results/);
+  });
+});
+
+test('brave 401 beside a healthy provider fuses hits and still records degradation', async () => {
+  await withFetch(async (input) => {
+    const url = String(input);
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({ message: 'forbidden' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.startsWith('https://duckduckgo.com/html/')) {
+      return ddgHtmlResponse([{ title: 'Example', url: 'https://example.com/page', snippet: 'Duck result' }]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }, async () => {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, { env: { PI_SEARCH_WEB_BACKENDS: 'duckduckgo,brave', BRAVE_API_KEY: 'key' } });
+    const details = result.details as {
+      results: Array<{ url: string }>;
+      fusion: { backends: string[]; failures: Array<{ backend: string; error: string }> };
+    };
+    assert.equal(details.results.length, 1);
+    assert.deepEqual(details.fusion.backends.sort(), ['brave', 'duckduckgo']);
+    assert.equal(details.fusion.failures.length, 1);
+    assert.equal(details.fusion.failures[0]?.backend, 'brave');
+  });
+});
