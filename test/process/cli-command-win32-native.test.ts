@@ -103,9 +103,10 @@ test('spaced shim path resolves and plain args round-trip', { skip: requiresWin3
 test('cmd metacharacters & | < > ^ % stay literal', { skip: requiresWin32Native }, async () => {
   await withSpacedShimDir(async (dir) => {
     await writeFile(join(dir, 'payload.cmd'), forwardShimBody(process.execPath));
-    // quoteCmdArg doubles % (%% collapses to literal % in cmd parsing), so
-    // %NAME% sequences survive literally end-to-end, including token-shaped
-    // payloads that previously expanded into the /c line.
+    // quoteCmdArg leaves % untouched: the pre-quoted argv rides the /c line
+    // into this shim, whose `%*` forwarding substitutes arguments without a
+    // second expansion pass, so %NAME% sequences (including token-shaped
+    // payloads) survive literally end-to-end.
     const args = ['a&b|c<d>e^f%g', '100%', 'a%b', 'search %OPENCLI_TOKEN% done'];
     assert.deepEqual(await roundTrip(dir, args), args);
   });

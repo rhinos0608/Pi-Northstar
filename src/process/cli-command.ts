@@ -117,14 +117,15 @@ function stripSurroundingQuotes(dir: string): string {
 // command line no longer starts with `"`, no stripping happens, and cmd
 // reports the whole `"\"...\" \"..\""` string as not recognized.
 //
-// `%NAME%` inside the /c line expands under cmd.exe even inside quotes, so
-// every literal `%` is doubled (`%%` collapses to a literal `%` in cmd/batch
-// parsing) before quoting. The child-visible text is unchanged; only the
-// transport spelling differs.
+// `%` passes through literally: the pre-quoted argv rides the /c line into
+// the .cmd shim, whose `%*` forwarding substitutes arguments without a second
+// `%` expansion pass. Doubling `%` to `%%` is wrong here — the doubled spelling
+// reaches the child unchanged (observed on the Windows runner), corrupting
+// valid input, so quoteCmdArg leaves `%` untouched.
 
 /** Quote one argv element for cmd.exe (always double-quoted). */
 export function quoteCmdArg(value: string): string {
-  return `"${value.replace(/%/g, '%%').replace(/(\\+)(?="|$)/g, '$1$1').replace(/"/g, '""')}"`;
+  return `"${value.replace(/(\\+)(?="|$)/g, '$1$1').replace(/"/g, '""')}"`;
 }
 
 /**
@@ -150,7 +151,15 @@ export function spawnCliCommand(
 ): ChildProcessByStdio<null, Readable, Readable> {
   const platform = options.platform ?? process.platform;
   const resolveOptions: CliResolveOptions = { platform };
+  // Win32 PATH lookup must use the env the child will run with: callers pass
+  // a sanitized child env (often shim-only PATH) while the parent PATH points
+  // elsewhere. Without this, bare commands resolve against the parent and the
+  // spawn misses with ENOENT even though the shim is on the child PATH.
   if (options.pathValue !== undefined) resolveOptions.pathValue = options.pathValue;
+  else if (platform === 'win32') {
+    const childPath = childPathValue(options.env);
+    if (childPath !== undefined) resolveOptions.pathValue = childPath;
+  }
   if (options.pathext !== undefined) resolveOptions.pathext = options.pathext;
   if (options.exists !== undefined) resolveOptions.exists = options.exists;
   const resolved = resolveCliCommand(command, resolveOptions);
@@ -162,6 +171,16 @@ export function spawnCliCommand(
     }) as ChildProcessByStdio<null, Readable, Readable>;
   }
   return spawn(resolved, args, spawnOptions) as ChildProcessByStdio<null, Readable, Readable>;
+}
+
+/** Child-env PATH (any case variant) for win32 shim resolution. Exported for unit tests. */
+export function childPathValue(spawnEnv: SpawnOptions['env']): string | undefined {
+  if (spawnEnv === undefined || spawnEnv === null || typeof spawnEnv !== 'object') return undefined;
+  for (const key of ['PATH', 'Path', 'path']) {
+    const val = (spawnEnv as Record<string, unknown>)[key];
+    if (typeof val === 'string' && val.length > 0) return val;
+  }
+  return undefined;
 }
 
 /**

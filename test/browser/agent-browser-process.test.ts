@@ -5,14 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ChildProcess } from 'node:child_process';
 import { test } from 'node:test';
-import { agentBrowserExecutableConfigured, buildSandboxEnvironment, closeSession, generateNamespace, parseAgentBrowserOutput, runBatchStdin, runCommand, runScreenshot } from '../../src/browser/agent-browser-process.js';
+import { agentBrowserExecutableConfigured, buildSandboxEnvironment, closeSession, generateNamespace, parseAgentBrowserOutput, runBatchStdin, runCommand, runScreenshot, spawnAgentBrowser } from '../../src/browser/agent-browser-process.js';
 
 test('sandbox environment strips hostile inherited variables', () => {
   const env = buildSandboxEnvironment({ PATH: '/bin', HOME: '/tmp', AGENT_BROWSER_SESSION: 'evil', NODE_OPTIONS: '--import evil', GITHUB_TOKEN: 'secret' }, { runtimeRoot: '/tmp/pi', namespace: 'owned' });
   assert.equal(env.AGENT_BROWSER_SESSION, 'owned');
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.GITHUB_TOKEN, undefined);
-  assert.equal(env.AGENT_BROWSER_CONFIG, '/tmp/pi/config/config.json');
+  assert.equal(env.AGENT_BROWSER_CONFIG, join('/tmp/pi', 'config', 'config.json'));
 });
 
 test('output parser accepts JSON envelopes and ignores diagnostics', () => {
@@ -51,10 +51,14 @@ function activeTimeoutCount(): number {
   return handles.filter((h) => (h as { constructor?: { name?: string } })?.constructor?.name === 'Timeout').length;
 }
 
-async function writeStubExecutable(body: string): Promise<string> {
+// Portable stub: a Node script (shebang for POSIX direct spawn, routed via
+// process.execPath on win32 by spawnAgentBrowser's script route — CreateProcess
+// cannot execute `.sh`/`.cjs` directly, and /bin/sh does not exist on Windows).
+// Bodies are JS (`jsBody`), so `trap`/`sleep`/`head` shellisms work everywhere.
+async function writeStubExecutable(jsBody: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'pi-ab-'));
-  const path = join(dir, 'fake-agent-browser.sh');
-  await writeFile(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const path = join(dir, 'fake-agent-browser.cjs');
+  await writeFile(path, `#!/usr/bin/env node\n${jsBody}\n`, { mode: 0o755 });
   await chmod(path, 0o755);
   return path;
 }
@@ -66,9 +70,9 @@ async function makeRuntimeRoot(): Promise<string> {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // Poll with setImmediate (never setTimeout: these timeout tests mock timers).
-// A stub that touches readyPath after installing its SIGTERM trap proves the
-// trap is armed before mocked clocks advance. Without this, SIGTERM can win
-// the shell-startup race and reap the child, making escalation assertions
+// A stub that touches readyPath after installing its SIGTERM handler proves the
+// handler is armed before mocked clocks advance. Without this, SIGTERM can win
+// the startup race and reap the child, making escalation assertions
 // depend on scheduling luck instead of timer behavior.
 async function waitForChildReady(readyPath: string): Promise<void> {
   const deadline = Date.now() + 10_000;
@@ -80,7 +84,7 @@ async function waitForChildReady(readyPath: string): Promise<void> {
 }
 
 test('runCommand success path leaves no pending timers', async () => {
-  const exe = await writeStubExecutable(`echo '{"success":true,"data":{"ok":1}}'`);
+  const exe = await writeStubExecutable(`console.log('{"success":true,"data":{"ok":1}}');`);
   const runtimeRoot = await makeRuntimeRoot();
   const before = activeTimeoutCount();
   const result = await runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-timer-ok' });
@@ -90,7 +94,7 @@ test('runCommand success path leaves no pending timers', async () => {
 });
 
 test('runCommand error path leaves no pending timers', async () => {
-  const exe = await writeStubExecutable(`echo boom >&2\nexit 1`);
+  const exe = await writeStubExecutable(`console.error('boom');\nprocess.exit(1);`);
   const runtimeRoot = await makeRuntimeRoot();
   const before = activeTimeoutCount();
   const result = await runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-timer-err' });
@@ -100,7 +104,7 @@ test('runCommand error path leaves no pending timers', async () => {
 });
 
 test('runCommand output-cap settle leaves no pending SIGKILL timer', async () => {
-  const exe = await writeStubExecutable(`head -c 6000000 /dev/zero | tr '\\0' 'x'\nexit 0`);
+  const exe = await writeStubExecutable(`process.stdout.write('x'.repeat(6000000));`);
   const runtimeRoot = await makeRuntimeRoot();
   const before = activeTimeoutCount();
   const result = await runCommand(['snapshot'], { executablePath: exe, runtimeRoot, namespace: 'ns-timer-cap' });
@@ -111,7 +115,7 @@ test('runCommand output-cap settle leaves no pending SIGKILL timer', async () =>
 });
 
 test('closeSession returns promptly on abort instead of waiting 10s', async () => {
-  const exe = await writeStubExecutable(`sleep 30`);
+  const exe = await writeStubExecutable(`setTimeout(() => {}, 30000);`);
   const runtimeRoot = await makeRuntimeRoot();
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 100);
@@ -122,7 +126,7 @@ test('closeSession returns promptly on abort instead of waiting 10s', async () =
 });
 
 test('closeSession honors already-aborted signal', async () => {
-  const exe = await writeStubExecutable(`sleep 30`);
+  const exe = await writeStubExecutable(`setTimeout(() => {}, 30000);`);
   const runtimeRoot = await makeRuntimeRoot();
   const controller = new AbortController();
   controller.abort();
@@ -136,7 +140,9 @@ test('runCommand timeout path still fires SIGKILL when child ignores SIGTERM', a
   // Stub ignores SIGTERM so only SIGKILL can reap it.
   const runtimeRoot = await makeRuntimeRoot();
   const ready = join(runtimeRoot, 'child-ready');
-  const exe = await writeStubExecutable(`trap '' TERM\ntouch ${ready}\nexec sleep 30`);
+  const exe = await writeStubExecutable(
+    `process.on('SIGTERM', () => {});\nrequire('node:fs').writeFileSync(${JSON.stringify(ready)}, '');\nsetTimeout(() => {}, 30000);`,
+  );
   const kills: string[] = [];
   const pids: number[] = [];
   const origKill = ChildProcess.prototype.kill;
@@ -176,7 +182,9 @@ test('runBatchStdin timeout path still fires SIGKILL when child ignores SIGTERM'
   // Stub ignores SIGTERM so only SIGKILL can reap it.
   const runtimeRoot = await makeRuntimeRoot();
   const ready = join(runtimeRoot, 'child-ready');
-  const exe = await writeStubExecutable(`trap '' TERM\ntouch ${ready}\nexec sleep 30`);
+  const exe = await writeStubExecutable(
+    `process.on('SIGTERM', () => {});\nrequire('node:fs').writeFileSync(${JSON.stringify(ready)}, '');\nsetTimeout(() => {}, 30000);`,
+  );
   const kills: string[] = [];
   const pids: number[] = [];
   const origKill = ChildProcess.prototype.kill;
@@ -217,7 +225,9 @@ test('runScreenshot timeout path still fires SIGKILL when child ignores SIGTERM'
   // Stub ignores SIGTERM so only SIGKILL can reap it.
   const runtimeRoot = await makeRuntimeRoot();
   const ready = join(runtimeRoot, 'child-ready');
-  const exe = await writeStubExecutable(`trap '' TERM\ntouch ${ready}\nexec sleep 30`);
+  const exe = await writeStubExecutable(
+    `process.on('SIGTERM', () => {});\nrequire('node:fs').writeFileSync(${JSON.stringify(ready)}, '');\nsetTimeout(() => {}, 30000);`,
+  );
   const kills: string[] = [];
   const pids: number[] = [];
   const origKill = ChildProcess.prototype.kill;
@@ -256,7 +266,9 @@ test('runScreenshot timeout path still fires SIGKILL when child ignores SIGTERM'
 test('runCommand honors pre-aborted signal without spawning', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-ab-pre-'));
   const marker = join(dir, 'launched');
-  const exe = await writeStubExecutable(`touch ${marker}\necho '{"success":true}'`);
+  const exe = await writeStubExecutable(
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '');\nconsole.log('{"success":true}');`,
+  );
   const runtimeRoot = await makeRuntimeRoot();
   const controller = new AbortController();
   controller.abort();
@@ -270,7 +282,9 @@ test('runCommand honors pre-aborted signal without spawning', async () => {
 test('runBatchStdin honors pre-aborted signal without spawning', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-ab-pre-'));
   const marker = join(dir, 'launched');
-  const exe = await writeStubExecutable(`touch ${marker}\necho '{"success":true}'`);
+  const exe = await writeStubExecutable(
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '');\nconsole.log('{"success":true}');`,
+  );
   const runtimeRoot = await makeRuntimeRoot();
   const controller = new AbortController();
   controller.abort();
@@ -284,13 +298,33 @@ test('runBatchStdin honors pre-aborted signal without spawning', async () => {
 test('runScreenshot honors pre-aborted signal without spawning', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-ab-pre-'));
   const marker = join(dir, 'launched');
-  const exe = await writeStubExecutable(`touch ${marker}\nexit 0`);
+  const exe = await writeStubExecutable(
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '');`,
+  );
   const runtimeRoot = await makeRuntimeRoot();
   const controller = new AbortController();
   controller.abort();
   const result = await runScreenshot({ executablePath: exe, runtimeRoot, namespace: 'ns-pre-abort-shot', signal: controller.signal });
   assert.deepEqual(result, { error: 'aborted' });
   assert.equal(existsSync(marker), false);
+});
+
+test('win32 routes .cjs fixtures through node instead of failing EFTYPE', async () => {
+  // Direct spawn of a script file fails on Windows (CreateProcess cannot
+  // execute it: spawn EFTYPE, errno -4028). The win32 script route runs it as
+  // [process.execPath, entry, ...args] — verifiable on any host by injecting
+  // the win32 platform seam.
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ab-cjs-'));
+  const exe = join(dir, 'stub.cjs');
+  await writeFile(exe, `#!/usr/bin/env node\nconsole.log(JSON.stringify({success:true}));\n`);
+  const child = spawnAgentBrowser(exe, ['--version'], { platform: 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+  const output = await new Promise<string>((resolve, reject) => {
+    let text = '';
+    child.stdout.on('data', (chunk) => { text += String(chunk); });
+    child.on('error', reject);
+    child.on('close', () => resolve(text));
+  });
+  assert.match(output, /"success":true/);
 });
 
 test('win32 resolution finds .cmd-shim-only PATH dirs via PATHEXT', () => {

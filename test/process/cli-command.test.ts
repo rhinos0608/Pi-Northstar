@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   buildCmdArgv,
+  childPathValue,
   quoteCmdArg,
   resolveCliCommand,
   windowsCmdExe,
@@ -29,25 +30,25 @@ test('quoteCmdArg always quotes so cmd metacharacters stay literal', () => {
   assert.equal(quoteCmdArg(''), '""');
 });
 
-test('quoteCmdArg wraps args with spaces and passes %VAR% through unexpanded by node', () => {
+test('quoteCmdArg wraps args with spaces and passes % through literally', () => {
   assert.equal(quoteCmdArg('hello world'), '"hello world"');
-  // cmd.exe expands %NAME% even inside quotes: every literal % is doubled so
-  // cmd/batch parsing collapses %% back to a literal % (child-visible text
-  // unchanged, no env leak into the /c line).
-  assert.equal(quoteCmdArg('%SystemRoot%'), '"%%SystemRoot%%"');
+  // `%` is never doubled: the pre-quoted argv rides the /c line into the .cmd
+  // shim, whose `%*` forwarding substitutes arguments without a second `%`
+  // expansion pass. Doubling corrupts input — `%%` reaches the child unchanged
+  // on the Windows runner (see test/process/cli-command-win32-native.test.ts).
+  assert.equal(quoteCmdArg('%SystemRoot%'), '"%SystemRoot%"');
 });
 
-test('quoteCmdArg doubles % so a %OPENCLI_TOKEN% payload survives literally', () => {
-  // Win32-capable (pure quoting, runs on any host): the transport spelling
-  // doubles %, and emulating cmd's %% -> % collapse recovers the input.
+test('quoteCmdArg keeps % literal so a %OPENCLI_TOKEN% payload survives', () => {
+  // Win32-capable (pure quoting, runs on any host): the quoted spelling keeps
+  // `%` as-is — the native win32 round-trip proves it arrives unchanged.
   const payload = 'search %OPENCLI_TOKEN% leaked?';
   const quoted = quoteCmdArg(payload);
-  assert.equal(quoted, '"search %%OPENCLI_TOKEN%% leaked?"');
-  assert.equal(quoted.slice(1, -1).replace(/%%/g, '%'), payload);
-  assert.equal(quoteCmdArg('100%'), '"100%%"');
-  assert.equal(quoteCmdArg('a%b'), '"a%%b"');
+  assert.equal(quoted, '"search %OPENCLI_TOKEN% leaked?"');
+  assert.equal(quoteCmdArg('100%'), '"100%"');
+  assert.equal(quoteCmdArg('a%b'), '"a%b"');
   const argv = buildCmdArgv('C:\\shims\\opencli.cmd', ['search', payload]);
-  assert.ok((argv[3] ?? '').includes('"search %%OPENCLI_TOKEN%% leaked?"'));
+  assert.ok((argv[3] ?? '').includes('"search %OPENCLI_TOKEN% leaked?"'));
 });
 
 test('quoteCmdArg doubles embedded quotes and trailing backslashes per CommandLineToArgvW', () => {
@@ -185,7 +186,7 @@ test('buildCmdArgv quotes a resolved path with spaces and keeps metachar args li
   assert.ok(commandLine.startsWith('"') && commandLine.endsWith('"'), 'outer quote pair present');
   const inner = commandLine.slice(1, -1);
   assert.ok(inner.startsWith('"C:\\Program Files\\tool\\opencli.cmd"'), 'spaced path stays one argv element');
-  assert.ok(inner.includes('"a&b|c<d>e^f%%g"'), 'metacharacters stay inside quotes (% doubled for cmd)');
+  assert.ok(inner.includes('"a&b|c<d>e^f%g"'), 'metacharacters stay inside quotes (% literal)');
   assert.ok(inner.includes('"say ""hi"""'), 'embedded quotes doubled');
   assert.ok(inner.endsWith('""'), 'empty arg keeps its position as ""');
 });
@@ -197,6 +198,17 @@ test('windowsPathValue reads PATH/Path/path in order', () => {
   assert.equal(windowsPathValue({ Path: 'C:\\a' }), 'C:\\a');
   assert.equal(windowsPathValue({ path: 'C:\\c' }), 'C:\\c');
   assert.equal(windowsPathValue({}), '');
+});
+
+test('childPathValue reads the spawn env PATH for win32 resolution', () => {
+  // Win32 shim lookup must use the child env (often shim-only PATH), not the
+  // parent process.env: bare commands otherwise miss with ENOENT even though
+  // the shim is on the child PATH (reach-tools twitter shims on Windows).
+  assert.equal(childPathValue({ PATH: 'C:\\shims' }), 'C:\\shims');
+  assert.equal(childPathValue({ Path: 'C:\\a' }), 'C:\\a');
+  assert.equal(childPathValue({}), undefined);
+  assert.equal(childPathValue(undefined), undefined);
+  assert.equal(childPathValue({ PATH: 42 } as unknown as Record<string, string>), undefined);
 });
 
 test('windowsCmdExe prefers COMSPEC, then SystemRoot, then the default', () => {

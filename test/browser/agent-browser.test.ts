@@ -374,12 +374,28 @@ process.stdin.on('end', () => {
 // ── snapshot basic smoke ──
 
 test('snapshot returns error when no browser session exists', async () => {
-  const adapter = new AgentBrowserAdapter();
-  const result = await adapter.execute({ action: 'snapshot' }, { env: {} });
-  // Without a browser session, this should either error gracefully or succeed
-  // The important thing is it doesn't throw
-  assert.ok(result !== undefined);
-  await adapter.close();
+  // Hermetic: a version-correct stub whose snapshot always fails, so the test
+  // never launches a real browser (which hangs the Windows runner past the
+  // 30s test timeout while resolving fine everywhere else).
+  const root = await mkdtemp(join(tmpdir(), 'pi-atlas-snapshot-no-session-'));
+  const executablePath = join(root, 'agent-browser.cjs');
+  await writeFile(executablePath, `#!/usr/bin/env node
+if (process.argv[2] === '--version') { process.stdout.write('agent-browser 0.37.1\\n'); process.exit(0); }
+process.stderr.write('no browser session');
+process.exit(1);
+`);
+  await chmod(executablePath, 0o700);
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot: join(root, 'runtime') });
+  try {
+    const result = await adapter.execute({ action: 'snapshot' }, { env: { PATH: process.env.PATH } });
+    // Without a browser session, this should either error gracefully or succeed
+    // The important thing is it doesn't throw
+    assert.ok(result !== undefined);
+    assert.match(String((result.details as Record<string, unknown>).error ?? ''), /no browser session|Snapshot failed/);
+  } finally {
+    await adapter.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // ── click stale ref ──

@@ -250,18 +250,19 @@ const VERIFY_VERSION_TIMEOUT_MS = 10_000;
 
 // .cmd/.bat targets route via cmd.exe /d /s /c with pre-quoted argv inside
 // spawnCliCommand (shared with src/cli-command.ts) — direct spawn with
-// shell:false would fail EINVAL on Windows. quoteCmdArg doubles `%` so
-// %VAR% sequences stay literal through cmd.exe expansion.
-// A resolved `.js` package entry is not a CreateProcess image either: on
-// win32 it runs as [process.execPath, entry, ...args] (shell:false cannot
-// execute `.js`); POSIX keeps the direct spawn (shebang routes via node).
+// shell:false would fail EINVAL on Windows. `%` passes through the transport
+// literally (see quoteCmdArg): no doubling.
+// A resolved `.js`/`.cjs`/`.mjs` entry is not a CreateProcess image either:
+// on win32 it runs as [process.execPath, entry, ...args] (shell:false cannot
+// execute script files — direct spawn fails with EFTYPE); POSIX keeps the
+// direct spawn (shebang routes via node).
 export function spawnAgentBrowser(
   executablePath: string,
   args: readonly string[],
   options: SpawnOptions & { platform?: NodeJS.Platform } = {},
 ): ChildProcessByStdio<Writable, Readable, Readable> {
   const targetPlatform = options.platform ?? process.platform;
-  if (targetPlatform === 'win32' && /\.js$/i.test(executablePath)) {
+  if (targetPlatform === 'win32' && /\.(?:js|cjs|mjs)$/i.test(executablePath)) {
     return spawnCliCommand(process.execPath, [executablePath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,

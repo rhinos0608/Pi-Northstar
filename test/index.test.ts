@@ -298,14 +298,12 @@ test('web_search schema leaves limit cap to per-category runtime validation', as
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
   }
   assert.ok(captured, 'web_search tool must be registered');
-  const branches = (captured!.parameters as { anyOf: Array<{ properties: Record<string, { maximum?: number; minimum?: number }> }> }).anyOf;
+  const schema = captured!.parameters as { type?: string; properties: Record<string, { maximum?: number; minimum?: number }> };
   // No static maximum: research 21-30 is reachable; per-category runtime
   // caps (20 web, 30 research) reject via validateWebRequest.
-  assert.equal(branches.length, 3, 'web_search schema must carry single/batch/agent branches');
-  for (const branch of branches) {
-    assert.equal(branch.properties.limit?.maximum, undefined, 'web_search limit schema must not impose a static 20 cap');
-    assert.equal(branch.properties.limit?.minimum, 1);
-  }
+  assert.equal(schema.type, 'object', 'web_search schema must be a top-level object (Anthropic-compatible)');
+  assert.equal(schema.properties.limit?.maximum, undefined, 'web_search limit schema must not impose a static 20 cap');
+  assert.equal(schema.properties.limit?.minimum, 1);
 });
 
 test('buildFetchRoute crawl_url without followLinks sets maxDepth 1', () => {
@@ -724,14 +722,13 @@ test('kg description requires user authorization before sensitive text submissio
 
 test('web_search exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
   const defs = await captureAllTools();
-  const webBranches = (defs.web_search!.parameters as { anyOf: Array<{ properties?: Record<string, { properties?: Record<string, unknown> }> }> }).anyOf;
-  assert.equal(webBranches.length, 3, 'web_search schema must carry single/batch/agent branches');
-  const withKnowledge = webBranches.filter((branch) => 'knowledge' in (branch.properties ?? {}));
-  assert.equal(withKnowledge.length, 2, 'single and batch branches carry knowledge; agent does not');
-  for (const branch of withKnowledge) {
-    assert.deepEqual(Object.keys(branch.properties!.knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
+  const webSchema = defs.web_search!.parameters as { type?: string; properties?: Record<string, { properties?: Record<string, unknown> }> };
+  assert.equal(webSchema.type, 'object', 'web_search schema must be a top-level object (Anthropic-compatible)');
+  for (const key of ['query', 'queries', 'mode', 'knowledge', 'cursor', 'source']) {
+    assert.ok(key in (webSchema.properties ?? {}), `web_search schema must expose field ${key}`);
   }
-  assert.equal((defs.fetch!.parameters as { anyOf?: unknown[] }).anyOf?.length, 8);
+  assert.deepEqual(Object.keys(webSchema.properties!.knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
+  assert.equal((defs.fetch!.parameters as { type?: string }).type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
 });
 
 test('buildSearchRoute preserves knowledge on non-research route', () => {
@@ -840,22 +837,17 @@ test('guidance: web_search marks research-only params and honors yearFrom on pla
   assert.ok(/batch \{queries\[1\.\.8\]\}/i.test(snippet), 'web_search promptSnippet must document the batch branch');
   assert.ok(/agent \{query, mode/i.test(snippet), 'web_search promptSnippet must document the agent branch');
   assert.ok(/cursor needs category "research"/i.test(snippet), 'web_search promptSnippet must keep cursor field constraints');
-  const params = defs.web_search!.parameters as { anyOf?: Array<{ description?: string; properties?: Record<string, { description?: string }> }> };
-  assert.equal(params.anyOf?.length, 3, 'web_search schema must carry exactly 3 branches (single/batch/agent)');
-  const branchKeys = params.anyOf!.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+'));
-  assert.ok(branchKeys.some((keys) => keys.includes('query') && !keys.includes('queries')), 'single branch must carry query without queries');
-  assert.ok(branchKeys.some((keys) => keys.includes('queries')), 'batch branch must carry queries');
-  assert.ok(branchKeys.some((keys) => keys.includes('mode')), 'agent branch must carry mode');
-  const single = params.anyOf!.find((branch) => 'cursor' in (branch.properties ?? {}));
-  assert.ok(/research-only/i.test(single?.properties?.source?.description ?? ''), 'source param must say research-only');
-  assert.ok(/research-only/i.test(single?.properties?.cursor?.description ?? ''), 'cursor param must say research-only');
-  assert.ok(/intersects with recency/i.test(single?.properties?.yearFrom?.description ?? ''), 'yearFrom param must document the recency intersect');
-  assert.ok(!/ignored on plain/i.test(single?.properties?.yearFrom?.description ?? ''), 'yearFrom must no longer claim plain-search ignore');
-  const agent = params.anyOf!.find((branch) => 'mode' in (branch.properties ?? {}));
-  assert.ok(!('cursor' in (agent?.properties ?? {})), 'agent branch must not carry cursor');
-  assert.ok(!('source' in (agent?.properties ?? {})), 'agent branch must not carry source');
-  assert.ok(!('knowledge' in (agent?.properties ?? {})), 'agent branch must not carry knowledge');
-  assert.ok(!('queries' in (agent?.properties ?? {})), 'agent branch must not carry batch queries');
+  const params = defs.web_search!.parameters as { type?: string; description?: string; properties?: Record<string, { description?: string }> };
+  assert.equal(params.type, 'object', 'web_search schema must be a top-level object (Anthropic-compatible)');
+  assert.ok(/Exactly one of query or queries/i.test(params.description ?? ''), 'web_search schema must state the query/queries XOR');
+  const props = params.properties ?? {};
+  for (const key of ['query', 'queries', 'mode']) {
+    assert.ok(key in props, `web_search schema must expose flat field ${key}`);
+  }
+  assert.ok(/research-only/i.test(props.source?.description ?? ''), 'source param must say research-only');
+  assert.ok(/research-only/i.test(props.cursor?.description ?? ''), 'cursor param must say research-only');
+  assert.ok(/intersects with recency/i.test(props.yearFrom?.description ?? ''), 'yearFrom param must document the recency intersect');
+  assert.ok(!/ignored on plain/i.test(props.yearFrom?.description ?? ''), 'yearFrom must no longer claim plain-search ignore');
 });
 
 test('guidance: fetch states discriminated branches', async () => {
@@ -866,12 +858,12 @@ test('guidance: fetch states discriminated branches', async () => {
   assert.ok(/batch_crawl/i.test(description), 'fetch description must name batch_crawl');
   assert.ok(/readable text per URL/i.test(description), 'batch_read must say full readable text per URL');
   assert.ok(/ranked chunks per URL/i.test(description), 'batch_crawl must say ranked chunks per URL');
-  const params = defs.fetch!.parameters as { anyOf?: Array<{ description?: string; properties?: Record<string, unknown> }> };
-  assert.equal(params.anyOf?.length, 8, 'fetch schema must carry exactly 8 branches');
-  const branchKeys = params.anyOf!.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+'));
-  assert.ok(branchKeys.includes('maxChars+url'), 'read branch must be url+maxChars');
-  assert.ok(branchKeys.some((keys) => keys.includes('siteMap')), 'sitemap branch must carry the siteMap marker');
-  assert.ok(branchKeys.some((keys) => keys.includes('claims')), 'source_check branch must carry claims');
+  const params = defs.fetch!.parameters as { type?: string; properties?: Record<string, unknown> };
+  assert.equal(params.type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
+  const keys = Object.keys(params.properties ?? {});
+  for (const key of ['url', 'urls', 'source', 'query', 'siteMap', 'action', 'responseId', 'claims']) {
+    assert.ok(keys.includes(key), `fetch schema must expose flat field ${key}`);
+  }
 });
 
 test('guidance: social limit clamps with warning', async () => {
@@ -934,16 +926,14 @@ test('graph description states native language, provenance, probe countability, 
 });
 
 const EXPECTED_KG_SCHEMA_KEYS = ['action', 'confidenceThreshold', 'cursor', 'description', 'email', 'employer', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'fields', 'id', 'includeEvidence', 'includeRelationships', 'language', 'limit', 'location', 'maxEntities', 'maxProviders', 'name', 'phone', 'providers', 'query', 'school', 'text', 'title', 'type', 'url'];
-const EXPECTED_WEB_SEARCH_BRANCH_KEYS = ['category+cursor+domains+includeContent+knowledge+limit+query+recency+source+yearFrom', 'category+domains+includeContent+knowledge+limit+queries+recency+source+yearFrom', 'category+domains+includeContent+limit+mode+query+recency+yearFrom'];
-const EXPECTED_FETCH_BRANCH_KEYS = ['maxChars+url', 'maxChars+maxPages+query+source+topK', 'maxChars+maxPages+query+source+topK', 'maxChars+urls', 'maxChars+maxPages+query+topK+urls', 'maxPages+query+siteMap+url', 'action+findText+limit+offset+responseId+sourceIds', 'action+claims+responseId+sourceIds'];
+const EXPECTED_WEB_SEARCH_SCHEMA_KEYS = ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom'];
+const EXPECTED_FETCH_SCHEMA_KEYS = ['action', 'claims', 'findText', 'limit', 'maxChars', 'maxPages', 'offset', 'query', 'responseId', 'siteMap', 'source', 'sourceIds', 'topK', 'url', 'urls'];
 
 test('graph registration leaves kg, web_search, and fetch schemas unchanged', async () => {
   const defs = await captureAllTools();
   assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), EXPECTED_KG_SCHEMA_KEYS);
-  const webParams = defs.web_search!.parameters as { anyOf?: Array<{ properties?: Record<string, unknown> }> };
-  assert.deepEqual(webParams.anyOf?.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+')).sort(), EXPECTED_WEB_SEARCH_BRANCH_KEYS.sort());
-  const fetchParams = defs.fetch!.parameters as { anyOf?: Array<{ properties?: Record<string, unknown> }> };
-  assert.deepEqual(fetchParams.anyOf?.map((branch) => Object.keys(branch.properties ?? {}).sort().join('+')).sort(), EXPECTED_FETCH_BRANCH_KEYS.sort());
+  assert.deepEqual(Object.keys((defs.web_search!.parameters as { properties?: object }).properties ?? {}).sort(), EXPECTED_WEB_SEARCH_SCHEMA_KEYS);
+  assert.deepEqual(Object.keys((defs.fetch!.parameters as { properties?: object }).properties ?? {}).sort(), EXPECTED_FETCH_SCHEMA_KEYS);
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
   assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');
