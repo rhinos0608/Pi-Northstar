@@ -8,6 +8,7 @@ export const GRAPH_RESULT_VERSION = 1 as const;
 export const GRAPH_ADAPTER_CURSOR_V = 1 as const;
 export const MAX_GRAPH_CURSOR_LENGTH = 4096 as const;
 export const MAX_GRAPH_QUERY_CHARS = 50_000 as const;
+export const MAX_GRAPH_NAME_CHARS = 2000 as const;
 export const MAX_GRAPH_BATCH = 32 as const;
 export const GRAPH_PAGE_SIZE_MIN = 1 as const;
 export const GRAPH_PAGE_SIZE_MAX = 100 as const;
@@ -18,7 +19,8 @@ export const MAX_GRAPH_JSON_KEYS = 1_000 as const;
 export const MAX_GRAPH_JSON_ITEMS = 10_000 as const;
 
 export type GraphAction = 'query' | 'probe' | 'schema';
-export type GraphLanguage = 'dql';
+export const GRAPH_LANGUAGES = ['dql', 'sparql'] as const;
+export type GraphLanguage = (typeof GRAPH_LANGUAGES)[number];
 export type GraphStatus = 'ok' | 'empty' | 'partial' | 'error';
 export type GraphQueryShape = 'rows' | 'facets' | 'aggregate' | 'scalar' | 'object';
 export type GraphSchemaView = 'types' | 'fields' | 'search' | 'describe';
@@ -46,17 +48,26 @@ export interface GraphError {
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export type GraphRequest =
-  | { action: 'query'; language: GraphLanguage; query: string; pageSize?: number; cursor?: string }
+  | { action: 'query'; language: 'dql'; query: string; pageSize?: number; cursor?: string }
+  | { action: 'query'; language: 'sparql'; query: string }
   | { action: 'probe'; language: GraphLanguage; queries: string[] }
   | { action: 'schema'; language: GraphLanguage; view: GraphSchemaView; name?: string; query?: string; includeDeprecated?: boolean };
 
-export interface GraphQueryInput {
+export interface GraphDqlQueryInput {
   action: 'query';
-  language: GraphLanguage;
+  language: 'dql';
   query: string;
   pageSize: number;
   cursor?: string | undefined;
 }
+
+export interface GraphSparqlQueryInput {
+  action: 'query';
+  language: 'sparql';
+  query: string;
+}
+
+export type GraphQueryInput = GraphDqlQueryInput | GraphSparqlQueryInput;
 
 export interface GraphProbeInput {
   action: 'probe';
@@ -160,6 +171,7 @@ function isPrimitiveStateValue(value: unknown): value is string | number | boole
 // ── request validation (strict discriminated union) ──
 
 const QUERY_KEYS: ReadonlySet<string> = new Set(['action', 'language', 'query', 'pageSize', 'cursor']);
+const SPARQL_QUERY_KEYS: ReadonlySet<string> = new Set(['action', 'language', 'query']);
 const PROBE_KEYS: ReadonlySet<string> = new Set(['action', 'language', 'queries']);
 const SCHEMA_KEYS: ReadonlySet<string> = new Set(['action', 'language', 'view', 'name', 'query', 'includeDeprecated']);
 const SCHEMA_VIEWS: ReadonlySet<string> = new Set(['types', 'fields', 'search', 'describe']);
@@ -196,10 +208,18 @@ export function validateGraphRequest(input: unknown): GraphValidationResult {
   if (action !== 'query' && action !== 'probe' && action !== 'schema') {
     return fail('invalid_input', 'action must be query, probe, or schema');
   }
-  if (input.language !== 'dql') {
-    return fail('unsupported_option', "language must be 'dql' in v1");
+  if (input.language !== 'dql' && input.language !== 'sparql') {
+    return fail('unsupported_option', "language must be 'dql' or 'sparql' in v1");
   }
+  const language = input.language as GraphLanguage;
   if (action === 'query') {
+    if (language === 'sparql') {
+      const unknown = checkNoUnknownKeys(input, SPARQL_QUERY_KEYS);
+      if (unknown !== undefined) return fail('invalid_input', `unknown query field: ${unknown}`);
+      const query = checkQueryText(input.query);
+      if (query === undefined) return fail('invalid_input', `query must be non-empty text 1..${MAX_GRAPH_QUERY_CHARS} chars`);
+      return { ok: true, input: { action: 'query', language: 'sparql', query } };
+    }
     const unknown = checkNoUnknownKeys(input, QUERY_KEYS);
     if (unknown !== undefined) return fail('invalid_input', `unknown query field: ${unknown}`);
     const query = checkQueryText(input.query);
@@ -230,7 +250,7 @@ export function validateGraphRequest(input: unknown): GraphValidationResult {
       if (text === undefined) return fail('invalid_input', `each query must be non-empty text 1..${MAX_GRAPH_QUERY_CHARS} chars`);
       queries.push(text);
     }
-    return { ok: true, input: { action: 'probe', language: 'dql', queries } };
+    return { ok: true, input: { action: 'probe', language, queries } };
   }
   const unknown = checkNoUnknownKeys(input, SCHEMA_KEYS);
   if (unknown !== undefined) return fail('invalid_input', `unknown schema field: ${unknown}`);
@@ -250,14 +270,20 @@ export function validateGraphRequest(input: unknown): GraphValidationResult {
     if (input.name !== undefined && !nonEmptyString(input.name)) {
       return fail('invalid_input', 'name must be non-empty text');
     }
+    if (typeof input.name === 'string' && trimmed(input.name).length > MAX_GRAPH_NAME_CHARS) {
+      return fail('invalid_input', `name must be non-empty text 1..${MAX_GRAPH_NAME_CHARS} chars`);
+    }
   } else if (view === 'search') {
     if (input.name !== undefined) return fail('invalid_input', 'view search accepts no name selector');
     if (checkQueryText(input.query) === undefined) return fail('invalid_input', 'view search requires a non-empty query');
   } else {
     if (input.query !== undefined) return fail('invalid_input', 'view describe accepts no query selector');
     if (!nonEmptyString(input.name)) return fail('invalid_input', 'view describe requires a non-empty name');
+    if (trimmed(input.name as string).length > MAX_GRAPH_NAME_CHARS) {
+      return fail('invalid_input', `name must be non-empty text 1..${MAX_GRAPH_NAME_CHARS} chars`);
+    }
   }
-  const out: GraphSchemaInput = { action: 'schema', language: 'dql', view };
+  const out: GraphSchemaInput = { action: 'schema', language, view };
   if (typeof input.name === 'string' && nonEmptyString(input.name)) out.name = trimmed(input.name);
   if (typeof input.query === 'string' && nonEmptyString(input.query)) out.query = trimmed(input.query as string);
   if (typeof input.includeDeprecated === 'boolean') out.includeDeprecated = input.includeDeprecated;
@@ -451,7 +477,7 @@ export function validateGraphResult(value: unknown): GraphValidationEnvelope {
   if (result.schema !== GRAPH_RESULT_SCHEMA) issues.push('schema must be pi-northstar.graph-result');
   if (result.version !== 1) issues.push('version must be 1');
   if (typeof result.status !== 'string' || !GRAPH_STATUSES.has(result.status)) issues.push('status is invalid');
-  if (result.language !== 'dql') issues.push('language must be dql');
+  if (result.language !== 'dql' && result.language !== 'sparql') issues.push('language must be dql or sparql');
   if (!isRecord(result.source) || !nonEmptyString((result.source as unknown as Record<string, unknown>).provider)) {
     issues.push('source.provider is required');
   }

@@ -4,6 +4,7 @@ import {
   buildSearchRoute,
   ensureChromeBridgeServer,
   resolveChromeExtensionId,
+  searchLedgerOptions,
   selectChromeCompanion,
   stopChromeBridgeServer,
 } from '../src/index.js';
@@ -58,6 +59,18 @@ test('buildSearchRoute carries no provider selection input', () => {
   for (const key of ['provider', 'providers', 'backend', 'backends']) {
     assert.equal(route.args[key], undefined, `route must not carry ${key}`);
   }
+});
+
+test('ledger options derive safely from params that route validation rejects', () => {
+  // Reject-on-overflow stays in the route: ledger key derivation never throws
+  // and never smuggles the cursor into the duplicate key.
+  const options = searchLedgerOptions({ query: 'x', limit: 21, cursor: 'opaque-token' });
+  assert.equal(options.limit, 21);
+  assert.equal((options as { cursor?: string }).cursor, undefined);
+  assert.throws(
+    () => buildSearchRoute({ query: 'x', limit: 21 }),
+    (error: unknown) => (error as { code?: string }).code === 'invalid_request',
+  );
 });
 
 test('resolveChromeExtensionId trims and fails closed on blank', () => {

@@ -1,5 +1,6 @@
 import { codexConfigured } from '../web/providers/codex-search.js';
 import { channelCapability } from '../capabilities.js';
+import { resolveSparqlConfig } from './local-config.js';
 
 export interface ProviderDescriptor {
   provider: string;
@@ -62,6 +63,7 @@ export const PROVIDER_DESCRIPTOR_SOURCE: Array<Omit<ProviderDescriptor, 'availab
   { provider: 'diffbot', channel: 'diffbot', channels: ['diffbot', 'web', 'research', 'graph'], family: 'research', envKeys: ['DIFFBOT_TOKEN'], cookieDomains: [], loginFlow: 'env_var', risk: 'low', setup: 'Set DIFFBOT_TOKEN to enable Diffbot knowledge search, enhance, text analysis, web-search participation, and graph operations', description: 'Diffbot knowledge graph: DQL search, entity enhance, and text analysis (kg tool), native DQL query/probe/schema (graph tool), plus web_search participation' },
   { provider: 'firecrawl', channel: 'firecrawl', channels: ['firecrawl', 'web'], family: 'research', envKeys: ['FIRECRAWL_API_KEY'], cookieDomains: [], loginFlow: 'env_var', risk: 'low', setup: 'Set FIRECRAWL_API_KEY for Firecrawl search and page reads; page content is processed externally by the vendor (external processing)', description: 'Firecrawl search API and page scraping with vendor-side external processing' },
   { provider: 'jina', channel: 'jina', channels: ['jina', 'web'], family: 'research', envKeys: ['JINA_API_KEY'], cookieDomains: [], loginFlow: 'env_var', risk: 'low', setup: 'Set JINA_API_KEY for Jina search and page reads; page content is processed externally by the vendor (external processing)', description: 'Jina search API and URL reading with vendor-side external processing' },
+  { provider: 'sparql', channel: 'sparql', channels: ['sparql', 'graph'], family: 'research', envKeys: ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN'], cookieDomains: [], loginFlow: 'env_var', risk: 'low', setup: 'Set GRAPH_SPARQL_ENDPOINT (http(s), no credentials) for operator-owned SPARQL graph access; optional GRAPH_SPARQL_TOKEN bearer auth', description: 'Operator-owned SPARQL endpoint: SELECT/ASK query, cardinality probe, and schema discovery (graph tool)' },
   { provider: 'twitter', channel: 'twitter', family: 'social', envKeys: [], cookieDomains: [], loginFlow: 'cli_login', risk: 'medium', setup: 'Install twitter-cli and login via its own authenticated session', description: 'Twitter/X tweets, search, users, and timelines', loginUrl: 'https://x.com/login' },
   { provider: 'reddit', channel: 'reddit', family: 'social', envKeys: ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT'], cookieDomains: ['reddit.com'], loginFlow: 'env_var', risk: 'medium', setup: 'Set Reddit API credentials or install OpenCLI/rdt-cli', description: 'Reddit posts, comments, subreddits, and search', loginUrl: 'https://www.reddit.com/login' },
 
@@ -100,10 +102,31 @@ function ollamaSearchConfigured(env: Record<string, string | undefined>): boolea
   return Boolean(env.OLLAMA_SEARCH_BASE_URL?.trim() || env.SEARCH_OLLAMA_BASE_URL?.trim());
 }
 
+/** SPARQL needs a valid endpoint URL; token alone must not count as configured. */
+function sparqlConfigured(env: Record<string, string | undefined>): boolean {
+  return resolveSparqlConfig(env).configured;
+}
+
+/** SPARQL status: configured flag plus host-only endpoint; never exposes token.
+ *  keyNames lists only GRAPH_SPARQL_ENDPOINT when an endpoint value is present. */
+export function sparqlStatus(env: Record<string, string | undefined>): { configured: boolean; endpointHost?: string; keyNames: string[]; error?: { code: 'unsupported_option'; message: string } } {
+  const resolved = resolveSparqlConfig(env);
+  const keyNames = typeof env.GRAPH_SPARQL_ENDPOINT === 'string' && env.GRAPH_SPARQL_ENDPOINT.trim().length > 0
+    ? ['GRAPH_SPARQL_ENDPOINT']
+    : [];
+  return {
+    configured: resolved.configured,
+    ...(resolved.endpointHost ? { endpointHost: resolved.endpointHost } : {}),
+    keyNames,
+    ...(resolved.error ? { error: resolved.error } : {}),
+  };
+}
+
 function providerConfigured(provider: string, desc: { envKeys: string[]; loginFlow: string }, env: Record<string, string | undefined>): boolean {
   if (provider === 'reddit') return redditOAuthConfigured(env);
   if (provider === 'brightdata') return brightdataConfigured(env);
   if (provider === 'ollama-search') return ollamaSearchConfigured(env);
+  if (provider === 'sparql') return sparqlConfigured(env);
   const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
   return present.length > 0 || desc.loginFlow === 'none';
 }
@@ -114,7 +137,9 @@ export function liveAuthSnapshot(env: Record<string, string | undefined>): Recor
     const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
     let configured = providerConfigured(desc.provider, desc, env);
     if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
-    result[desc.provider] = { configured, keyNames: present };
+    // SPARQL token is opaque: status exposes endpoint presence only, never the token.
+    const keyNames = desc.provider === 'sparql' ? present.filter((k) => k !== 'GRAPH_SPARQL_TOKEN') : present;
+    result[desc.provider] = { configured, keyNames };
   }
   return result;
 }
@@ -130,15 +155,25 @@ export function findProvider(providerKey: string): ProviderDescriptor | undefine
 }
 
 export function authForChannel(channelName: string, env: Record<string, string | undefined>): { configured: boolean; keyNames: string[]; loginFlow: string; cookieDomains: string[]; risk: string } | undefined {
-  const desc = PROVIDER_DESCRIPTORS.find(d => d.channel === channelName)
-    ?? PROVIDER_DESCRIPTORS.find(d => d.channels?.includes(channelName));
-  if (!desc) return undefined;
+  const descs = PROVIDER_DESCRIPTORS.filter(d => d.channel === channelName || d.channels?.includes(channelName));
+  if (descs.length === 0) return undefined;
+  const isConfigured = (d: ProviderDescriptor): boolean => {
+    if (d.provider === 'codex' && providerConfigured(d.provider, d, env)) return true;
+    if (d.provider === 'codex') return codexConfigured(env);
+    return providerConfigured(d.provider, d, env);
+  };
+  // Shared channels (e.g. graph) report configured when any matching
+  // provider's required environment is present; single-provider channels
+  // behave exactly as before.
+  const desc = descs.find(isConfigured) ?? descs[0]!;
   const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
   let configured = providerConfigured(desc.provider, desc, env);
   if (desc.provider === 'codex' && !configured) configured = codexConfigured(env);
+  // SPARQL token is opaque: status exposes endpoint presence only, never the token.
+  const keyNames = desc.provider === 'sparql' ? present.filter((k) => k !== 'GRAPH_SPARQL_TOKEN') : present;
   return {
     configured,
-    keyNames: present,
+    keyNames,
     loginFlow: desc.loginFlow,
     cookieDomains: desc.cookieDomains,
     risk: desc.risk,

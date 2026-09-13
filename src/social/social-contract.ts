@@ -177,7 +177,7 @@ export function selectorSpecFor(platform: SocialPlatform, action: SocialAction):
 
 export const DEFAULT_SOCIAL_LIMIT = 20;
 export const SOCIAL_MAX_LIMIT = 100;
-const MAX_SELECTOR_LENGTH = 1024;
+export const MAX_SELECTOR_LENGTH = 1024;
 
 /** Validate and bound a request limit. Clamps above the cap with a warning. */
 export function resolveSocialLimit(raw: unknown, maxLimit: number = SOCIAL_MAX_LIMIT): { limit: number; warnings: string[] } {

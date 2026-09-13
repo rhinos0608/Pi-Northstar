@@ -10,20 +10,29 @@ import type { DiffbotFetchOptions } from '../diffbot/diffbot-transport.js';
 import {
   GRAPH_PROVIDER,
   GRAPH_ADAPTER_V,
-  GRAPH_LANGUAGES,
   fetchDiffbotOntology,
   probeDiffbotGraph,
   queryDiffbotGraph,
 } from '../diffbot/diffbot-graph.js';
+import { resolveSparqlConfig } from '../setup/local-config.js';
+import {
+  createSparqlGraphAdapter,
+  fetchSparqlSchemaView,
+  SPARQL_PROVIDER,
+} from '../sparql/sparql-graph.js';
+import type { SparqlFetchFn } from '../sparql/sparql-transport.js';
 import {
   buildGraphResult,
   decodeGraphCursor,
   encodeGraphCursor,
   fingerprintGraphRequest,
+  GRAPH_DEFAULT_PAGE_SIZE,
+  GRAPH_LANGUAGES,
   toGraphError,
   validateGraphRequest,
   type GraphData,
   type GraphError,
+  type GraphLanguage,
   type GraphProbeItem,
   type GraphResult,
   type GraphSchemaResult,
@@ -40,8 +49,8 @@ import {
 import { textResult } from '../core/tool-output.js';
 import { wrapUntrustedText } from '../core/untrusted-content.js';
 
-/** V1 language registry: native language to internal provider. No provider input. */
-const GRAPH_LANGUAGE_ADAPTERS: Readonly<Record<string, string>> = { dql: GRAPH_PROVIDER };
+/** Language registry: native language to owning provider. No provider input. */
+const GRAPH_LANGUAGE_ADAPTERS: Readonly<Record<string, string>> = { dql: GRAPH_PROVIDER, sparql: SPARQL_PROVIDER };
 
 const GRAPH_MAX_FROM = 10_000 as const;
 const GRAPH_SCHEMA_SEARCH_CAP = 100 as const;
@@ -52,6 +61,10 @@ export interface GraphToolOptions {
   timeoutMs?: number | undefined;
   fetchFn?: ((options: DiffbotFetchOptions) => Promise<unknown>) | undefined;
   cachePath?: string | undefined;
+  /** Test/operator override for the SPARQL endpoint URL (default: env config). */
+  sparqlEndpoint?: string | undefined;
+  /** Injected SPARQL fetch for deterministic tests; defaults to global fetch. */
+  sparqlFetchFn?: SparqlFetchFn | undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,8 +80,14 @@ function queryPlaceholder(): GraphData {
   return { kind: 'query', shape: 'object', result: null };
 }
 
-function errorEnvelope(error: GraphError, data: GraphData, language: 'dql' = 'dql'): GraphResult {
-  return buildGraphResult({ status: 'error', language, provider: GRAPH_PROVIDER, data, errors: [error], notes: [] });
+function errorEnvelope(error: GraphError, data: GraphData, language: GraphLanguage = 'dql', provider: string = GRAPH_PROVIDER): GraphResult {
+  return buildGraphResult({ status: 'error', language, provider, data, errors: [error], notes: [] });
+}
+
+/** Envelope scope for validation failures: sparql input errors stay sparql-scoped. */
+function scopeFor(language: unknown): { language: GraphLanguage; provider: string } {
+  if (language === 'sparql') return { language: 'sparql', provider: SPARQL_PROVIDER };
+  return { language: 'dql', provider: GRAPH_PROVIDER };
 }
 
 function rowCount(result: JsonValue): number | undefined {
@@ -77,29 +96,37 @@ function rowCount(result: JsonValue): number | undefined {
   return undefined;
 }
 
-function renderQueryText(shape: string, result: JsonValue, hasMore: boolean): string {
+interface RenderQueryTextParams {
+  language: GraphLanguage;
+  provider: string;
+  shape: string;
+  result: JsonValue;
+  hasMore: boolean;
+}
+
+function renderQueryText({ language, provider, shape, result, hasMore }: RenderQueryTextParams): string {
   const count = rowCount(result);
   const rows = shape === 'rows' && count !== undefined ? ` (${count} row(s))` : '';
-  return `Graph query (dql, diffbot, shape ${shape})${rows}${hasMore ? ', more pages available' : ''}.`;
+  return `Graph query (${language}, ${provider}, shape ${shape})${rows}${hasMore ? ', more pages available' : ''}.`;
 }
 
-function renderProbeText(items: GraphProbeItem[]): string {
+function renderProbeText(items: GraphProbeItem[], language: GraphLanguage, provider: string): string {
   const ok = items.filter((item) => item.status === 'ok').length;
-  return `Graph probe (dql, diffbot): ${ok}/${items.length} countable.`;
+  return `Graph probe (${language}, ${provider}): ${ok}/${items.length} countable.`;
 }
 
-function renderSchemaText(result: GraphSchemaResult, stale: boolean): string {
+function renderSchemaText(result: GraphSchemaResult, stale: boolean, language: GraphLanguage = 'dql', provider: string = GRAPH_PROVIDER): string {
   const suffix = stale ? ' (stale cache)' : '';
-  if (result.view === 'types') return `Graph schema types (dql, diffbot): ${result.types.length} type(s)${suffix}.`;
+  if (result.view === 'types') return `Graph schema types (${language}, ${provider}): ${result.types.length} type(s)${suffix}.`;
   if (result.view === 'fields') {
     const trunc = (result as { truncated?: boolean }).truncated === true ? `, truncated to ${GRAPH_SCHEMA_SEARCH_CAP}; narrow with view 'fields' + type name` : '';
-    return `Graph schema fields (dql, diffbot): ${result.fields.length} field(s)${suffix}${trunc}.`;
+    return `Graph schema fields (${language}, ${provider}): ${result.fields.length} field(s)${suffix}${trunc}.`;
   }
   if (result.view === 'search') {
     const trunc = (result as { truncated?: boolean }).truncated === true ? `, truncated to ${GRAPH_SCHEMA_SEARCH_CAP}; narrow with view 'search' and a more specific query` : '';
-    return `Graph schema search (dql, diffbot): ${result.matches.length} match(es)${suffix}${trunc}.`;
+    return `Graph schema search (${language}, ${provider}): ${result.matches.length} match(es)${suffix}${trunc}.`;
   }
-  return `Graph schema describe (dql, diffbot): ${result.name}${suffix}.`;
+  return `Graph schema describe (${language}, ${provider}): ${result.name}${suffix}.`;
 }
 
 export async function callGraphTool(
@@ -111,16 +138,17 @@ export async function callGraphTool(
   if (normalized.language === undefined) normalized.language = 'dql';
   const validated = validateGraphRequest(normalized);
   if (!validated.ok) {
+    const scope = scopeFor(normalized.language);
     const data = normalized.action === 'probe'
       ? ({ kind: 'probe', items: [] } as GraphData)
       : queryPlaceholder();
-    const envelope = errorEnvelope(toGraphError(validated.code, validated.message, false, GRAPH_PROVIDER), data);
+    const envelope = errorEnvelope(toGraphError(validated.code, validated.message, false, scope.provider), data, scope.language, scope.provider);
     return textResult(wrapUntrustedText(`Graph ${validated.code}: ${validated.message}`, { source: 'graph' }), {
-      action: 'graph', language: 'dql', graph: envelope,
+      action: 'graph', language: scope.language, graph: envelope,
     });
   }
   const input = validated.input;
-  if (GRAPH_LANGUAGE_ADAPTERS[input.language] !== GRAPH_PROVIDER || !GRAPH_LANGUAGES.includes(input.language)) {
+  if (GRAPH_LANGUAGE_ADAPTERS[input.language] === undefined || !GRAPH_LANGUAGES.includes(input.language)) {
     const envelope = errorEnvelope(toGraphError('unsupported_option', `No configured adapter for language '${input.language}'.`, false, GRAPH_PROVIDER), queryPlaceholder());
     return textResult(wrapUntrustedText('Graph unsupported_option: no configured adapter.', { source: 'graph' }), {
       action: 'graph', language: input.language, graph: envelope,
@@ -133,12 +161,17 @@ export async function callGraphTool(
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   };
 
+  // Query narrows by language: DQL keeps pageSize/cursor pagination, SPARQL
+  // carries neither (contract rejects them) and returns one bounded response.
   if (input.action === 'query') {
+    if (input.language === 'sparql') return sparqlQuery(input.query, env, ctx, options);
     return graphQuery(input.query, input.pageSize, input.cursor, ctx);
   }
   if (input.action === 'probe') {
+    if (input.language === 'sparql') return sparqlProbe(input.queries, env, ctx, options);
     return graphProbe(input.queries, ctx);
   }
+  if (input.language === 'sparql') return sparqlSchema(input.view, input.name, input.query, input.includeDeprecated, env, ctx, options);
   return graphSchema(input.view, input.name, input.query, input.includeDeprecated, ctx, options.cachePath ?? DEFAULT_GRAPH_ONTOLOGY_CACHE_PATH);
 }
 
@@ -210,7 +243,7 @@ async function graphQuery(
   const count = rowCount(outcome.result!);
   const status: GraphStatus = data.shape === 'rows' && count === 0 ? 'empty' : 'ok';
   const envelope = buildGraphResult({ status, language: 'dql', provider: GRAPH_PROVIDER, data, pagination, errors: [], notes });
-  return textResult(wrapUntrustedText(renderQueryText(data.shape, outcome.result!, canContinue), { source: 'graph' }), {
+  return textResult(wrapUntrustedText(renderQueryText({ language: 'dql', provider: GRAPH_PROVIDER, shape: data.shape, result: outcome.result!, hasMore: canContinue }), { source: 'graph' }), {
     action: 'query', language: 'dql', graph: envelope,
   });
 }
@@ -226,8 +259,167 @@ async function graphProbe(queries: string[], ctx: GraphQueryCtx): Promise<Backen
     status, language: 'dql', provider: GRAPH_PROVIDER,
     data: { kind: 'probe', items }, errors, notes: [],
   });
-  return textResult(wrapUntrustedText(renderProbeText(items), { source: 'graph' }), {
+  return textResult(wrapUntrustedText(renderProbeText(items, 'dql', GRAPH_PROVIDER), { source: 'graph' }), {
     action: 'probe', language: 'dql', graph: envelope,
+  });
+}
+
+// ── SPARQL adapter dispatch (operator endpoint, SELECT/ASK only) ──
+
+interface SparqlEndpoint {
+  endpoint: string;
+  token: string;
+}
+
+/** Resolve the operator SPARQL endpoint from test overrides or env config.
+ *  The endpoint URL is env-only, never model input; the token stays opaque. */
+function resolveSparqlEndpoint(
+  env: Record<string, string | undefined>,
+  options: GraphToolOptions,
+): { ok: true; endpoint: SparqlEndpoint } | { ok: false; error: GraphError } {
+  if (options.sparqlEndpoint !== undefined) {
+    const endpoint = options.sparqlEndpoint.trim();
+    if (endpoint.length === 0) {
+      return { ok: false, error: toGraphError('auth_required', 'SPARQL endpoint is not configured.', false, SPARQL_PROVIDER) };
+    }
+    return { ok: true, endpoint: { endpoint, token: resolveSparqlConfig(env).token ?? '' } };
+  }
+  const resolved = resolveSparqlConfig(env);
+  if (!resolved.configured || resolved.endpoint === undefined) {
+    const message = resolved.error?.message ?? 'SPARQL endpoint is not configured: set GRAPH_SPARQL_ENDPOINT.';
+    const code = resolved.error !== undefined ? 'unsupported_option' : 'auth_required';
+    return { ok: false, error: toGraphError(code, message, false, SPARQL_PROVIDER) };
+  }
+  return { ok: true, endpoint: { endpoint: resolved.endpoint, token: resolved.token ?? '' } };
+}
+
+function sparqlAdapterContext(ctx: GraphQueryCtx, token: string): { token: string; signal?: AbortSignal; timeoutMs?: number } {
+  return {
+    token,
+    ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+    ...(ctx.timeoutMs !== undefined ? { timeoutMs: ctx.timeoutMs } : {}),
+  };
+}
+
+function sparqlAdapterOptions(
+  endpoint: SparqlEndpoint,
+  ctx: GraphQueryCtx,
+  options: GraphToolOptions,
+): { endpoint: string; fetchFn?: SparqlFetchFn; timeoutMs?: number } {
+  return {
+    endpoint: endpoint.endpoint,
+    ...(options.sparqlFetchFn !== undefined ? { fetchFn: options.sparqlFetchFn } : {}),
+    ...(ctx.timeoutMs ?? options.timeoutMs ? { timeoutMs: (ctx.timeoutMs ?? options.timeoutMs) as number } : {}),
+  };
+}
+
+/** SPARQL query: one bounded response, no cursor. pageSize/cursor never reach
+ *  here — the contract rejects them before dispatch. */
+async function sparqlQuery(
+  query: string,
+  env: Record<string, string | undefined>,
+  ctx: GraphQueryCtx,
+  options: GraphToolOptions,
+): Promise<BackendCallResult> {
+  const resolved = resolveSparqlEndpoint(env, options);
+  if (!resolved.ok) {
+    const envelope = errorEnvelope(resolved.error, queryPlaceholder(), 'sparql', SPARQL_PROVIDER);
+    return textResult(wrapUntrustedText(`Graph ${resolved.error.code}: ${resolved.error.message}`, { source: 'graph' }), {
+      action: 'query', language: 'sparql', graph: envelope,
+    });
+  }
+  const adapter = createSparqlGraphAdapter(sparqlAdapterOptions(resolved.endpoint, ctx, options));
+  const outcome = await adapter.executeQuery(
+    { query, pageSize: GRAPH_DEFAULT_PAGE_SIZE, from: 0 },
+    sparqlAdapterContext(ctx, resolved.endpoint.token),
+  );
+  if (outcome.error) {
+    const envelope = errorEnvelope(outcome.error, queryPlaceholder(), 'sparql', SPARQL_PROVIDER);
+    return textResult(wrapUntrustedText(`Graph ${outcome.error.code}: ${outcome.error.message}`, { source: 'graph' }), {
+      action: 'query', language: 'sparql', graph: envelope,
+    });
+  }
+  const data: GraphData = { kind: 'query', shape: outcome.shape!, result: outcome.result! };
+  const envelope = buildGraphResult({
+    status: 'ok', language: 'sparql', provider: SPARQL_PROVIDER,
+    data, pagination: { hasMore: false }, errors: [], notes: [],
+  });
+  return textResult(wrapUntrustedText(renderQueryText({ language: 'sparql', provider: SPARQL_PROVIDER, shape: data.shape, result: outcome.result!, hasMore: false }), { source: 'graph' }), {
+    action: 'query', language: 'sparql', graph: envelope,
+  });
+}
+
+async function sparqlProbe(
+  queries: string[],
+  env: Record<string, string | undefined>,
+  ctx: GraphQueryCtx,
+  options: GraphToolOptions,
+): Promise<BackendCallResult> {
+  const resolved = resolveSparqlEndpoint(env, options);
+  if (!resolved.ok) {
+    const envelope = errorEnvelope(resolved.error, { kind: 'probe', items: [] }, 'sparql', SPARQL_PROVIDER);
+    return textResult(wrapUntrustedText(`Graph ${resolved.error.code}: ${resolved.error.message}`, { source: 'graph' }), {
+      action: 'probe', language: 'sparql', graph: envelope,
+    });
+  }
+  const adapter = createSparqlGraphAdapter(sparqlAdapterOptions(resolved.endpoint, ctx, options));
+  const outcome = await adapter.probeCardinality({ queries }, sparqlAdapterContext(ctx, resolved.endpoint.token));
+  const items: GraphProbeItem[] = outcome.items.map((item) =>
+    item.status === 'ok' ? { query: item.query, status: 'ok' as const, hits: item.hits } : { query: item.query, status: 'error' as const, error: item.error },
+  );
+  const errors: GraphError[] = items.flatMap((item) => (item.status === 'error' ? [item.error] : []));
+  const status: GraphStatus = errors.length === 0 ? 'ok' : errors.length === items.length ? 'error' : 'partial';
+  const envelope = buildGraphResult({
+    status, language: 'sparql', provider: SPARQL_PROVIDER,
+    data: { kind: 'probe', items }, errors, notes: [],
+  });
+  return textResult(wrapUntrustedText(renderProbeText(items, 'sparql', SPARQL_PROVIDER), { source: 'graph' }), {
+    action: 'probe', language: 'sparql', graph: envelope,
+  });
+}
+
+/** SPARQL schema: fixed bounded discovery queries per view, no file cache. */
+async function sparqlSchema(
+  view: 'types' | 'fields' | 'search' | 'describe',
+  name: string | undefined,
+  query: string | undefined,
+  _includeDeprecated: boolean | undefined,
+  env: Record<string, string | undefined>,
+  ctx: GraphQueryCtx,
+  options: GraphToolOptions,
+): Promise<BackendCallResult> {
+  const resolved = resolveSparqlEndpoint(env, options);
+  if (!resolved.ok) {
+    const envelope = errorEnvelope(resolved.error, emptySchemaData(view, name, query), 'sparql', SPARQL_PROVIDER);
+    return textResult(wrapUntrustedText(`Graph ${resolved.error.code}: ${resolved.error.message}`, { source: 'graph' }), {
+      action: 'schema', language: 'sparql', graph: envelope,
+    });
+  }
+  const outcome = await fetchSparqlSchemaView(
+    {
+      action: 'schema', language: 'sparql', view,
+      ...(name !== undefined ? { name } : {}),
+      ...(query !== undefined ? { query } : {}),
+    },
+    sparqlAdapterOptions(resolved.endpoint, ctx, options),
+    sparqlAdapterContext(ctx, resolved.endpoint.token),
+  );
+  if (outcome.error || outcome.result === undefined) {
+    const error = outcome.error ?? toGraphError('contract_invalid_response', 'SPARQL schema view returned no result.', false, SPARQL_PROVIDER);
+    const envelope = errorEnvelope(error, emptySchemaData(view, name, query), 'sparql', SPARQL_PROVIDER);
+    return textResult(wrapUntrustedText(`Graph ${error.code}: ${error.message}`, { source: 'graph' }), {
+      action: 'schema', language: 'sparql', graph: envelope,
+    });
+  }
+  const truncated = (outcome.result.view === 'fields' || outcome.result.view === 'search')
+    && (outcome.result as { truncated?: boolean }).truncated === true;
+  const notes = truncated ? [`Schema ${view} truncated; narrow with a more specific selector.`] : [];
+  const envelope = buildGraphResult({
+    status: truncated ? 'partial' : 'ok', language: 'sparql', provider: SPARQL_PROVIDER,
+    data: { kind: 'schema', result: outcome.result }, errors: [], notes,
+  });
+  return textResult(wrapUntrustedText(renderSchemaText(outcome.result, false, 'sparql', SPARQL_PROVIDER), { source: 'graph' }), {
+    action: 'schema', language: 'sparql', graph: envelope,
   });
 }
 

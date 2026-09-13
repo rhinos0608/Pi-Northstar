@@ -151,3 +151,125 @@ test('tool text is concise untrusted evidence framed exactly once', async () => 
   assert.ok(text.includes('external evidence/data'));
   assert.equal(text.match(/EXTERNAL_EVIDENCE_/g)?.length, 2);
 });
+
+// ── SPARQL adapter dispatch (operator endpoint, SELECT/ASK only) ──
+
+const SPARQL_ENV = { GRAPH_SPARQL_ENDPOINT: 'http://127.0.0.1:8899/sparql' };
+
+function sparqlJsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/sparql-results+json' },
+  });
+}
+
+function selectBindings(vars: string[], rows: Array<Record<string, string>>): unknown {
+  return {
+    head: { vars },
+    results: {
+      bindings: rows.map((row) =>
+        Object.fromEntries(Object.entries(row).map(([key, value]) => [key, { type: 'uri', value }])),
+      ),
+    },
+  };
+}
+
+test('sparql query rejects pageSize/cursor before dispatch with zero HTTP', async () => {
+  let calls = 0;
+  const sparqlFetchFn = (async () => {
+    calls += 1;
+    return sparqlJsonResponse(selectBindings(['s'], []));
+  });
+  for (const args of [
+    { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', pageSize: 10 },
+    { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', cursor: 'opaque' },
+  ]) {
+    const result = await callGraphTool(args, { env: SPARQL_ENV, sparqlFetchFn });
+    const envelope = graphEnvelope(result);
+    assert.equal(envelope.status, 'error');
+    assert.equal((envelope.errors as Array<{ code: string }>)[0]?.code, 'invalid_input');
+    assert.equal(envelope.language, 'sparql');
+  }
+  assert.equal(calls, 0);
+});
+
+test('sparql query returns one bounded response without cursor', async () => {
+  let calls = 0;
+  const sparqlFetchFn = (async () => {
+    calls += 1;
+    return sparqlJsonResponse(selectBindings(['type'], [{ type: 'http://ex.org/Person' }]));
+  });
+  const result = await callGraphTool(
+    { action: 'query', language: 'sparql', query: 'SELECT DISTINCT ?type WHERE { ?s a ?type }' },
+    { env: SPARQL_ENV, sparqlFetchFn },
+  );
+  const envelope = graphEnvelope(result);
+  assert.equal(envelope.status, 'ok');
+  assert.equal(envelope.language, 'sparql');
+  assert.deepEqual((envelope.source as { provider: string }).provider, 'sparql');
+  assert.deepEqual(envelope.pagination, { hasMore: false });
+  assert.ok(!('nextCursor' in (envelope.pagination as object)));
+  assert.equal(calls, 1);
+});
+
+test('sparql query gates update forms and SERVICE before dispatch', async () => {
+  let calls = 0;
+  const sparqlFetchFn = (async () => {
+    calls += 1;
+    return sparqlJsonResponse(selectBindings(['s'], []));
+  });
+  const result = await callGraphTool(
+    { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o . SERVICE <http://other.example.org/sparql> { ?s ?p ?o } }' },
+    { env: SPARQL_ENV, sparqlFetchFn },
+  );
+  const envelope = graphEnvelope(result);
+  assert.equal(envelope.status, 'error');
+  assert.equal((envelope.errors as Array<{ code: string }>)[0]?.code, 'unsupported_option');
+  assert.equal(calls, 0);
+});
+
+test('sparql without endpoint fails closed without HTTP', async () => {
+  let calls = 0;
+  const sparqlFetchFn = (async () => {
+    calls += 1;
+    return sparqlJsonResponse(selectBindings(['s'], []));
+  });
+  const result = await callGraphTool(
+    { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }' },
+    { env: {}, sparqlFetchFn },
+  );
+  const envelope = graphEnvelope(result);
+  assert.equal(envelope.status, 'error');
+  assert.equal(envelope.language, 'sparql');
+  assert.equal(calls, 0);
+});
+
+test('sparql probe returns per-query cardinality', async () => {
+  const sparqlFetchFn = (async () => sparqlJsonResponse({
+    head: { vars: ['count'] },
+    results: { bindings: [{ count: { type: 'literal', value: '7' } }] },
+  }));
+  const result = await callGraphTool(
+    { action: 'probe', language: 'sparql', queries: ['SELECT * WHERE { ?s ?p ?o }'] },
+    { env: SPARQL_ENV, sparqlFetchFn },
+  );
+  const envelope = graphEnvelope(result);
+  assert.equal(envelope.status, 'ok');
+  assert.equal(envelope.language, 'sparql');
+  const items = (envelope.data as { items: Array<{ status: string; hits?: number }> }).items;
+  assert.deepEqual(items.map((item) => item.status), ['ok']);
+  assert.equal(items[0]?.hits, 7);
+});
+
+test('sparql schema types view maps discovery bindings', async () => {
+  const sparqlFetchFn = (async () => sparqlJsonResponse(selectBindings(['type'], [{ type: 'http://ex.org/Person' }])));
+  const result = await callGraphTool(
+    { action: 'schema', language: 'sparql', view: 'types' },
+    { env: SPARQL_ENV, sparqlFetchFn },
+  );
+  const envelope = graphEnvelope(result);
+  assert.equal(envelope.status, 'ok');
+  assert.equal(envelope.language, 'sparql');
+  const data = envelope.data as { result: { view: string; types: string[] } };
+  assert.deepEqual(data.result.types, ['http://ex.org/Person']);
+});

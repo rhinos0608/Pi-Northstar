@@ -2,7 +2,7 @@
 
 Pi extension that gives your agent real-world reach — web search, page reading, GitHub, social media, video, browser automation, and desktop control. Zero-config works out of the box; API keys unlock more power.
 
-Underneath the eight tools is a small set of shared services — result fusion/ranking, layered config loading, a backend abstraction with ordered fallback, and a reliability envelope around browser and desktop mutations. Each tool is a thin adapter over these services; see [Architecture](#architecture) for what's actually worth evaluating here.
+Underneath the nine tools is a small set of shared services — result fusion/ranking, layered config loading, a backend abstraction with ordered fallback, and a reliability envelope around browser and desktop mutations. Each tool is a thin adapter over these services; see [Architecture](#architecture) for what's actually worth evaluating here.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ Underneath the eight tools is a small set of shared services — result fusion/r
 | **Reliability envelope — desktop** | `src/desktop-contract.ts`, `src/desktop-policy.ts` | Accessibility trees are depth/node/screenshot-byte capped and redacted; mutations require a fresh `stateId` from the most recent observation and are never blindly retried after dispatch. |
 | **Output guarding** | `src/tool-output.ts` | Every tool result is truncated to a configurable character budget before it reaches the model, with head/tail preservation and a truncation marker. |
 
-### Thin adapters (the eight tools)
+### Thin adapters (the nine tools)
 
 Each public tool validates input, calls into the shared services above, and shapes the result for the model — `src/native-tools.ts` (`web_search`/`fetch`), `src/github.ts`, `src/reach-tools.ts` (`social`/`media`), `src/browser-tools.ts` + `src/agent-browser.ts` (`browser`), `src/desktop-tools.ts` (`desktop`). Adding a search provider or social platform is a fetch call plus a descriptor entry, not a new pipeline.
 
@@ -32,11 +32,11 @@ Each public tool validates input, calls into the shared services above, and shap
 | `media` | YouTube (official Data API for search/details/hot; keyless unofficial transcript) and Bilibili search, metadata, details, and subtitles. RSS/Atom feed reading. |
 | `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. While `/chrome authorize` grants are live, the same `browser` tool routes allowlisted actions to the user-Chromium companion over the pinned bridge (`PI_SEARCH_CHROME_EXTENSION_ID`, 127.0.0.1:17319); revoke/expiry returns to the isolated backend. |
 | `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
-| `graph` | Native graph access: `query` executes DQL with provider-faithful JSON plus shape (`rows`/`facets`/`aggregate`/`scalar`/`object`); `probe` checks cardinality of countable queries; `schema` discovers ontology types/fields (24-hour cache, stale fallback marked `partial`). DIFFBOT-gated (see below). |
+| `graph` | Native graph access: `query` executes provider-native DQL (`language: 'dql'`, `pageSize` 1..100 default 10, opaque cursor) or SPARQL SELECT/ASK (`language: 'sparql'`, one bounded response, no cursor) with provider-faithful JSON plus shape (`rows`/`facets`/`aggregate`/`scalar`/`object`); `probe` checks cardinality of countable queries; `schema` discovers ontology types/fields (DQL uses 24-hour cache, stale fallback marked `partial`). Registers when `DIFFBOT_TOKEN` or `GRAPH_SPARQL_ENDPOINT` is set (see below); `kg` stays Diffbot-only. |
 
 ### Knowledge graph tools (DIFFBOT_TOKEN-gated)
 
-`kg` and `graph` enter model context only when `DIFFBOT_TOKEN` is set — without it their schemas are absent (not erroring stubs). Auth resolution: explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only when all three omit it does runtime fall back to a login-shell lookup, which fails closed and never logs the token. See `.env.example` for spend caps (`DIFFBOT_SEARCH_SIZE`, `DIFFBOT_ENHANCE_SIZE`, `DIFFBOT_FALLBACK_BUDGET`).
+`kg` enters model context only when `DIFFBOT_TOKEN` is set; `graph` enters when `DIFFBOT_TOKEN` or `GRAPH_SPARQL_ENDPOINT` is set — without their credential their schemas are absent (not erroring stubs). Auth resolution: explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only when all three omit it does runtime fall back to a login-shell lookup, which fails closed and never logs the token. See `.env.example` for spend caps (`DIFFBOT_SEARCH_SIZE`, `DIFFBOT_ENHANCE_SIZE`, `DIFFBOT_FALLBACK_BUDGET`) and SPARQL keys.
 
 ```ts
 kg({ action: 'search', language: 'dql', query: 'type:Person name:"Ada Lovelace"' })
@@ -46,6 +46,14 @@ graph({ action: 'schema', language: 'dql', view: 'types' })
 ```
 
 Every paid call spends Diffbot credit; read [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing) before enabling.
+
+#### SPARQL graph access (operator endpoint, no Diffbot needed)
+
+Set `GRAPH_SPARQL_ENDPOINT` (http/https URL, no embedded credentials) plus optional `GRAPH_SPARQL_TOKEN` bearer auth to register `graph` with `language: 'sparql'`. Query supports SELECT/ASK only — SERVICE federation and update forms reject before dispatch. The endpoint is operator config, never model input; redirects reject, the token travels via `Authorization` header only and is redacted from errors, and status output exposes the endpoint host only, never the token. Example: `graph({action:'query',language:'sparql',query:'SELECT * WHERE { ?s ?p ?o } LIMIT 10'})`.
+
+#### Search-attempt ledger (session memory)
+
+One in-memory ledger per extension instance (max 128 entries) coalesces in-flight duplicate searches, suppresses recent near-duplicates of successful searches for 30 minutes, and blocks repeated failures for 10 minutes (non-retryable failures block immediately; retryable ones allow one retry). Cursor continuations bypass it, aborts never record a failure, and it stores only query hashes plus safe filter options — never result bodies, errors, or secrets. Suppressed/blocked calls return a short static pointer instead of re-dispatching.
 
 ### Research sources (exact-source guarantee)
 

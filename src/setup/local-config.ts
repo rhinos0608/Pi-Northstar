@@ -44,6 +44,8 @@ const mappings: Array<[string, string]> = [
   ['diffbot.nlpMaxChars', 'DIFFBOT_NLP_MAX_CHARS'],
   ['diffbot.maxProviders', 'DIFFBOT_MAX_PROVIDERS'],
   ['diffbot.fallbackBudget', 'DIFFBOT_FALLBACK_BUDGET'],
+  ['sparql.endpoint', 'GRAPH_SPARQL_ENDPOINT'],
+  ['sparql.token', 'GRAPH_SPARQL_TOKEN'],
   ['embeddingSidecar.provider', 'EMBEDDING_SIDECAR_PROVIDER'],
   ['embeddingSidecar.baseUrl', 'EMBEDDING_SIDECAR_BASE_URL'],
   ['embeddingSidecar.apiToken', 'EMBEDDING_SIDECAR_API_TOKEN'],
@@ -243,4 +245,53 @@ function isUsableScalar(value: unknown): value is string | number | boolean {
     return trimmed.length > 0 && trimmed !== 'null' && trimmed !== 'undefined';
   }
   return typeof value === 'number' || typeof value === 'boolean';
+}
+
+/** Operator SPARQL endpoint wiring (env-only, never model input). */
+export interface SparqlEndpointConfig {
+  configured: boolean;
+  /** Trimmed endpoint URL when valid. */
+  endpoint?: string;
+  /** Host-only (hostname[:port]) for status display; never credentials/path/query. */
+  endpointHost?: string;
+  /** Opaque bearer token; never logged or status-exposed. */
+  token?: string;
+  error?: { code: 'unsupported_option'; message: string };
+}
+
+function sparqlTokenOf(env: Record<string, string | undefined>): string | undefined {
+  const tokenRaw = env.GRAPH_SPARQL_TOKEN?.trim();
+  return tokenRaw ? tokenRaw : undefined;
+}
+
+function sparqlError(token: string | undefined, message: string): SparqlEndpointConfig {
+  return { configured: false, ...(token ? { token } : {}), error: { code: 'unsupported_option', message } };
+}
+
+function parseSparqlUrl(raw: string): { url: URL } | { message: string } {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { message: 'Invalid GRAPH_SPARQL_ENDPOINT: must be an http(s) URL without credentials' };
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { message: 'Invalid GRAPH_SPARQL_ENDPOINT: scheme must be http or https' };
+  }
+  if (url.username || url.password) {
+    return { message: 'Invalid GRAPH_SPARQL_ENDPOINT: URL must not contain credentials' };
+  }
+  return { url };
+}
+
+/** Validate GRAPH_SPARQL_ENDPOINT (http/https, no credentials, trim). Blank =
+ *  unconfigured (no error). Invalid = unsupported_option config error without
+ *  echoing the endpoint value or token. */
+export function resolveSparqlConfig(env: Record<string, string | undefined>): SparqlEndpointConfig {
+  const raw = env.GRAPH_SPARQL_ENDPOINT?.trim();
+  const token = sparqlTokenOf(env);
+  if (!raw) return { configured: false, ...(token ? { token } : {}) };
+  const parsed = parseSparqlUrl(raw);
+  if ('message' in parsed) return sparqlError(token, parsed.message);
+  return { configured: true, endpoint: raw, endpointHost: parsed.url.host, ...(token ? { token } : {}) };
 }

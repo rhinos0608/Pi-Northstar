@@ -108,6 +108,20 @@ export const MAX_WEB_QUERY_LENGTH = 300;
 export const MAX_WEB_URL_LENGTH = 2048;
 export const WEB_SEARCH_MAX_BATCH_QUERIES = 8;
 export const WEB_SEARCH_MAX_DOMAINS = 32;
+
+/** Canonical model-facing web_search category names (single source of truth). */
+export const SEARCH_CATEGORY_NAMES = [
+  'company',
+  'research paper',
+  'news',
+  'pdf',
+  'github',
+  'tweet',
+  'personal site',
+  'people',
+  'financial report',
+  'research',
+] as const;
 const WEB_SEARCH_RECENCIES: readonly string[] = ['day', 'week', 'month', 'year'];
 
 export interface WebRequestInput {

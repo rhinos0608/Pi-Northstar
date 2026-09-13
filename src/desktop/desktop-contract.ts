@@ -5,6 +5,23 @@ export const UPSTREAM_TOOLS = ['health_report','list_apps','list_windows','get_w
 export type UpstreamTool = typeof UPSTREAM_TOOLS[number];
 export type DesktopErrorCode = 'DESKTOP_DISABLED'|'ACTION_DENIED'|'CONFIRMATION_REQUIRED'|'STALE_OBSERVATION'|'TARGET_MISMATCH'|'OUTCOME_UNKNOWN'|'INVALID_REQUEST'|'DRIVER_UNAVAILABLE';
 export interface DesktopRequest { action: DesktopAction; pid?: number; windowId?: string; stateId?: string; includeScreenshot?: boolean; predicate?: { text?: string; role?: string }; text?: string; key?: string; x?: number; y?: number; deltaX?: number; deltaY?: number; timeoutMs?: number; }
+export type DesktopField = 'pid'|'windowId'|'stateId'|'includeScreenshot'|'predicate'|'text'|'key'|'x'|'y'|'deltaX'|'deltaY'|'timeoutMs';
+export interface DesktopActionSpec { required: readonly DesktopField[]; allowed: readonly DesktopField[]; }
+/** Canonical action-to-fields contract. Policy enforces field parity from
+ *  `allowed`; `required` documents full runtime needs (mutation pid/windowId
+ *  stay enforced post-confirmation in DesktopService). Later schema builders
+ *  should generate strict per-action schemas from this table. */
+export const DESKTOP_ACTION_CONTRACT: Record<DesktopAction, DesktopActionSpec> = {
+  status: { required: [], allowed: ['timeoutMs'] },
+  list_apps: { required: [], allowed: ['timeoutMs'] },
+  list_windows: { required: [], allowed: ['timeoutMs'] },
+  observe_window: { required: ['pid','windowId'], allowed: ['pid','windowId','includeScreenshot','timeoutMs'] },
+  wait: { required: ['pid','windowId'], allowed: ['pid','windowId','predicate','timeoutMs'] },
+  click: { required: ['pid','windowId','stateId'], allowed: ['pid','windowId','stateId','x','y','timeoutMs'] },
+  type_text: { required: ['pid','windowId','stateId','text'], allowed: ['pid','windowId','stateId','text','timeoutMs'] },
+  press_key: { required: ['pid','windowId','stateId','key'], allowed: ['pid','windowId','stateId','key','timeoutMs'] },
+  scroll: { required: ['pid','windowId','stateId'], allowed: ['pid','windowId','stateId','x','y','deltaX','deltaY','timeoutMs'] },
+};
 export interface Observation { stateId:string; pid:number; windowId:string; generation:number; issuedAt:number; expiresAt:number; fingerprint:string; data: unknown; }
 export const OBSERVATION_TTL_MS = 30_000;
 export const COORDINATE_MUTATION_FRESHNESS_MS = 15_000;
@@ -24,7 +41,8 @@ export function isMutation(action: DesktopAction): action is MutationAction { re
 export function validateDesktopRequest(raw: Record<string, unknown>): DesktopRequest {
   const allowed = new Set(['action','pid','windowId','stateId','includeScreenshot','predicate','text','key','x','y','deltaX','deltaY','timeoutMs']);
   for (const key of Object.keys(raw)) if (!allowed.has(key)) throw new Error(`INVALID_REQUEST: unknown field ${key}`);
-  const action = raw.action ?? 'status';
+  if (raw.action === undefined) throw new Error('INVALID_REQUEST: action required');
+  const action = raw.action;
   if (typeof action !== 'string' || !(DESKTOP_ACTIONS as readonly string[]).includes(action)) throw new Error(`INVALID_REQUEST: unsupported action ${String(action)}`);
   const req: DesktopRequest = { action: action as DesktopAction };
   if (raw.pid !== undefined && (!Number.isInteger(raw.pid)||Number(raw.pid)<=0)) throw new Error('INVALID_REQUEST: pid must be positive integer');

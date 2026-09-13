@@ -12,7 +12,7 @@ function registryActionEnum(family: string): string[] {
 }
 
 function requestBranches(parameters: Record<string, any>): Record<string, any>[] {
-  return parameters.properties?.request?.anyOf ?? parameters.properties?.request?.oneOf ?? [];
+  return parameters.properties?.request?.anyOf ?? parameters.properties?.request?.oneOf ?? parameters.anyOf ?? parameters.oneOf ?? [];
 }
 
 function branchProperties(parameters: Record<string, any>): Record<string, any> {
@@ -287,7 +287,48 @@ test('buildFetchRoute passes maxChars to semantic_crawl on crawl paths', () => {
   assert.equal(defaultRoute.args.maxChars, undefined);
 });
 
-test('web_search schema leaves limit cap to per-category runtime validation', async () => {
+type WebSearchBranch = { properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string };
+type WebSearchSchema = { anyOf?: WebSearchBranch[]; description?: string };
+
+async function captureWebSearchUnion(): Promise<{ schema: WebSearchSchema; branches: WebSearchBranch[] }> {
+  const defs = await captureAllTools();
+  const schema = defs.web_search!.parameters as WebSearchSchema;
+  return { schema, branches: schema.anyOf ?? [] };
+}
+
+function findWebSearchBranch(branches: WebSearchBranch[], kind: 'single' | 'batch' | 'agent'): WebSearchBranch | undefined {
+  if (kind === 'batch') return branches.find((branch) => branch.properties?.queries);
+  if (kind === 'agent') return branches.find((branch) => branch.properties?.mode);
+  return branches.find((branch) => branch.properties?.query && !branch.properties?.queries && !branch.properties?.mode);
+}
+
+test('web_search schema union branches', async () => {
+  const { schema, branches } = await captureWebSearchUnion();
+  // Strict union: single/batch plain (limit max 20) + single/batch research
+  // (category research, limit max 30) + agent {query, mode:"agent"}.
+  assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
+  assert.ok(/Exactly one of query/i.test(schema.description ?? ''), 'union must state the query/queries XOR');
+  const branchCases = [
+    { kind: 'single' as const, missingMessage: 'single branch must be present' },
+    { kind: 'batch' as const, missingMessage: 'batch branch must be present' },
+    { kind: 'agent' as const, missingMessage: 'agent branch must be present' },
+  ];
+  for (const { kind, missingMessage } of branchCases) {
+    assert.ok(findWebSearchBranch(branches, kind), missingMessage);
+  }
+  const single = findWebSearchBranch(branches, 'single')!;
+  const agent = findWebSearchBranch(branches, 'agent')!;
+  assert.ok(agent.properties.knowledge === undefined, 'agent branch must carry no knowledge');
+  assert.ok(single.properties.knowledge, 'single branch must carry knowledge');
+  const singles = branches.filter((branch) => branch.properties?.query && !branch.properties?.queries && !branch.properties?.mode);
+  assert.equal(singles.length, 2, 'single must branch into plain and research caps');
+  const researchSingle = singles.find((branch) => (branch.properties.category as { const?: string } | undefined)?.const === 'research');
+  assert.ok(researchSingle, 'research single branch must pin category to research');
+  assert.equal(researchSingle!.properties.limit?.maximum, 30);
+  assert.equal(single.properties.limit?.maximum, 20);
+});
+
+test('web_search schema research-visible limit cap', async () => {
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
   let captured: { name: string; parameters: unknown } | undefined;
@@ -306,13 +347,34 @@ test('web_search schema leaves limit cap to per-category runtime validation', as
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
   }
   assert.ok(captured, 'web_search tool must be registered');
-  const schema = captured!.parameters as { type?: string; properties: Record<string, { maximum?: number; minimum?: number }> };
-  // No static maximum: research 21-30 is reachable; per-category runtime
-  // caps (20 web, 30 research) reject via validateWebRequest.
-  assert.equal(schema.type, 'object', 'web_search schema must be a top-level object (Anthropic-compatible)');
-  assert.equal(schema.properties.limit?.maximum, undefined, 'web_search limit schema must not impose a static 20 cap');
-  assert.equal(schema.properties.limit?.minimum, 1);
+  const schema = captured!.parameters as {
+    anyOf?: Array<{ properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string }>;
+    description?: string;
+  };
+  const branches = schema.anyOf ?? [];
+  assert.equal(branches.length, 5);
+  for (const branch of branches) {
+    // Per-category caps are schema-visible: 20 on plain/agent branches,
+    // 30 on research-pinned branches, so out-of-range rejects at validation.
+    const isResearch = (branch.properties.category as { const?: string } | undefined)?.const === 'research';
+    assert.equal(branch.properties.limit?.maximum, isResearch ? 30 : 20, 'web_search limit cap must match the branch category');
+    assert.equal(branch.properties.limit?.minimum, 1);
+  }
 });
+
+test('web_search schema knowledge placement', async () => {
+  const { branches } = await captureWebSearchUnion();
+  const knowledgeCases = [
+    { kind: 'agent' as const, present: false, message: 'agent branch must carry no knowledge' },
+    { kind: 'single' as const, present: true, message: 'single branch must carry knowledge' },
+  ];
+  for (const { kind, present, message } of knowledgeCases) {
+    const branch = findWebSearchBranch(branches, kind);
+    assert.ok(branch, `${kind} branch must be present`);
+    assert.equal(branch!.properties.knowledge !== undefined, present, message);
+  }
+});
+
 
 test('buildFetchRoute crawl_url without followLinks sets maxDepth 1', () => {
   const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'test' });
@@ -400,7 +462,7 @@ test('browser tool registration: no maxChars param, browse action rejected', asy
   assert.ok(resultText.includes('Unsupported') || resultText.includes('error'), 'browse action should be rejected');
 });
 
-test('social and media tool schemas remain unchanged', async () => {
+test('social strict schema stays canonical-only', async () => {
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
 
@@ -422,29 +484,80 @@ test('social and media tool schemas remain unchanged', async () => {
   }
 
   assert.ok(defs.social, 'social tool must be registered');
-  assert.ok(defs.media, 'media tool must be registered');
 
+  // Strict bare-union social schema (no request wrapper): one branch per
+  // advertised platform/action with explicit selector alternatives.
   const socialBranches = requestBranches(defs.social.parameters);
+  assert.ok(socialBranches.length > 0, 'social schema must be a top-level branch union');
   const socialProps = branchProperties(defs.social.parameters);
   for (const key of ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']) assert.ok(key in socialProps, `social schema must expose ${key}`);
-  const socialPlatforms = socialBranches.map((branch) => branch.properties?.platform?.const).filter(Boolean);
+  const socialPlatforms = [...new Set(socialBranches.map((branch) => branch.properties?.platform?.const).filter(Boolean))];
   assert.deepEqual([...socialPlatforms].sort(), [...registrySocialPlatforms()].sort());
-  const socialActions = socialBranches.flatMap((branch) => branch.properties?.action?.enum ?? []);
+  const socialActions = [...new Set(socialBranches.map((branch) => branch.properties?.action?.const).filter(Boolean))];
   assert.deepEqual([...new Set(socialActions)].sort(), registryActionEnum('social'));
   // Canonical-only contract: legacy aliases are never advertised.
   for (const legacy of ['tweet', 'topic', 'note', 'hot', 'popular', 'post', 'explore', 'user']) {
     assert.equal(socialActions.includes(legacy), false, `social action enum must not advertise legacy alias ${legacy}`);
   }
+});
+
+test('social schema rejects mutation verbs and legacy selectors', async () => {
+  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  process.env.PI_SEARCH_BOOTSTRAP = 'off';
+
+  const defs: Record<string, { parameters: Record<string, unknown> }> = {};
+  const pi = {
+    on: () => {},
+    registerTool: (def: { name: string; parameters: unknown }) => {
+      defs[def.name as string] = { parameters: def.parameters as Record<string, unknown> };
+    },
+    registerCommand: () => {},
+  };
+  try {
+    const mod = await import('../src/index.js');
+    const extFn = mod.default as (pi: unknown) => void;
+    extFn(pi);
+  } finally {
+    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+  }
+
+  assert.ok(defs.social, 'social tool must be registered');
+  const socialBranches = requestBranches(defs.social.parameters);
+  const socialActions = [...new Set(socialBranches.map((branch) => branch.properties?.action?.const).filter(Boolean))];
   // Mutation verbs never appear in the social action schema.
   for (const mutation of ['like', 'follow', 'retweet']) {
     assert.equal(socialActions.includes(mutation), false, `social action enum must reject ${mutation}`);
   }
   // Canonical-only selectors: legacy spellings and generic bags removed.
-  const socialPropBag = socialProps;
+  const socialPropBag = branchProperties(defs.social.parameters);
   for (const legacySelector of ['id', 'username', 'subreddit', 'node', 'filter']) {
     assert.equal(legacySelector in socialPropBag, false, `social schema must not advertise legacy selector ${legacySelector}`);
   }
+});
 
+test('media schema unchanged', async () => {
+  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  process.env.PI_SEARCH_BOOTSTRAP = 'off';
+
+  const defs: Record<string, { parameters: Record<string, unknown> }> = {};
+  const pi = {
+    on: () => {},
+    registerTool: (def: { name: string; parameters: unknown }) => {
+      defs[def.name as string] = { parameters: def.parameters as Record<string, unknown> };
+    },
+    registerCommand: () => {},
+  };
+  try {
+    const mod = await import('../src/index.js');
+    const extFn = mod.default as (pi: unknown) => void;
+    extFn(pi);
+  } finally {
+    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+  }
+
+  assert.ok(defs.media, 'media tool must be registered');
   const mediaProps = Object.keys((defs.media.parameters.properties ?? {})).sort();
   assert.deepEqual(mediaProps, ['action', 'id', 'limit', 'platform', 'query', 'url']);
   const mediaPlatform = (defs.media.parameters.properties as Record<string, { enum?: string[] }>).platform;
@@ -455,6 +568,7 @@ test('social and media tool schemas remain unchanged', async () => {
     assert.equal(mediaAction?.enum?.includes(legacy), false, `media action enum must not advertise legacy alias ${legacy}`);
   }
 });
+
 
 type CapturedHandlers = Record<string, (event: Record<string, unknown>) => Record<string, unknown> | undefined>;
 
@@ -609,10 +723,14 @@ test('browser schema job description states loopback restriction', async () => {
 
 test('browser schema semanticAction exposes locator, query, verb subfields', async () => {
   const tool = await captureBrowserTool();
-  const sa = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'semanticAction')!.properties.semanticAction as { properties: Record<string, unknown> };
-  assert.ok(sa.properties.locator, 'semanticAction.locator must be present');
-  assert.ok(sa.properties.query, 'semanticAction.query must be present');
-  assert.ok(sa.properties.verb, 'semanticAction.verb must be present');
+  const sa = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'semanticAction')!.properties.semanticAction as { anyOf?: Array<{ properties: Record<string, unknown> }> };
+  const saBranches = sa.anyOf ?? [];
+  assert.ok(saBranches.length > 0, 'semanticAction must be a closed locator/verb union');
+  for (const branch of saBranches) {
+    assert.ok(branch.properties.locator, 'semanticAction.locator must be present');
+    assert.ok(branch.properties.query, 'semanticAction.query must be present');
+    assert.ok(branch.properties.verb, 'semanticAction.verb must be present');
+  }
 });
 
 test('browser schema batch commands exposes args subfield', async () => {
@@ -725,14 +843,29 @@ test('kg description requires user authorization before sensitive text submissio
   assert.ok(/sensitive/i.test(description), 'kg description must call out sensitive text');
 });
 
-test('web_search exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
+test('web_search strict union exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
   const defs = await captureAllTools();
-  const webSchema = defs.web_search!.parameters as { type?: string; properties?: Record<string, { properties?: Record<string, unknown> }> };
-  assert.equal(webSchema.type, 'object', 'web_search schema must be a top-level object (Anthropic-compatible)');
-  for (const key of ['query', 'queries', 'mode', 'knowledge', 'cursor', 'source']) {
-    assert.ok(key in (webSchema.properties ?? {}), `web_search schema must expose field ${key}`);
+  const webSchema = defs.web_search!.parameters as {
+    anyOf?: Array<{ properties?: Record<string, { properties?: Record<string, unknown> }> }>;
+    description?: string;
+  };
+  const branches = webSchema.anyOf ?? [];
+  assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
+  const byBranch = (predicate: (props: Record<string, unknown>) => boolean): Record<string, { properties?: Record<string, unknown> }> => {
+    const found = branches.find((branch) => predicate((branch.properties ?? {}) as Record<string, unknown>));
+    assert.ok(found, 'expected web_search branch missing');
+    return (found!.properties ?? {}) as Record<string, { properties?: Record<string, unknown> }>;
+  };
+  const singleProps = byBranch((props) => 'query' in props && !('queries' in props) && !('mode' in props));
+  const batchProps = byBranch((props) => 'queries' in props);
+  const agentProps = byBranch((props) => 'mode' in props);
+  for (const key of ['query', 'knowledge', 'source']) {
+    assert.ok(key in singleProps, `web_search single branch must expose field ${key}`);
   }
-  assert.deepEqual(Object.keys(webSchema.properties!.knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
+  assert.ok(!('cursor' in singleProps), 'web_search single branch must not advertise cursor (validateWebRequest rejects it)');
+  assert.ok('queries' in batchProps, 'web_search batch branch must expose queries');
+  assert.ok(!('knowledge' in agentProps), 'web_search agent branch must not expose knowledge');
+  assert.deepEqual(Object.keys(singleProps.knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
   assert.equal((defs.fetch!.parameters as { type?: string }).type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
 });
 
@@ -832,7 +965,7 @@ test('guidance: kg description carries DQL examples, cursor and privacy notes', 
   assert.ok(/email\/phone/i.test(description), 'kg description must note email/phone transmission');
 });
 
-test('guidance: web_search marks research-only params and honors yearFrom on plain search', async () => {
+test('guidance: web_search description and promptSnippet document branches', async () => {
   const defs = await captureAllTools();
   const description = defs.web_search?.description ?? '';
   assert.ok(/No provider selection input/i.test(description), 'web_search description must forbid provider selection input');
@@ -842,18 +975,27 @@ test('guidance: web_search marks research-only params and honors yearFrom on pla
   assert.ok(/batch \{queries\[1\.\.8\]\}/i.test(snippet), 'web_search promptSnippet must document the batch branch');
   assert.ok(/agent \{query, mode/i.test(snippet), 'web_search promptSnippet must document the agent branch');
   assert.ok(/cursor needs category "research"/i.test(snippet), 'web_search promptSnippet must keep cursor field constraints');
-  const params = defs.web_search!.parameters as { type?: string; description?: string; properties?: Record<string, { description?: string }> };
-  assert.equal(params.type, 'object', 'web_search schema must be a top-level object (Anthropic-compatible)');
-  assert.ok(/Exactly one of query or queries/i.test(params.description ?? ''), 'web_search schema must state the query/queries XOR');
-  const props = params.properties ?? {};
-  for (const key of ['query', 'queries', 'mode']) {
-    assert.ok(key in props, `web_search schema must expose flat field ${key}`);
-  }
-  assert.ok(/research-only/i.test(props.source?.description ?? ''), 'source param must say research-only');
-  assert.ok(/research-only/i.test(props.cursor?.description ?? ''), 'cursor param must say research-only');
-  assert.ok(/intersects with recency/i.test(props.yearFrom?.description ?? ''), 'yearFrom param must document the recency intersect');
-  assert.ok(!/ignored on plain/i.test(props.yearFrom?.description ?? ''), 'yearFrom must no longer claim plain-search ignore');
 });
+
+test('guidance: web_search single-branch fields and research-only docs', async () => {
+  const { schema, branches } = await captureWebSearchUnion();
+  assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
+  assert.ok(/Exactly one of query/i.test(schema.description ?? ''), 'web_search schema must state the query/queries XOR');
+  const singleBranch = findWebSearchBranch(branches, 'single');
+  const props = singleBranch?.properties ?? {};
+  for (const key of ['query', 'limit', 'category', 'source', 'yearFrom']) {
+    assert.ok(key in props, `web_search single branch must expose flat field ${key}`);
+  }
+  assert.ok(!('cursor' in props), 'web_search single branch must not advertise cursor');
+  const docCases = [
+    { field: 'source', pattern: /research-only/i, message: 'source param must say research-only' },
+    { field: 'yearFrom', pattern: /1900, current UTC year/i, message: 'yearFrom param must document the supported range' },
+  ];
+  for (const { field, pattern, message } of docCases) {
+    assert.ok(pattern.test(props[field]?.description ?? ''), message);
+  }
+});
+
 
 test('guidance: fetch states discriminated branches', async () => {
   const defs = await captureAllTools();
@@ -908,19 +1050,50 @@ test('buildSearchRoute default mode keeps 120s timeout and no mode arg', () => {
 
 // ── graph tool registration (native DQL, provider-faithful, no hidden composition) ──
 
-test('graph tool registered with action-discriminated schema and no excluded surfaces', async () => {
+test('graph tool registered with strict action/language branches', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.graph, 'graph tool must be registered');
   const branches = requestBranches(defs.graph.parameters);
+  assert.ok(branches.length > 0, 'graph schema must be a top-level branch union');
   const props = branchProperties(defs.graph.parameters);
-  assert.deepEqual(branches.map((b) => b.properties?.action?.const).sort(), ['probe', 'query', 'schema']);
+  assert.deepEqual([...new Set(branches.map((b) => b.properties?.action?.const))].sort(), ['probe', 'query', 'schema']);
+  assert.deepEqual([...new Set(branches.map((b) => b.properties?.language?.const))].sort(), ['dql', 'sparql']);
   for (const key of ['action', 'language', 'query', 'queries', 'pageSize', 'cursor', 'view', 'name', 'includeDeprecated']) {
     assert.ok(key in props, `graph schema must expose field ${key}`);
   }
+});
+
+test('graph schema exposes no excluded surfaces', async () => {
+  const defs = await captureAllTools();
+  assert.ok(defs.graph, 'graph tool must be registered');
+  const props = branchProperties(defs.graph.parameters);
   for (const forbidden of ['provider', 'providers', 'workers', 'refresh', 'format', 'export', 'crawl', 'threshold', 'filter']) {
     assert.ok(!(forbidden in props), `graph schema must not expose ${forbidden}`);
   }
 });
+
+test('graph sparql query carries no pageSize/cursor', async () => {
+  const defs = await captureAllTools();
+  assert.ok(defs.graph, 'graph tool must be registered');
+  const branches = requestBranches(defs.graph.parameters);
+  // Language narrowing: SPARQL query carries no pageSize/cursor.
+  const sparqlQuery = branches.find((b) => b.properties?.action?.const === 'query' && b.properties?.language?.const === 'sparql');
+  assert.ok(sparqlQuery, 'sparql query branch must be present');
+  assert.ok(!('pageSize' in (sparqlQuery.properties ?? {})), 'sparql query must not carry pageSize');
+  assert.ok(!('cursor' in (sparqlQuery.properties ?? {})), 'sparql query must not carry cursor');
+});
+
+test('graph dql query keeps pageSize/cursor', async () => {
+  const defs = await captureAllTools();
+  assert.ok(defs.graph, 'graph tool must be registered');
+  const branches = requestBranches(defs.graph.parameters);
+  // Language narrowing: DQL keeps both.
+  const dqlQuery = branches.find((b) => b.properties?.action?.const === 'query' && b.properties?.language?.const === 'dql');
+  assert.ok(dqlQuery, 'dql query branch must be present');
+  assert.ok('pageSize' in (dqlQuery.properties ?? {}), 'dql query must keep pageSize');
+  assert.ok('cursor' in (dqlQuery.properties ?? {}), 'dql query must keep cursor');
+});
+
 
 test('graph description states native language, provenance, probe countability, and no hidden composition', async () => {
   const defs = await captureAllTools();
@@ -931,12 +1104,13 @@ test('graph description states native language, provenance, probe countability, 
   assert.ok(/schema/i.test(description), 'graph description must mention schema');
 });
 
-const EXPECTED_WEB_SEARCH_SCHEMA_KEYS = ['category', 'cursor', 'domains', 'includeContent', 'knowledge', 'limit', 'mode', 'queries', 'query', 'recency', 'source', 'yearFrom'];
+const EXPECTED_WEB_SEARCH_BRANCHES = 5;
 
-test('graph registration leaves kg, web_search, and fetch schemas unchanged', async () => {
+test('graph registration adopts strict schemas; kg and fetch wrappers unchanged', async () => {
   const defs = await captureAllTools();
   assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), ['request']);
-  assert.deepEqual(Object.keys((defs.web_search!.parameters as { properties?: object }).properties ?? {}).sort(), EXPECTED_WEB_SEARCH_SCHEMA_KEYS);
+  assert.equal((defs.graph!.parameters as { anyOf?: unknown[] }).anyOf?.length, 12, 'graph schema must be the 12-branch strict union');
+  assert.equal((defs.web_search!.parameters as { anyOf?: unknown[] }).anyOf?.length, EXPECTED_WEB_SEARCH_BRANCHES);
   assert.deepEqual(Object.keys((defs.fetch!.parameters as { properties?: object }).properties ?? {}).sort(), ['request']);
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');

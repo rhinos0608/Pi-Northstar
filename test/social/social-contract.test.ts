@@ -703,7 +703,7 @@ test('social-entity-contract owns entity types, validators, and rendering', () =
   assert.equal(socialEntityContract.parseSocialDate, parseSocialDate);
 });
 
-test('facade re-exports the full 63-export surface without drift', () => {
+test('facade re-exports the full 64-export surface without drift', () => {
   const coreOwned: readonly (keyof typeof facade)[] = [
     'SOCIAL_PLATFORMS', 'SOCIAL_ACTIONS', 'SOCIAL_ENTITY_KINDS', 'SOCIAL_CANONICAL_ACTIONS',
     'SocialError', 'isSocialPlatform', 'isSocialAction', 'canonicalActionsFor',
@@ -727,9 +727,9 @@ test('facade re-exports the full 63-export surface without drift', () => {
       `facade.${name} drifts from social-entity-contract`,
     );
   }
-  // 27 runtime values: 7 consts + 19 functions + SocialError.
+  // 28 runtime values: 8 consts + 19 functions + SocialError.
   const runtimeNames = [
-    'DEFAULT_SOCIAL_LIMIT', 'SOCIAL_ACTIONS', 'SOCIAL_CANONICAL_ACTIONS', 'SOCIAL_ENTITY_KINDS',
+    'DEFAULT_SOCIAL_LIMIT', 'MAX_SELECTOR_LENGTH', 'SOCIAL_ACTIONS', 'SOCIAL_CANONICAL_ACTIONS', 'SOCIAL_ENTITY_KINDS',
     'SOCIAL_MAX_CURSOR_LENGTH', 'SOCIAL_MAX_LIMIT', 'SOCIAL_PLATFORMS',
     'SocialError', 'backendSupportsAction', 'canonicalActionsFor', 'decodeSocialCursor',
     'encodeSocialCursor', 'extractSelectorsFromUrl', 'isAdvertisedAction', 'isSocialAction',

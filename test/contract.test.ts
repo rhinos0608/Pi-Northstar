@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { MAX_PUBLIC_TOOLS, assertPublicToolBudget } from '../src/capabilities.js';
 
 const ALWAYS_AVAILABLE_TOOL_NAMES = [
   'web_search',
@@ -122,4 +123,39 @@ test('extension registers browser and desktop when configured', async () => {
   });
   assertToolContract(tools, CONFIGURED_TOOL_NAMES);
   assert.deepEqual([...commands].sort(), [...EXPECTED_COMMAND_NAMES].sort());
+});
+
+test('public surface stays within the nine-tool budget', async () => {
+  assert.equal(MAX_PUBLIC_TOOLS, 9, 'surface budget is nine tools');
+  assert.equal(CONFIGURED_TOOL_NAMES.length, 9, 'full configured surface is exactly nine tools');
+  assertPublicToolBudget(CONFIGURED_TOOL_NAMES);
+  assert.throws(() => assertPublicToolBudget([...CONFIGURED_TOOL_NAMES, 'tenth']), /budget exceeded/);
+  const { tools } = await captureRegistration({
+    PI_SEARCH_DESKTOP_AUTOMATION: '1',
+    DIFFBOT_TOKEN: 'test-token-for-contract-tests',
+  });
+  assert.ok(tools.length <= MAX_PUBLIC_TOOLS, `registered ${tools.length} tools, max ${MAX_PUBLIC_TOOLS}`);
+  assertPublicToolBudget(tools);
+});
+
+test('graph/kg gating is independent: SPARQL-only env registers graph without kg', async (t) => {
+  const { tools } = await captureRegistration({
+    DIFFBOT_TOKEN: '',
+    GRAPH_SPARQL_ENDPOINT: 'http://127.0.0.1:9/sparql',
+    GRAPH_SPARQL_TOKEN: '',
+  });
+  assert.ok(tools.includes('graph'), 'graph must register with only GRAPH_SPARQL_ENDPOINT set');
+  // Login-shell fallback can supply a real DIFFBOT_TOKEN on dev machines; only
+  // assert kg absence when the merged env truly lacks one.
+  const { loadSearchMcpEnvironment } = await import('../src/setup/local-config.js');
+  const { diffbotConfigured } = await import('../src/diffbot/diffbot-search.js');
+  const merged = loadSearchMcpEnvironment(
+    { ...process.env, DIFFBOT_TOKEN: '', GRAPH_SPARQL_ENDPOINT: 'http://127.0.0.1:9/sparql' },
+    { allowLoginShellFallback: true },
+  );
+  if (diffbotConfigured(merged)) {
+    t.skip('login-shell fallback supplied a real DIFFBOT_TOKEN on this machine');
+    return;
+  }
+  assert.ok(!tools.includes('kg'), 'kg stays Diffbot-only and must be hidden without a token');
 });

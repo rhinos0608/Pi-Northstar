@@ -282,6 +282,13 @@ export interface SemanticActionRequest {
 
 export const VALID_LOCATORS: readonly SemanticLocator[] = ['role', 'text', 'label', 'placeholder', 'alt', 'title', 'testid', 'first', 'last', 'nth'];
 export const VALID_VERBS: readonly SemanticVerb[] = ['click', 'fill', 'check', 'hover', 'text'];
+/** Canonical semantic vocabulary for later strict schema generation. Aliases of VALID_*; keep in sync. */
+export const SEMANTIC_LOCATORS: readonly SemanticLocator[] = VALID_LOCATORS;
+export const SEMANTIC_VERBS: readonly SemanticVerb[] = VALID_VERBS;
+/** Closed field set for a semanticAction object. Unknown fields reject. */
+export const SEMANTIC_ACTION_ALLOWED_FIELDS: readonly string[] = [
+  'locator', 'query', 'verb', 'name', 'index', 'value', 'exact',
+] as const;
 const VALUE_VERBS = new Set<SemanticVerb>(['fill']);
 
 /** Validate a raw semantic action request, throwing on invalid shape. */
@@ -297,20 +304,40 @@ export function validateSemanticActionRequest(raw: Record<string, unknown>): Sem
   if (!verb || !(VALID_VERBS as readonly string[]).includes(verb)) {
     throw new Error(`verb is required and must be one of: ${VALID_VERBS.join(', ')}`);
   }
+  for (const key of Object.keys(raw)) {
+    if (!(SEMANTIC_ACTION_ALLOWED_FIELDS as readonly string[]).includes(key)) {
+      throw new Error(`unknown field: ${key}`);
+    }
+  }
   if (locator === 'nth') {
     if (typeof raw.index !== 'number' || !Number.isFinite(raw.index)) {
       throw new Error('index is required when locator is nth');
     }
+    if (!Number.isInteger(raw.index) || (raw.index as number) < 0) {
+      throw new Error('index must be a nonnegative integer when locator is nth');
+    }
+  } else if (raw.index !== undefined) {
+    throw new Error('index is only allowed when locator is nth');
   }
-  if (VALUE_VERBS.has(verb as SemanticVerb) && (raw.value === undefined || typeof raw.value !== 'string')) {
-    throw new Error(`value is required when verb is ${verb}`);
+  if (VALUE_VERBS.has(verb as SemanticVerb)) {
+    if (raw.value === undefined || typeof raw.value !== 'string') {
+      throw new Error(`value is required when verb is ${verb}`);
+    }
+  } else if (raw.value !== undefined) {
+    throw new Error('value is only allowed when verb is fill');
+  }
+  if (raw.name !== undefined) {
+    if (typeof raw.name !== 'string') throw new Error('name must be a non-empty string');
+    if (raw.name.trim().length === 0) throw new Error('name must be a non-empty string');
+    if (locator !== 'role') throw new Error('name is only allowed when locator is role');
+    if (raw.name.trim().length > MAX_TEXT_LENGTH) throw new Error(`name too long (max ${MAX_TEXT_LENGTH} chars)`);
+  }
+  if (raw.exact !== undefined && typeof raw.exact !== 'boolean') {
+    throw new Error('exact must be a boolean');
   }
 
   const req: SemanticActionRequest = { locator: locator as SemanticLocator, query, verb: verb as SemanticVerb };
-  if (typeof raw.name === 'string' && raw.name) {
-    if (raw.name.length > MAX_TEXT_LENGTH) throw new Error(`name too long (max ${MAX_TEXT_LENGTH} chars)`);
-    req.name = raw.name;
-  }
+  if (typeof raw.name === 'string' && raw.name.trim()) req.name = raw.name.trim();
   if (typeof raw.index === 'number') req.index = raw.index;
   if (typeof raw.value === 'string') {
     if (raw.value.length > MAX_TEXT_LENGTH) throw new Error(`value too long (max ${MAX_TEXT_LENGTH} chars)`);

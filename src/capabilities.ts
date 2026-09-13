@@ -16,6 +16,19 @@ export type ReachFamily = 'social' | 'media' | 'web' | 'dev' | 'research' | 'bro
 
 export type PublicToolName = 'web_search' | 'github' | 'social' | 'media' | 'browser' | 'kg' | 'graph';
 
+/** Public surface budget: at most nine model-facing tools. Future domains
+ *  require profiles or retrieval/describe redesign, not silent growth. */
+export const MAX_PUBLIC_TOOLS = 9 as const;
+
+/** Fail-closed budget gate: throws when registration exceeds MAX_PUBLIC_TOOLS. */
+export function assertPublicToolBudget(toolNames: readonly string[]): void {
+  if (toolNames.length > MAX_PUBLIC_TOOLS) {
+    throw new Error(
+      `Public tool budget exceeded: ${toolNames.length} tools registered (max ${MAX_PUBLIC_TOOLS}): ${toolNames.join(', ')}`,
+    );
+  }
+}
+
 export interface ActionCapability {
   action: string;
   readOnly: true;

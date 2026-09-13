@@ -19,9 +19,34 @@ test('query accepts minimal valid request with defaults', () => {
   assert.equal(out.ok, true);
   if (out.ok) {
     assert.equal(out.input.action, 'query');
+    if (out.input.language !== 'dql') throw new Error('expected dql');
     assert.equal(out.input.pageSize, 10);
   }
 });
+
+test('query dql keeps pageSize/cursor', () => {
+  const dql = validateGraphRequest({ action: 'query', language: 'dql', query: 'type:Organization', pageSize: 25 });
+  assert.equal(dql.ok, true);
+  if (!dql.ok) throw new Error('expected ok');
+  assert.equal(dql.input.action, 'query');
+  if (dql.input.action !== 'query' || dql.input.language !== 'dql') throw new Error('expected dql query input');
+  assert.equal(dql.input.pageSize, 25);
+});
+
+test('query sparql accepts bare query but rejects pageSize/cursor', () => {
+  const sparql = validateGraphRequest({ action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }' });
+  assert.equal(sparql.ok, true);
+  if (sparql.ok) assert.equal(sparql.input.language, 'sparql');
+  for (const input of [
+    { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', pageSize: 10 },
+    { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', cursor: 'opaque' },
+  ]) {
+    const out = validateGraphRequest(input);
+    assert.equal(out.ok, false, JSON.stringify(input));
+    if (!out.ok) assert.equal(out.code, 'invalid_input');
+  }
+});
+
 
 test('query rejects missing language and non-dql language', () => {
   for (const input of [

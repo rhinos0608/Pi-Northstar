@@ -73,18 +73,22 @@ test('buildServerParameters rejects invalid forwarded env list', () => {
   );
 });
 
-test('sentinel: DIFFBOT_* never forward to the MCP server by default', () => {
+test('provider credential keys forward to the MCP server; tuning vars stay blocked', () => {
   const params = buildServerParameters({
     PATH: '/usr/bin',
     DIFFBOT_TOKEN: 'SENTINEL_DIFFBOT_TOKEN_abc123xyz',
+    FIRECRAWL_API_KEY: 'SENTINEL_FIRECRAWL_KEY_abc123xyz',
+    JINA_API_KEY: 'SENTINEL_JINA_KEY_abc123xyz',
     DIFFBOT_SEARCH_SIZE: '10',
     DIFFBOT_ENHANCE_SIZE: '1',
     DIFFBOT_NLP_MAX_CHARS: '100000',
     DIFFBOT_MAX_PROVIDERS: '3',
     DIFFBOT_FALLBACK_BUDGET: '3',
   });
+  assert.equal(params.env?.DIFFBOT_TOKEN, 'SENTINEL_DIFFBOT_TOKEN_abc123xyz');
+  assert.equal(params.env?.FIRECRAWL_API_KEY, 'SENTINEL_FIRECRAWL_KEY_abc123xyz');
+  assert.equal(params.env?.JINA_API_KEY, 'SENTINEL_JINA_KEY_abc123xyz');
   for (const key of [
-    'DIFFBOT_TOKEN',
     'DIFFBOT_SEARCH_SIZE',
     'DIFFBOT_ENHANCE_SIZE',
     'DIFFBOT_NLP_MAX_CHARS',

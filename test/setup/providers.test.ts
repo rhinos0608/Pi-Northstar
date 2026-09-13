@@ -194,6 +194,17 @@ test('authForChannel keeps legacy resolution with multi-channel fallback', () =>
   assert.equal(liveAuthSnapshot({}).diffbot?.configured, false);
 });
 
+test('authForChannel reports shared graph channel configured on SPARQL-only env', () => {
+  const sparqlOnly = authForChannel('graph', { GRAPH_SPARQL_ENDPOINT: 'https://sparql.example.org/sparql' });
+  assert.ok(sparqlOnly);
+  assert.equal(sparqlOnly.configured, true);
+  const diffbotOnly = authForChannel('graph', { DIFFBOT_TOKEN: 'SENTINEL_DIFFBOT_TOKEN_abc123xyz' });
+  assert.ok(diffbotOnly);
+  assert.equal(diffbotOnly.configured, true);
+  assert.equal(authForChannel('graph', {})?.configured, false);
+  assert.equal(authForChannel('nope', {}), undefined);
+});
+
 test('github descriptor reads both token spellings with no cookie domains', () => {
   const desc = findProvider('github');
   assert.ok(desc, 'github descriptor must exist');
