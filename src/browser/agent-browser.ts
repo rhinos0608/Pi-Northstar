@@ -590,10 +590,10 @@ export class AgentBrowserAdapter {
     return request.selector ? validateSelector(request.selector) : '';
   }
 
-  /** Run the snapshot-ref preflight; returns the stale-ref error result, or undefined when fresh. */
-  private preflightSelectorRef(selector: string): BackendCallResult | undefined {
+  /** Run the snapshot-ref preflight; returns the stale-ref error result, or undefined when fresh. When expectedToken is passed, resolution is gated on the snapshot token so a ref resolved before navigation/invalidation cannot dispatch after it. */
+  private preflightSelectorRef(selector: string, expectedToken?: number): BackendCallResult | undefined {
     try {
-      preflightRef(this.pageState, this.session.namespace, selector);
+      preflightRef(this.pageState, this.session.namespace, selector, expectedToken);
     } catch (err) {
       if (err instanceof StaleRefError) {
         return jsonTextResult({ ok: false, error: err.message, staleRef: true });
@@ -645,11 +645,17 @@ export class AgentBrowserAdapter {
 
     const stale = this.preflightSelectorRef(selector);
     if (stale) return stale;
+    const refToken = this.pageState.snapshot(this.session.namespace)?.token;
 
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
 
     const { eligible, before } = await this.setupClickVerification(merged, selector);
+
+    // Invalidate-then-resolve ordering: re-resolve after the awaits above so a
+    // navigation/invalidation that landed mid-flight blocks the dispatch.
+    const rechecked = this.preflightSelectorRef(selector, refToken);
+    if (rechecked) return rechecked;
 
     const result = await runCommand(['click', selector], merged);
     if (!result.success) {
@@ -696,9 +702,12 @@ export class AgentBrowserAdapter {
 
     const stale = this.preflightSelectorRef(selector);
     if (stale) return stale;
+    const refToken = this.pageState.snapshot(this.session.namespace)?.token;
 
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
+    const rechecked = this.preflightSelectorRef(selector, refToken);
+    if (rechecked) return rechecked;
     return this.runTextInputCommand(merged, 'type', selector, text);
   }
 
@@ -822,9 +831,9 @@ export class AgentBrowserAdapter {
     }
     const refs = parseSnapshotRefs(result.data);
     const url = extractSnapshotUrl(result.data);
-    if (refs.length > 0) {
-      this.pageState.recordSnapshot(this.session.namespace, url, refs, token);
-    }
+    // Record every successful snapshot, including refs=[]. An empty page must
+    // supersede the prior record; skipping it leaves stale @eN resolvable.
+    this.pageState.recordSnapshot(this.session.namespace, url, refs, token);
     if (request.compact) {
       const compacted = compactSnapshotRefs(refs);
       return jsonTextResult({ url, refs: compacted.refs, omittedCount: compacted.omittedCount, truncated: compacted.truncated });
@@ -846,9 +855,12 @@ export class AgentBrowserAdapter {
       }
       throw err;
     }
+    const refToken = this.pageState.snapshot(this.session.namespace)?.token;
 
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
+    const rechecked = this.preflightSelectorRef(selector, refToken);
+    if (rechecked) return rechecked;
     return this.runFillCommand(merged, selector, text);
   }
 
@@ -912,8 +924,11 @@ export class AgentBrowserAdapter {
     }
     const stale = this.preflightSelectorRef(selector);
     if (stale) return stale;
+    const refToken = this.pageState.snapshot(this.session.namespace)?.token;
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
+    const rechecked = this.preflightSelectorRef(selector, refToken);
+    if (rechecked) return rechecked;
     return this.runSelectCommand(merged, selector, rawValues);
   }
 

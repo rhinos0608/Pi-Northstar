@@ -37,10 +37,12 @@ export class SessionPageStateStore {
     return this.snapshots.get(namespace);
   }
 
-  recordSnapshot(namespace: string, url: string, refs: PageRef[], expectedPriorToken?: number): PageSnapshotRecord {
+  recordSnapshot(namespace: string, url: string, refs: PageRef[], expectedPriorToken?: number): PageSnapshotRecord | undefined {
     const currentToken = this.tokens.get(namespace) ?? 0;
     if (expectedPriorToken !== undefined && expectedPriorToken !== currentToken) {
-      return this.snapshots.get(namespace) ?? this.buildAndStore(namespace, url, refs, currentToken);
+      // Stale in-flight snapshot (navigation/mutation invalidated mid-fetch):
+      // drop payload, never resurrect. Return live record if one exists.
+      return this.snapshots.get(namespace);
     }
     const nextToken = currentToken + 1;
     this.tokens.set(namespace, nextToken);
@@ -57,11 +59,17 @@ export class SessionPageStateStore {
 
   invalidate(namespace: string, _reason: string): void {
     this.snapshots.delete(namespace);
+    // Bump token so in-flight snapshots (captured pre-invalidation) fail the
+    // expectedPriorToken gate and prior token-gated resolutions go stale.
+    this.tokens.set(namespace, (this.tokens.get(namespace) ?? 0) + 1);
   }
 
-  resolveRef(namespace: string, ref: string): PageRef {
+  resolveRef(namespace: string, ref: string, expectedToken?: number): PageRef {
     const record = this.snapshots.get(namespace);
     if (!record) throw new StaleRefError(ref, 'no snapshot recorded or snapshot invalidated');
+    if (expectedToken !== undefined && expectedToken !== record.token) {
+      throw new StaleRefError(ref, 'snapshot superseded after ref was resolved');
+    }
     const pageRef = record.refs.get(ref);
     if (!pageRef) throw new StaleRefError(ref, 'ref not present in current snapshot');
     return pageRef;
@@ -88,7 +96,10 @@ export class SessionPageStateStore {
 
   clear(namespace: string): void {
     this.snapshots.delete(namespace);
-    this.tokens.delete(namespace);
+    // Monotonic epoch: bump (never reset to 0) so a late in-flight snapshot
+    // carrying a pre-clear token fails the expectedPriorToken gate instead of
+    // resurrecting refs after handleClose.
+    this.tokens.set(namespace, (this.tokens.get(namespace) ?? 0) + 1);
     this.activeTabs.delete(namespace);
   }
 }
@@ -96,7 +107,7 @@ export class SessionPageStateStore {
 /** Returns the tracked PageRef for a selector that looks like a ref, or `undefined` if the
  *  selector isn't ref-shaped (plain CSS/role/xpath selectors pass through untouched). Throws
  *  StaleRefError if it *is* ref-shaped but not present in the current snapshot. */
-export function preflightRef(store: SessionPageStateStore, namespace: string, selector: string): PageRef | undefined {
+export function preflightRef(store: SessionPageStateStore, namespace: string, selector: string, expectedToken?: number): PageRef | undefined {
   if (!REF_PATTERN.test(selector)) return undefined;
-  return store.resolveRef(namespace, selector);
+  return store.resolveRef(namespace, selector, expectedToken);
 }
