@@ -265,6 +265,49 @@ function checkCorrelation(value: unknown): Validation<RuntimeStartV1['correlatio
   };
 }
 
+/** outputSchema bounds: byte cap matches prompt bounds; depth/key caps mirror record-validator conventions (reject, never clamp). */
+const MAX_OUTPUT_SCHEMA_DEPTH = 10;
+const MAX_OUTPUT_SCHEMA_KEYS = 256;
+const MAX_OUTPUT_SCHEMA_KEY_LENGTH = 128;
+
+function checkOutputSchema(value: unknown): Validation<Record<string, unknown>> {
+  if (!isRecord(value)) {
+    return { ok: false, code: 'invalid_params', message: 'outputSchema must be an object when present.' };
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value) ?? '';
+  } catch {
+    return { ok: false, code: 'invalid_params', message: 'outputSchema must be serializable.' };
+  }
+  if (utf8Bytes(serialized) > RUNTIME_RPC_BOUNDS.maxPromptBytes) {
+    return { ok: false, code: 'invalid_params', message: 'outputSchema exceeds byte limit.' };
+  }
+  let keys = 0;
+  const walk = (node: unknown, depth: number): boolean => {
+    if (depth > MAX_OUTPUT_SCHEMA_DEPTH) return false;
+    if (Array.isArray(node)) {
+      for (const entry of node) {
+        if (!walk(entry, depth + 1)) return false;
+      }
+      return true;
+    }
+    if (isRecord(node)) {
+      for (const key of Object.keys(node)) {
+        keys += 1;
+        if (keys > MAX_OUTPUT_SCHEMA_KEYS) return false;
+        if (key.length === 0 || key.length > MAX_OUTPUT_SCHEMA_KEY_LENGTH) return false;
+        if (!walk(node[key], depth + 1)) return false;
+      }
+    }
+    return true;
+  };
+  if (!walk(value, 0)) {
+    return { ok: false, code: 'invalid_params', message: 'outputSchema exceeds depth/key bounds.' };
+  }
+  return { ok: true, value };
+}
+
 function checkStartParams(value: unknown): Validation<RuntimeStartV1> {
   if (!isRecord(value)) return { ok: false, code: 'invalid_params', message: 'start params must be an object.' };
   const bad = exactKeys(value, ['modelId', 'prompt', 'maxOutputTokens', 'timeoutMs', 'outputSchema', 'correlation']);
@@ -290,8 +333,11 @@ function checkStartParams(value: unknown): Validation<RuntimeStartV1> {
   ) {
     return { ok: false, code: 'invalid_params', message: 'timeoutMs out of range.' };
   }
-  if (value.outputSchema !== undefined && !isRecord(value.outputSchema)) {
-    return { ok: false, code: 'invalid_params', message: 'outputSchema must be an object when present.' };
+  let outputSchema: Record<string, unknown> | undefined;
+  if (value.outputSchema !== undefined) {
+    const schema = checkOutputSchema(value.outputSchema);
+    if (!schema.ok) return schema;
+    outputSchema = schema.value;
   }
   const correlation = checkCorrelation(value.correlation);
   if (!correlation.ok) return correlation;
@@ -302,7 +348,7 @@ function checkStartParams(value: unknown): Validation<RuntimeStartV1> {
       prompt: value.prompt,
       maxOutputTokens: value.maxOutputTokens,
       timeoutMs: value.timeoutMs,
-      ...(value.outputSchema !== undefined ? { outputSchema: value.outputSchema } : {}),
+      ...(outputSchema !== undefined ? { outputSchema } : {}),
       correlation: correlation.value,
     },
   };
@@ -426,6 +472,14 @@ export function validateReply(raw: unknown, expectedRequestId?: string, expected
   if (raw.success) {
     if (!('data' in raw)) return { ok: false, reason: 'success reply must carry data' };
     if ('error' in raw) return { ok: false, reason: 'success reply must not carry error' };
+    // Success replies must always carry a valid method: never cast undefined
+    // to RuntimeRpcMethod. Method omission stays legal only on error replies.
+    if (typeof raw.method !== 'string' || !(RUNTIME_RPC_METHODS as readonly string[]).includes(raw.method)) {
+      return { ok: false, reason: 'success reply must carry method' };
+    }
+    if (expectedMethod !== undefined && raw.method !== expectedMethod) {
+      return { ok: false, reason: 'reply method mismatch' };
+    }
     if (replyOversize(raw)) return { ok: false, reason: 'reply exceeds result byte limit' };
     return {
       ok: true,

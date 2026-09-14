@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   RUNTIME_RPC_BOUNDS,
+  RUNTIME_RPC_ERROR_MESSAGES,
   RUNTIME_RPC_METHODS,
   RUNTIME_RPC_READY_EVENT,
   RUNTIME_RPC_REQUEST_EVENT,
@@ -57,6 +58,7 @@ export class LeafRuntimeError extends Error {
 const LOCAL_TIMEOUT_MESSAGE = 'Leaf runtime request timed out.';
 const DISPOSED_MESSAGE = 'Leaf runtime client disposed.';
 const INVALID_REPLY_MESSAGE = 'Malformed leaf runtime reply.';
+const PROVIDER_ERROR_MESSAGE = RUNTIME_RPC_ERROR_MESSAGES.provider_error;
 const RUN_ID_PATTERN = /^runtime_[A-Za-z0-9_-]{1,64}$/;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const POLL_INTERVAL_MS = 250;
@@ -76,6 +78,19 @@ interface Pending {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function wireErrorToSafe(code: unknown): LeafRuntimeError {
+  if (typeof code === 'string' && code in RUNTIME_RPC_ERROR_MESSAGES) {
+    const known = code as RuntimeRpcErrorCode;
+    return new LeafRuntimeError(known, RUNTIME_RPC_ERROR_MESSAGES[known]);
+  }
+  return new LeafRuntimeError('provider_error', PROVIDER_ERROR_MESSAGE);
+}
+
+function removeSubscriptionEntry(list: Array<() => void>, entry: () => void): void {
+  const index = list.indexOf(entry);
+  if (index >= 0) list.splice(index, 1);
 }
 
 function newRequestId(): string {
@@ -102,6 +117,7 @@ export class LeafRuntimeClient {
   private readonly pending = new Map<string, Pending>();
   private readonly startedRunIds: string[] = [];
   private readonly subscriptions: Array<() => void> = [];
+  private readonly cancelTimers: Array<ReturnType<typeof setTimeout>> = [];
   private ready: RuntimeReadyPayloadV1 | undefined;
   private disposed = false;
 
@@ -139,11 +155,18 @@ export class LeafRuntimeClient {
     if (this.disposed) return false;
     try {
       const data = await this.request('negotiate', { modelId: this.modelId }, { timeoutMs: Math.min(REFRESH_TIMEOUT_MS, RUNTIME_RPC_BOUNDS.maxTimeoutMs) });
-      if (!isRecord(data) || data.compatible !== true) return false;
-      if (data.modelId !== undefined && data.modelId !== this.modelId) return false;
+      if (!isRecord(data) || data.compatible !== true) {
+        this.ready = undefined;
+        return false;
+      }
+      if (data.modelId !== undefined && data.modelId !== this.modelId) {
+        this.ready = undefined;
+        return false;
+      }
       this.ready = { version: 1, protocol: 'subagents:runtime:v1', methods: [...RUNTIME_RPC_METHODS] };
       return true;
     } catch {
+      this.ready = undefined;
       return false;
     }
   }
@@ -185,6 +208,7 @@ export class LeafRuntimeClient {
         } catch {
           // Unsubscribe is best-effort; settling still completes.
         }
+        removeSubscriptionEntry(this.subscriptions, pending.unsubscribe);
         this.pending.delete(requestId);
         pending.resolve(data);
       };
@@ -197,6 +221,7 @@ export class LeafRuntimeClient {
         } catch {
           // Unsubscribe is best-effort; settling still completes.
         }
+        removeSubscriptionEntry(this.subscriptions, pending.unsubscribe);
         this.pending.delete(requestId);
         pending.reject(error);
       };
@@ -213,7 +238,7 @@ export class LeafRuntimeClient {
           settleResolve(reply.data);
           return;
         }
-        settleReject(new LeafRuntimeError(reply.error.code, reply.error.message));
+        settleReject(wireErrorToSafe(reply.error.code));
       });
       this.subscriptions.push(pending.unsubscribe);
       pending.timer = setTimeout(() => {
@@ -253,7 +278,7 @@ export class LeafRuntimeClient {
     const remaining = (): number => Math.max(1, deadline - Date.now());
 
     await this.request('negotiate', { modelId: this.modelId }, { timeoutMs: Math.min(remaining(), REFRESH_TIMEOUT_MS) }).catch((error) => {
-      throw error instanceof LeafRuntimeError ? error : new LeafRuntimeError('provider_error', 'Leaf negotiation failed.');
+      throw error instanceof LeafRuntimeError ? error : new LeafRuntimeError('provider_error', PROVIDER_ERROR_MESSAGE);
     });
 
     const startData = await this.request(
@@ -298,7 +323,7 @@ export class LeafRuntimeClient {
       if (state === 'running') continue;
       if (state === 'completed') break;
       if (state === 'failed' || state === 'cancelled') {
-        throw new LeafRuntimeError(state === 'cancelled' ? 'timeout' : 'provider_error', state === 'cancelled' ? LOCAL_TIMEOUT_MESSAGE : 'Leaf run failed.');
+        throw new LeafRuntimeError(state === 'cancelled' ? 'timeout' : 'provider_error', state === 'cancelled' ? LOCAL_TIMEOUT_MESSAGE : PROVIDER_ERROR_MESSAGE);
       }
       throw new LeafRuntimeError('invalid_reply', INVALID_REPLY_MESSAGE);
     }
@@ -309,7 +334,7 @@ export class LeafRuntimeClient {
     }
     const text = resultData.output;
     if (Buffer.byteLength(text, 'utf8') > RESULT_TEXT_MAX_BYTES) {
-      throw new LeafRuntimeError('result_byte_limit_exceeded', 'Result payload exceeds byte limit.');
+      throw new LeafRuntimeError('result_byte_limit_exceeded', RUNTIME_RPC_ERROR_MESSAGES.result_byte_limit_exceeded);
     }
     this.forgetRunId(runId);
     return { text };
@@ -332,6 +357,10 @@ export class LeafRuntimeClient {
     }
     this.pending.clear();
     this.startedRunIds.length = 0;
+    for (const timer of this.cancelTimers) {
+      clearTimeout(timer);
+    }
+    this.cancelTimers.length = 0;
     for (const unsubscribe of this.subscriptions) {
       try {
         unsubscribe();
@@ -369,23 +398,33 @@ export class LeafRuntimeClient {
     if (!validateRequest(envelope).ok) return;
     const channel = runtimeRpcReplyEvent(requestId);
     try {
-      const unsubscribe = this.events.on(channel, () => {
+      let cancelUnsubscribe: () => void = () => undefined;
+      let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+      const cleanupCancel = (): void => {
         try {
-          unsubscribe();
+          cancelUnsubscribe();
         } catch {
           // Best-effort cleanup.
         }
+        removeSubscriptionEntry(this.subscriptions, cancelUnsubscribe);
+        if (cancelTimer !== undefined) {
+          clearTimeout(cancelTimer);
+          const timerIndex = this.cancelTimers.indexOf(cancelTimer);
+          if (timerIndex >= 0) this.cancelTimers.splice(timerIndex, 1);
+          cancelTimer = undefined;
+        }
+      };
+      cancelUnsubscribe = this.events.on(channel, () => {
+        cleanupCancel();
       });
-      if (typeof unsubscribe === 'function') {
-        const timer = setTimeout(() => {
-          try {
-            unsubscribe();
-          } catch {
-            // Best-effort cleanup.
-          }
+      if (typeof cancelUnsubscribe === 'function') {
+        this.subscriptions.push(cancelUnsubscribe);
+        cancelTimer = setTimeout(() => {
+          cleanupCancel();
         }, 5_000);
-        if (typeof (timer as unknown as { unref?: unknown }).unref === 'function') {
-          (timer as unknown as { unref(): void }).unref();
+        this.cancelTimers.push(cancelTimer);
+        if (typeof (cancelTimer as unknown as { unref?: unknown }).unref === 'function') {
+          (cancelTimer as unknown as { unref(): void }).unref();
         }
       }
       this.events.emit(RUNTIME_RPC_REQUEST_EVENT, envelope);

@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   RUNTIME_RPC_BOUNDS,
+  RUNTIME_RPC_ERROR_MESSAGES,
   RUNTIME_RPC_READY_EVENT,
   RUNTIME_RPC_REQUEST_EVENT,
   RUNTIME_RPC_PROTOCOL,
   RUNTIME_RPC_VERSION,
   runtimeRpcReplyEvent,
 } from '../../src/runtime/runtime-rpc-protocol.js';
-import { LeafRuntimeClient } from '../../src/runtime/leaf-runtime-client.js';
+import { LeafRuntimeClient, LeafRuntimeError } from '../../src/runtime/leaf-runtime-client.js';
 
 type Handler = (data: unknown) => void;
 
@@ -339,6 +340,150 @@ test('result over byte limit rejects with safe code', async () => {
   const client = new LeafRuntimeClient({ events: bus, modelId: MODEL, pollIntervalMs: 5 });
   try {
     await assert.rejects(() => client.runLeaf('big', { timeoutMs: 10_000 }), /Malformed|byte limit/);
+  } finally {
+    client.dispose();
+  }
+});
+
+test('wire error.message never surfaces: fixed RUNTIME_RPC_ERROR_MESSAGES text only', async () => {
+  const EXFIL = 'openai/gpt-4 FAKE-TOKEN sk-secret-123 provider=evil';
+  const bus = new FakeBus();
+  bus.on(RUNTIME_RPC_REQUEST_EVENT, (raw) => {
+    const request = raw as { requestId: string };
+    bus.emit(runtimeRpcReplyEvent(request.requestId), {
+      version: 1,
+      requestId: request.requestId,
+      method: 'negotiate',
+      success: false,
+      error: { code: 'model_unavailable', message: EXFIL },
+    });
+  });
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL });
+  try {
+    const error = await client.request('negotiate', { modelId: MODEL }, { timeoutMs: 2000 }).then(
+      () => assert.fail('must reject'),
+      (caught: unknown) => caught,
+    );
+    assert.ok(error instanceof LeafRuntimeError);
+    assert.equal(error.code, 'model_unavailable');
+    assert.equal(error.message, RUNTIME_RPC_ERROR_MESSAGES.model_unavailable);
+    assert.ok(!error.message.includes('sk-secret-123'));
+    assert.ok(!error.message.includes('openai/gpt-4'));
+  } finally {
+    client.dispose();
+  }
+});
+
+test('runLeaf negotiate failure surfaces fixed message, never wire text', async () => {
+  const bus = new FakeBus();
+  bus.on(RUNTIME_RPC_REQUEST_EVENT, (raw) => {
+    const request = raw as { requestId: string; method: string };
+    if (request.method !== 'negotiate') return;
+    bus.emit(runtimeRpcReplyEvent(request.requestId), {
+      version: 1,
+      requestId: request.requestId,
+      method: 'negotiate',
+      success: false,
+      error: { code: 'runtime_unavailable', message: 'MALICIOUS-BODY provider=evil sk-xyz' },
+    });
+  });
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL, pollIntervalMs: 5 });
+  try {
+    const error = await client.runLeaf('hello', { timeoutMs: 5000 }).then(
+      () => assert.fail('must reject'),
+      (caught: unknown) => caught,
+    );
+    assert.ok(error instanceof LeafRuntimeError);
+    assert.equal(error.message, RUNTIME_RPC_ERROR_MESSAGES.runtime_unavailable);
+    assert.ok(!error.message.includes('MALICIOUS-BODY'));
+  } finally {
+    client.dispose();
+  }
+});
+
+test('failed refreshReady clears the stale ready flag', async () => {
+  const bus = new FakeBus();
+  stubServer(bus, { negotiateCode: 'runtime_unavailable' });
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL });
+  try {
+    emitReady(bus);
+    assert.equal(client.isReady(), true);
+    assert.equal(await client.refreshReady(), false);
+    assert.equal(client.isReady(), false);
+  } finally {
+    client.dispose();
+  }
+});
+
+test('incompatible negotiate data clears the stale ready flag', async () => {
+  const bus = new FakeBus();
+  bus.on(RUNTIME_RPC_REQUEST_EVENT, (raw) => {
+    const request = raw as { requestId: string };
+    bus.emit(runtimeRpcReplyEvent(request.requestId), {
+      version: 1,
+      requestId: request.requestId,
+      method: 'negotiate',
+      success: true,
+      data: { compatible: false, modelId: MODEL },
+    });
+  });
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL });
+  try {
+    emitReady(bus);
+    assert.equal(client.isReady(), true);
+    assert.equal(await client.refreshReady(), false);
+    assert.equal(client.isReady(), false);
+  } finally {
+    client.dispose();
+  }
+});
+
+test('subscriptions return to baseline after settle', async () => {
+  const bus = new FakeBus();
+  stubServer(bus);
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL });
+  try {
+    const baseline = bus.subscriptionCount();
+    assert.ok(baseline > 0);
+    await client.request('negotiate', { modelId: MODEL }, { timeoutMs: 2000 });
+    assert.equal(bus.subscriptionCount(), baseline);
+  } finally {
+    client.dispose();
+  }
+});
+
+test('subscriptions return to baseline after error settle', async () => {
+  const bus = new FakeBus();
+  stubServer(bus, { negotiateCode: 'runtime_unavailable' });
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL });
+  try {
+    const baseline = bus.subscriptionCount();
+    await assert.rejects(() => client.request('negotiate', { modelId: MODEL }, { timeoutMs: 2000 }));
+    assert.equal(bus.subscriptionCount(), baseline);
+  } finally {
+    client.dispose();
+  }
+});
+
+test('dispose clears tracked cancel subscription after timeout', async () => {
+  const stalled = new FakeBus();
+  stalled.on(RUNTIME_RPC_REQUEST_EVENT, (raw) => {
+    const request = raw as { requestId: string; method: string };
+    const replyTo = runtimeRpcReplyEvent(request.requestId);
+    if (request.method === 'negotiate') {
+      stalled.emit(replyTo, { version: 1, requestId: request.requestId, method: 'negotiate', success: true, data: { compatible: true, modelId: MODEL } });
+    } else if (request.method === 'start') {
+      stalled.emit(replyTo, { version: 1, requestId: request.requestId, method: 'start', success: true, data: { runId: 'runtime_stalled9', state: 'running' } });
+    }
+    // status and cancelAndSettle never reply: cancel tracking stays live until dispose.
+  });
+  const baseline = stalled.subscriptionCount();
+  const client = new LeafRuntimeClient({ events: stalled, modelId: MODEL, pollIntervalMs: 5 });
+  try {
+    await assert.rejects(() => client.runLeaf('stalls', { timeoutMs: 300 }), /timed out/);
+    assert.ok(stalled.subscriptionCount() > baseline, 'cancel subscription is tracked');
+    client.dispose();
+    assert.equal(stalled.subscriptionCount(), baseline);
   } finally {
     client.dispose();
   }

@@ -91,3 +91,38 @@ test('validateReadyPayload requires exact version, protocol, methods', () => {
   assert.equal(validateReadyPayload({ ...good, version: 2 }).ok, false);
   assert.equal(validateReadyPayload({ ...good, extra: 1 }).ok, false);
 });
+
+test('outputSchema bounds reject oversize/deep/wide schemas, never clamp', () => {
+  const startWith = (outputSchema: unknown): boolean =>
+    validateRequest({
+      version: 1,
+      requestId: 'req-1',
+      method: 'start',
+      params: { modelId: 'prov/model', prompt: 'hi', maxOutputTokens: 16, timeoutMs: 1000, outputSchema, correlation: CORRELATION },
+    }).ok;
+  assert.equal(startWith({ type: 'object' }), true);
+  assert.equal(startWith('nope'), false);
+  assert.equal(startWith({ blob: 'x'.repeat(RUNTIME_RPC_BOUNDS.maxPromptBytes) }), false);
+  let deep: Record<string, unknown> = { v: 1 };
+  for (let index = 0; index < 12; index += 1) deep = { nested: deep };
+  assert.equal(startWith(deep), false);
+  const wide: Record<string, unknown> = {};
+  for (let index = 0; index < 300; index += 1) wide[`k${index}`] = index;
+  assert.equal(startWith(wide), false);
+});
+
+test('validateReply requires method on success; error may omit it', () => {
+  const noMethodSuccess = { version: 1, requestId: 'req-1', success: true, data: {} };
+  assert.equal(validateReply(noMethodSuccess, 'req-1', 'negotiate').ok, false);
+  assert.equal(validateReply(noMethodSuccess, 'req-1').ok, false);
+  const badMethod = { version: 1, requestId: 'req-1', method: 'eval', success: true, data: {} };
+  assert.equal(validateReply(badMethod, 'req-1').ok, false);
+  const goodNoExpected = { version: 1, requestId: 'req-1', method: 'negotiate', success: true, data: {} };
+  const checked = validateReply(goodNoExpected, 'req-1');
+  assert.equal(checked.ok, true);
+  if (checked.ok && checked.value.success) {
+    assert.equal(typeof checked.value.method, 'string');
+  }
+  const errNoMethod = { version: 1, requestId: 'req-1', success: false, error: { code: 'timeout', message: 'anything' } };
+  assert.equal(validateReply(errNoMethod, 'req-1', 'negotiate').ok, true);
+});
