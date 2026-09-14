@@ -239,6 +239,28 @@ describe('web-search-ledger: failure blocking', () => {
       assert.equal(fifth.status, 'run');
     }
   });
+
+  it('success clears failure metadata so retry is not blocked', () => {
+    const { ledger } = ledgerAt(9_500_000);
+    const code: LedgerFailureCode = 'upstream_error';
+    const first = ledger.begin(['stale failure query'], { limit: 8 });
+    if (first.status !== 'run') throw new Error('expected run');
+    ledger.completeFailure(first.key, { retryable: true, code });
+    // A success on the same entry must clear lastFailureAt/lastRetryable:
+    // retained metadata would keep isBlocked() true and forbid the retry
+    // the reset failureCount just allowed.
+    const second = ledger.begin(['stale failure query'], { limit: 8 });
+    if (second.status !== 'run') throw new Error('expected retry run');
+    ledger.completeSuccess(second.key);
+    // A success on the same entry must clear the failure block: the next
+    // identical search is a near-duplicate suppress (recency), never a
+    // failure block, and debug state reads success.
+    const third = ledger.begin(['stale failure query'], { limit: 8 });
+    assert.notEqual(third.status, 'blocked', 'success must clear the failure block');
+    const debug = ledger.debugEntries();
+    assert.ok(debug.some((candidate) => candidate.state === 'success'), 'success entry must be recorded');
+    assert.ok(!debug.some((candidate) => candidate.state === 'blocked'), 'no entry may stay blocked after success');
+  });
 });
 
 describe('web-search-ledger: abort safety', () => {

@@ -222,9 +222,12 @@ export class WebSearchLedger {
       optionsKey: context?.optionsKey ?? prior?.optionsKey ?? '',
       successAt: now,
       failureCount: 0,
-      lastFailureAt: prior?.lastFailureAt,
-      lastCode: prior?.lastCode,
-      lastRetryable: prior?.lastRetryable,
+      // Success clears failure metadata: a retained lastFailureAt /
+      // lastRetryable would keep isBlocked() true and forbid the retry
+      // the reset failureCount just allowed.
+      lastFailureAt: undefined,
+      lastCode: undefined,
+      lastRetryable: undefined,
     });
   }
 
