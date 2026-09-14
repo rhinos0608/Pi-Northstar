@@ -30,25 +30,79 @@ test('quoteCmdArg always quotes so cmd metacharacters stay literal', () => {
   assert.equal(quoteCmdArg(''), '""');
 });
 
-test('quoteCmdArg wraps args with spaces and passes % through literally', () => {
+test('quoteCmdArg splits % as "%" toggles so cmd cannot expand %NAME%', () => {
+  // cmd.exe expands %NAME% on the /c line even inside quotes, and `%%` does
+  // not collapse in command-line context — so neither leaving % alone nor
+  // doubling survives. The inserted quotes poison cmd's %NAME% match while
+  // CommandLineToArgvW strips them (native round-trip in
+  // test/process/cli-command-win32-native.test.ts).
   assert.equal(quoteCmdArg('hello world'), '"hello world"');
-  // `%` is never doubled: the pre-quoted argv rides the /c line into the .cmd
-  // shim, whose `%*` forwarding substitutes arguments without a second `%`
-  // expansion pass. Doubling corrupts input — `%%` reaches the child unchanged
-  // on the Windows runner (see test/process/cli-command-win32-native.test.ts).
-  assert.equal(quoteCmdArg('%SystemRoot%'), '"%SystemRoot%"');
+  assert.equal(quoteCmdArg('%SystemRoot%'), '""%"SystemRoot"%""');
+  assert.equal(quoteCmdArg('100%'), '"100"%""');
+  assert.equal(quoteCmdArg('a%b'), '"a"%"b"');
+  assert.equal(quoteCmdArg('%'), '""%""');
+  assert.equal(quoteCmdArg('%%'), '""%""%""');
 });
 
-test('quoteCmdArg keeps % literal so a %OPENCLI_TOKEN% payload survives', () => {
-  // Win32-capable (pure quoting, runs on any host): the quoted spelling keeps
-  // `%` as-is — the native win32 round-trip proves it arrives unchanged.
+/** Minimal model of cmd.exe's /c percent phase: %NAME% expands (even inside
+ *  quotes) when NAME is defined (case-insensitive); single pass, undefined
+ *  names stay literal. Test-only contract of the escaping quoteCmdArg must
+ *  defeat. */
+function expandCmdPercent(line: string, env: Record<string, string>): string {
+  const lowerEnv = new Map(Object.entries(env).map(([key, value]) => [key.toLowerCase(), value]));
+  let out = '';
+  let index = 0;
+  while (index < line.length) {
+    const open = line.indexOf('%', index);
+    if (open === -1) return out + line.slice(index);
+    const close = line.indexOf('%', open + 1);
+    if (close === -1) return out + line.slice(index);
+    const value = lowerEnv.get(line.slice(open + 1, close).toLowerCase());
+    if (value === undefined) {
+      out += line.slice(index, close + 1);
+    } else {
+      out += line.slice(index, open) + value;
+    }
+    index = close + 1;
+  }
+  return out;
+}
+
+test('quoted % payloads are a fixpoint of cmd expansion (token stays hidden)', () => {
+  // Win32-capable (pure quoting, runs on any host): the old quoting left %
+  // untouched, so cmd expanded the child-env token into argv — the leak.
+  const env = { OPENCLI_TOKEN: 'SECRET_CANARY_X', PATH: 'C:\\shims' };
   const payload = 'search %OPENCLI_TOKEN% leaked?';
-  const quoted = quoteCmdArg(payload);
-  assert.equal(quoted, '"search %OPENCLI_TOKEN% leaked?"');
-  assert.equal(quoteCmdArg('100%'), '"100%"');
-  assert.equal(quoteCmdArg('a%b'), '"a%b"');
+  assert.ok(expandCmdPercent(`"${payload}"`, env).includes('SECRET_CANARY_X'));
+  // New quoting: every % is split as `"%"`, so no quoteless %NAME% span
+  // survives for cmd to match — quoted output expands to itself.
+  for (const value of [
+    payload,
+    '%OPENCLI_TOKEN%',
+    'pre %OPENCLI_TOKEN% post',
+    '100%',
+    'a%b',
+    '%',
+    '%%',
+    '%PATH%',
+    '%UNDEFINED_PI_VAR_XYZ%',
+  ]) {
+    const quoted = quoteCmdArg(value);
+    assert.equal(expandCmdPercent(quoted, env), quoted, `cmd must not rewrite ${quoted}`);
+    assert.ok(!expandCmdPercent(quoted, env).includes('SECRET_CANARY_X'));
+  }
   const argv = buildCmdArgv('C:\\shims\\opencli.cmd', ['search', payload]);
-  assert.ok((argv[3] ?? '').includes('"search %OPENCLI_TOKEN% leaked?"'));
+  assert.ok((argv[3] ?? '').includes('"search "%"OPENCLI_TOKEN"%" leaked?"'));
+});
+
+test('quoteCmdArg doubles backslash runs before an inserted % toggle', () => {
+  // `\` before `"%"` must stay a delimiter per CommandLineToArgvW (2n
+  // backslashes + quote), otherwise the backslash would escape the toggle.
+  assert.equal(quoteCmdArg('a\\%b'), '"a\\\\"%"b"');
+});
+
+test('quoteCmdArg keeps % literal next to embedded quotes', () => {
+  assert.equal(quoteCmdArg('"%A%"'), '""""%"A"%""""');
 });
 
 test('quoteCmdArg doubles embedded quotes and trailing backslashes per CommandLineToArgvW', () => {
@@ -186,7 +240,7 @@ test('buildCmdArgv quotes a resolved path with spaces and keeps metachar args li
   assert.ok(commandLine.startsWith('"') && commandLine.endsWith('"'), 'outer quote pair present');
   const inner = commandLine.slice(1, -1);
   assert.ok(inner.startsWith('"C:\\Program Files\\tool\\opencli.cmd"'), 'spaced path stays one argv element');
-  assert.ok(inner.includes('"a&b|c<d>e^f%g"'), 'metacharacters stay inside quotes (% literal)');
+  assert.ok(inner.includes('"a&b|c<d>e^f"%"g"'), 'metacharacters stay inside quotes (% split as "%" toggles)');
   assert.ok(inner.includes('"say ""hi"""'), 'embedded quotes doubled');
   assert.ok(inner.endsWith('""'), 'empty arg keeps its position as ""');
 });

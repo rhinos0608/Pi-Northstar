@@ -105,7 +105,7 @@ function stripSurroundingQuotes(dir: string): string {
 // `a&b` becomes command injection, and requireCliPositional deliberately
 // allows such text), so .cmd/.bat targets go through cmd.exe with every argv
 // element pre-quoted by quoteCmdArg — metacharacters inside double quotes
-// stay literal to cmd.exe parsing.
+// stay literal to cmd.exe parsing, with one exception: `%` (see below).
 //
 // Transport detail: the pre-quoted command line is wrapped in one outer pair
 // of quotes (`cmd.exe /d /s /c "\"resolved\" \"arg\""`) and spawned with
@@ -117,15 +117,56 @@ function stripSurroundingQuotes(dir: string): string {
 // command line no longer starts with `"`, no stripping happens, and cmd
 // reports the whole `"\"...\" \"..\""` string as not recognized.
 //
-// `%` passes through literally: the pre-quoted argv rides the /c line into
-// the .cmd shim, whose `%*` forwarding substitutes arguments without a second
-// `%` expansion pass. Doubling `%` to `%%` is wrong here — the doubled spelling
-// reaches the child unchanged (observed on the Windows runner), corrupting
-// valid input, so quoteCmdArg leaves `%` untouched.
+// `%` is NOT safe inside quotes: cmd.exe expands %VariableName% on the /c
+// command line even inside double quotes, so a model-controlled query like
+// `%OPENCLI_TOKEN%` would expand against the child env (which carries
+// OPENCLI_TOKEN) before the shim runs. Doubling to `%%` does not help: in
+// command-line (/c) context `%%` does not collapse (SS64 syntax-esc), so the
+// doubled spelling reaches the child and corrupts valid input. `^%` does not
+// help either: `%` expansion runs before caret handling, and inside quotes
+// `^` is literal anyway.
+//
+// quoteCmdArg therefore splits every `%` as `"%"`. The inserted quotes
+// poison cmd's %NAME% match (a name containing `"` never resolves), while
+// CommandLineToArgvW parses them as quote toggles and strips them, so the
+// child receives the original spelling byte-identical — lone `%`, `100%`,
+// and undefined %NAME% sequences included. Backslash runs preceding an
+// inserted toggle are doubled per CommandLineToArgvW rules so `\%` survives.
 
-/** Quote one argv element for cmd.exe (always double-quoted). */
+/**
+ * Quote one argv element for cmd.exe (always double-quoted).
+ *
+ * `%` is split as `"%"` so cmd.exe cannot expand %NAME% on the /c line
+ * (see above); CommandLineToArgvW strips the inserted toggles, restoring
+ * the original spelling in the child.
+ */
 export function quoteCmdArg(value: string): string {
-  return `"${value.replace(/(\\+)(?="|$)/g, '$1$1').replace(/"/g, '""')}"`;
+  let body = '';
+  let index = 0;
+  while (index < value.length) {
+    const char = value[index]!;
+    if (char === '\\') {
+      let end = index;
+      while (end < value.length && value[end] === '\\') end++;
+      const next = end < value.length ? value[end]! : '';
+      const run = value.slice(index, end);
+      // A run reaching the closing quote, an embedded quote, or an inserted
+      // `"%"` toggle must be doubled: 2n backslashes before a quote yield n
+      // backslashes and keep the quote a delimiter (CommandLineToArgvW).
+      body += next === '' || next === '"' || next === '%' ? run + run : run;
+      index = end;
+    } else if (char === '"') {
+      body += '""';
+      index++;
+    } else if (char === '%') {
+      body += '"%"';
+      index++;
+    } else {
+      body += char;
+      index++;
+    }
+  }
+  return `"${body}"`;
 }
 
 /**

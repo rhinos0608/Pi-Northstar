@@ -178,6 +178,43 @@ test('redaction strips token and slices to 500 chars', async () => {
   assert.ok(out.length <= 500);
 });
 
+test('endpoint query params never leak into error messages, still dispatch on wire', async () => {
+  const querySecret = 'QUERY_SENTINEL_k7q2m9x4';
+  const endpoint = `https://sparql.example.org/sparql?api_key=${querySecret}`;
+  let seenUrl = '';
+  const fetchFn: FetchFn = async (url) => {
+    seenUrl = url;
+    throw new Error('boom connection refused');
+  };
+  await assert.rejects(
+    sparqlPost({ endpoint, query: 'SELECT * WHERE { ?s ?p ?o }', fetchFn }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes(querySecret), 'endpoint query secret leaked in error');
+      assert.ok(!err.message.includes('api_key'), 'endpoint query key leaked in error');
+      assert.ok(err.message.includes('https://sparql.example.org/sparql'), 'error must still identify origin+path');
+      return true;
+    },
+  );
+  assert.ok(seenUrl.includes(`api_key=${querySecret}`), 'query string must still dispatch on the wire');
+});
+
+test('invalid endpoint echo strips query string', async () => {
+  const querySecret = 'QUERY_SENTINEL_z8w3n6p1';
+  const neverFetch: FetchFn = async () => {
+    throw new Error('fetch must not dispatch on invalid endpoint');
+  };
+  await assert.rejects(
+    sparqlPost({ endpoint: `not a url?api_key=${querySecret}`, query: 'SELECT * WHERE { ?s ?p ?o }', fetchFn: neverFetch }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes(querySecret), 'query secret leaked in invalid-endpoint error');
+      assert.ok(!err.message.includes('api_key'), 'query key leaked in invalid-endpoint error');
+      return true;
+    },
+  );
+});
+
 test('caller abort signal surfaces retryable transport error', async () => {
   const fetchFn: FetchFn = async (_url, init) => {
     return new Promise<Response>((_resolve, reject) => {

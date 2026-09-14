@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { resultToText } from '../../src/backend.js';
-import { buildServerParameters, DEFAULT_SEARCH_MCP_COMMAND } from '../../src/process/mcp-client.js';
+import { buildServerParameters, DEFAULT_SEARCH_MCP_COMMAND, redactSecrets, SearchMcpClient, SearchMcpToolError, secretValuesFromEnv, withStderr } from '../../src/process/mcp-client.js';
 
 test('buildServerParameters uses search-mcp defaults', () => {
   const params = buildServerParameters({});
@@ -116,4 +116,100 @@ test('resultToText serializes non-content results', () => {
 
 test('resultToText handles undefined content items', () => {
   assert.equal(resultToText({ content: [undefined] }), 'undefined');
+});
+
+test('withStderr redacts exact forwarded secret values', () => {
+  const secret = 'SENTINEL_GITHUB_TOKEN_abc123xyz';
+  const secrets = secretValuesFromEnv({ GITHUB_TOKEN: secret, PATH: '/usr/bin' });
+  assert.deepEqual(secrets, [secret]);
+  const err = withStderr(new Error('boom'), `auth failed for ${secret} retry`, secrets);
+  assert.ok(!err.message.includes(secret), 'thrown message must not echo secret');
+  assert.ok(err.message.includes('[redacted]'));
+});
+
+test('withStderr redacts secrets from the error message itself', () => {
+  const secret = 'SENTINEL_EXA_KEY_abc123xyz';
+  const err = withStderr(new Error(`call failed ${secret}`), 'tail', [secret]);
+  assert.ok(!err.message.includes(secret));
+});
+
+test('redactSecrets replaces all occurrences and skips empties', () => {
+  assert.equal(redactSecrets('a X b X', ['X']), 'a [redacted] b [redacted]');
+  assert.equal(redactSecrets('unchanged', ['', 'zzz']), 'unchanged');
+});
+
+test('callTool redacts secret-bearing stderr from transport failures', async () => {
+  const secret = 'SENTINEL_BRAVE_KEY_abc123xyz';
+  const params = buildServerParameters({ BRAVE_API_KEY: secret });
+  const client = new SearchMcpClient(params) as unknown as {
+    stderrTail: string;
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  client.stderrTail = `server log leaked ${secret} end`;
+  client.connect = async () => ({
+    callTool: async () => {
+      throw new Error('transport boom');
+    },
+  });
+  await assert.rejects(client.callTool('search', {}), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.ok(!error.message.includes(secret), 'thrown message must not echo secret');
+    assert.ok(error.message.includes('[redacted]'));
+    return true;
+  });
+});
+
+test('callTool rejects resolved isError:true results as SearchMcpToolError', async () => {
+  const params = buildServerParameters({});
+  const client = new SearchMcpClient(params) as unknown as {
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  client.connect = async () => ({
+    callTool: async () => ({
+      content: [{ type: 'text', text: 'tool blew up' }],
+      isError: true,
+    }),
+  });
+  await assert.rejects(client.callTool('search', {}), (error: unknown) => {
+    assert.ok(error instanceof SearchMcpToolError);
+    assert.equal((error as SearchMcpToolError).name, 'SearchMcpToolError');
+    assert.equal((error as SearchMcpToolError).code, 'SEARCH_MCP_TOOL_ERROR');
+    assert.ok((error as Error).message.includes('tool blew up'));
+    return true;
+  });
+});
+
+test('callTool redacts secrets inside isError:true content', async () => {
+  const secret = 'SENTINEL_TAVILY_KEY_abc123xyz';
+  const params = buildServerParameters({ TAVILY_API_KEY: secret });
+  const client = new SearchMcpClient(params) as unknown as {
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  client.connect = async () => ({
+    callTool: async () => ({
+      content: [{ type: 'text', text: `denied ${secret}` }],
+      isError: true,
+    }),
+  });
+  await assert.rejects(client.callTool('search', {}), (error: unknown) => {
+    assert.ok(error instanceof SearchMcpToolError);
+    assert.ok(!(error as Error).message.includes(secret));
+    return true;
+  });
+});
+
+test('callTool passes through successful results without throwing', async () => {
+  const params = buildServerParameters({});
+  const client = new SearchMcpClient(params) as unknown as {
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  const ok = { content: [{ type: 'text', text: 'fine' }] };
+  client.connect = async () => ({
+    callTool: async () => ok,
+  });
+  assert.deepEqual(await client.callTool('search', {}), ok);
 });

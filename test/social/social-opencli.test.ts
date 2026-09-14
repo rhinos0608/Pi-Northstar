@@ -646,3 +646,37 @@ test('nonzero exit redacts labeled and unlabeled OPENCLI_TOKEN echoes', async ()
     else process.env.OPENCLI_TOKEN = previous;
   }
 });
+
+test('worker env option threads merged env into childEnv (OPENCLI_TOKEN canary)', async () => {
+  const canary = 'merged-env-canary-481516';
+  let seen: Record<string, string> | undefined;
+  const exec: OpenCliExec = async (_command, _args, env) => {
+    seen = env;
+    return { code: 0, stdout: '[]', stderr: '' };
+  };
+  const worker = createOpenCliSocialWorker({ exec, env: { OPENCLI_TOKEN: canary, PATH: '/usr/bin' } });
+  const [plan] = await worker.plans(makeRequest(), {});
+  assert.ok(plan);
+  await plan.execute();
+  assert.equal(seen?.['OPENCLI_TOKEN'], canary);
+});
+
+test('bare worker still falls back to process.env', async () => {
+  let seen: Record<string, string> | undefined;
+  const exec: OpenCliExec = async (_command, _args, env) => {
+    seen = env;
+    return { code: 0, stdout: '[]', stderr: '' };
+  };
+  const previous = process.env.OPENCLI_TOKEN;
+  process.env.OPENCLI_TOKEN = 'bare-fallback-canary-2342';
+  try {
+    const worker = createOpenCliSocialWorker(exec);
+    const [plan] = await worker.plans(makeRequest(), {});
+    assert.ok(plan);
+    await plan.execute();
+    assert.equal(seen?.['OPENCLI_TOKEN'], 'bare-fallback-canary-2342');
+  } finally {
+    if (previous === undefined) delete process.env.OPENCLI_TOKEN;
+    else process.env.OPENCLI_TOKEN = previous;
+  }
+});

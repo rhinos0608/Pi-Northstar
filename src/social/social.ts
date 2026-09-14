@@ -144,9 +144,9 @@ function defaultWorkers(env: Record<string, string | undefined>): Record<SocialP
     twitter: new SocialTwitterWorker({ parentEnv: env }),
     reddit: createRedditWorker({ env }),
     xiaohongshu: createXiaohongshuWorker({ childEnv: env }),
-    facebook: createOpenCliSocialWorker(),
-    instagram: createOpenCliSocialWorker(),
-    linkedin: createOpenCliSocialWorker(),
+    facebook: createOpenCliSocialWorker({ env }),
+    instagram: createOpenCliSocialWorker({ env }),
+    linkedin: createOpenCliSocialWorker({ env }),
     v2ex: createV2exWorker({ env }),
   };
 }

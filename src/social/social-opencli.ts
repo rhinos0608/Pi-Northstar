@@ -643,6 +643,8 @@ function normalizeRowsFor(
 export interface OpenCliWorkerOptions {
   /** Test seam: replaces the subprocess runner. */
   exec?: OpenCliExec;
+  /** Merged Northstar env (e.g. .env/config). Falls back to process.env when omitted. */
+  env?: Record<string, string | undefined>;
 }
 
 interface OpenCliBackendPlan extends SocialBackendPlan {
@@ -651,6 +653,8 @@ interface OpenCliBackendPlan extends SocialBackendPlan {
 
 export function createOpenCliSocialWorker(exec: OpenCliExec | OpenCliWorkerOptions = {}): SocialPlatformWorker {
   const run: OpenCliExec = typeof exec === 'function' ? exec : exec.exec ?? defaultExec;
+  const env: Record<string, string | undefined> | undefined =
+    typeof exec === 'function' ? undefined : exec.env;
 
   function planFor(request: SocialRequest, context: SocialExecutionContext): OpenCliBackendPlan | null {
     if (request.platform !== 'facebook' && request.platform !== 'instagram' && request.platform !== 'linkedin') {
@@ -702,7 +706,7 @@ export function createOpenCliSocialWorker(exec: OpenCliExec | OpenCliWorkerOptio
           throw new SocialError('upstream_error', 'aborted before dispatch');
         }
         const childArgs = args.slice(1);
-        const childEnv = openCliChildEnv(process.env);
+        const childEnv = openCliChildEnv(env ?? process.env);
         const result = await run('opencli', childArgs, childEnv, activeSignal);
         if (activeSignal?.aborted) {
           throw new SocialError('upstream_error', 'aborted during execution');

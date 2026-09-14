@@ -28,6 +28,58 @@ export function buildServerParameters(env: SearchMcpEnvironment): StdioServerPar
 }
 
 const MAX_STDERR_BYTES = 4096;
+const MAX_TOOL_ERROR_TEXT_CHARS = 2000;
+
+/** Env keys whose values must never echo verbatim in thrown errors. */
+const SECRET_ENV_KEYS = new Set([
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'EXA_API_KEY',
+  'BRAVE_API_KEY',
+  'TAVILY_API_KEY',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GRAPH_SPARQL_TOKEN',
+  'DIFFBOT_TOKEN',
+  'FIRECRAWL_API_KEY',
+  'JINA_API_KEY',
+]);
+
+function isSecretKey(key: string): boolean {
+  if (SECRET_ENV_KEYS.has(key)) return true;
+  return /(TOKEN|API_KEY|SECRET|PASSWORD)/.test(key);
+}
+
+/** Exact-value secrets forwarded to the MCP server process. */
+export function secretValuesFromEnv(env: Record<string, string> | undefined): string[] {
+  if (!env) return [];
+  const values: string[] = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value !== 'string' || value.length === 0) continue;
+    if (isSecretKey(key)) values.push(value);
+  }
+  return values;
+}
+
+export function redactSecrets(text: string, secrets: string[]): string {
+  let redacted = text;
+  const ordered = [...secrets].filter((s) => s.length > 0).sort((a, b) => b.length - a.length);
+  for (const secret of ordered) {
+    if (!redacted.includes(secret)) continue;
+    redacted = redacted.split(secret).join('[redacted]');
+  }
+  return redacted;
+}
+
+/** Typed failure for MCP tool results resolved with isError:true. */
+export class SearchMcpToolError extends Error {
+  readonly code = 'SEARCH_MCP_TOOL_ERROR';
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'SearchMcpToolError';
+    if (options?.cause !== undefined) (this as { cause?: unknown }).cause = options.cause;
+  }
+}
 
 export class SearchMcpClient implements SearchBackend {
   private client: Client | undefined;
@@ -40,8 +92,10 @@ export class SearchMcpClient implements SearchBackend {
 
   async callTool(name: string, args: Record<string, unknown>, options: SearchMcpCallOptions = {}): Promise<SearchMcpCallResult> {
     const client = await this.connect();
+    const secrets = secretValuesFromEnv(this.serverParameters.env as Record<string, string> | undefined);
+    let result: unknown;
     try {
-      return await client.callTool(
+      result = await client.callTool(
         { name, arguments: args },
         undefined,
         {
@@ -51,8 +105,12 @@ export class SearchMcpClient implements SearchBackend {
         },
       );
     } catch (error) {
-      throw withStderr(error, this.stderrTail);
+      throw withStderr(error, this.stderrTail, secrets);
     }
+    if (result !== null && typeof result === 'object' && (result as { isError?: unknown }).isError === true) {
+      throw withStderr(new SearchMcpToolError(toolErrorMessage(name, result, secrets)), this.stderrTail, secrets);
+    }
+    return result as SearchMcpCallResult;
   }
 
   async close(): Promise<void> {
@@ -97,7 +155,7 @@ export class SearchMcpClient implements SearchBackend {
       await client.connect(transport);
     } catch (error) {
       await transport.close().catch(() => undefined);
-      throw withStderr(error, this.stderrTail);
+      throw withStderr(error, this.stderrTail, secretValuesFromEnv(this.serverParameters.env as Record<string, string> | undefined));
     }
 
     const handleClose = transport.onclose;
@@ -119,13 +177,50 @@ function appendBounded(current: string, chunk: string): string {
   return combined.length > MAX_STDERR_BYTES ? combined.slice(-MAX_STDERR_BYTES) : combined;
 }
 
-function withStderr(error: unknown, stderrTail: string): Error {
-  const detail = stderrTail.trim();
-  if (!detail) return error instanceof Error ? error : new Error(String(error));
-  const message = error instanceof Error ? error.message : String(error);
-  const combined = new Error(`${message} (server stderr: ${detail})`);
+export function withStderr(error: unknown, stderrTail: string, secrets: string[] = []): Error {
+  const detail = redactSecrets(stderrTail.trim(), secrets);
+  if (!detail) {
+    if (error instanceof SearchMcpToolError) return error;
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  const message = redactSecrets(error instanceof Error ? error.message : String(error), secrets);
+  const combinedMessage = `${message} (server stderr: ${detail})`;
+  if (error instanceof SearchMcpToolError) {
+    const combined = new SearchMcpToolError(combinedMessage);
+    if (error.cause !== undefined) (combined as { cause?: unknown }).cause = error.cause;
+    return combined;
+  }
+  const combined = new Error(combinedMessage);
   if (error instanceof Error && error.cause !== undefined) (combined as { cause?: unknown }).cause = error.cause;
   return combined;
+}
+
+function toolErrorMessage(toolName: string, result: unknown, secrets: string[]): string {
+  const text = extractToolText(result);
+  const redacted = redactSecrets(text, secrets);
+  const truncated =
+    redacted.length > MAX_TOOL_ERROR_TEXT_CHARS ? `${redacted.slice(0, MAX_TOOL_ERROR_TEXT_CHARS)}…` : redacted;
+  return truncated ? `MCP tool "${toolName}" failed: ${truncated}` : `MCP tool "${toolName}" failed.`;
+}
+
+function extractToolText(result: unknown): string {
+  if (result === null || typeof result !== 'object') return '';
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const item of content) {
+    if (typeof item === 'object' && item !== null && (item as { type?: unknown }).type === 'text') {
+      const text = (item as { text?: unknown }).text;
+      if (typeof text === 'string') parts.push(text);
+    } else if (item !== undefined) {
+      try {
+        parts.push(JSON.stringify(item) ?? String(item));
+      } catch {
+        parts.push(String(item));
+      }
+    }
+  }
+  return parts.join('\n');
 }
 
 function parseArgs(raw: string | undefined): string[] {

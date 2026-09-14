@@ -157,6 +157,40 @@ test('ledger debug snapshot never stores query text, bodies, or secrets', async 
   assert.ok(!snapshot.includes('s3cr3t'), 'secret fragments must not be stored');
 });
 
+test('failed leader retry: late follower coalesces on retry, not false suppressed', async () => {
+  let calls = 0;
+  let releaseRetry!: () => void;
+  const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+  const client = stubClient(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('socket hang up');
+    await retryGate;
+    return { ok: true, marker: 'retry-win' };
+  });
+  const ledger = new WebSearchLedger();
+  const execute = createWebSearchExecute(client, ENV, ledger);
+  const args = { query: 'three-caller race query' };
+  const leader = execute('call-A', args, undefined);
+  const followerB = execute('call-B', args, undefined);
+  const followerC = execute('call-C', args, undefined);
+  // Let the retry leader start its second backend call, then hold it in-flight
+  // so the late follower re-begins onto the retry (coalesced) instead of
+  // racing past. Then release: both followers must share the retry result.
+  // Attach settlement handlers synchronously: the initial leader rejects fast
+  // and the runner flags rejections left unobserved across the gate delay.
+  const allSettled = Promise.allSettled([leader, followerB, followerC]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseRetry();
+  const settled = await allSettled;
+  assert.equal(settled[0]!.status, 'rejected', 'initial leader failure rejects');
+  assert.equal(settled[1]!.status, 'fulfilled', 'first woken follower runs the retry');
+  assert.equal(settled[2]!.status, 'fulfilled', 'late follower must not falsely suppress');
+  if (settled[1]!.status !== 'fulfilled' || settled[2]!.status !== 'fulfilled') throw new Error('expected followers fulfilled');
+  assert.deepEqual(settled[2]!.value, settled[1]!.value, 'late follower shares retry result');
+  assert.notEqual((settled[2]!.value.details as { ledger?: string }).ledger, 'suppressed');
+  assert.equal(calls, 2, 'one initial run plus one retry run');
+});
+
 test('web reject-on-overflow preserved through ledged dispatch', async () => {
   const client = stubClient(() => ({ ok: true }));
   const execute = createWebSearchExecute(client, ENV, new WebSearchLedger());

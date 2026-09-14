@@ -52,10 +52,25 @@ export interface SparqlTransportOptions {
   fetchFn?: SparqlFetchFn;
 }
 
-/** Strip token from an error string; slice to 500 chars. */
+/** Strip token from an error string; strip URL query strings as defense-in-depth; slice to 500 chars. */
 export function redactSparqlError(message: string, token?: string): string {
   let out = token ? message.split(token).join('[REDACTED]') : message;
+  out = out.replace(/(https?:\/\/[^\s"'?#]+)\?[^\s"']*/g, '$1');
   return out.slice(0, ERROR_SLICE_MAX);
+}
+
+/** Error label identifying only origin+path; never search/hash/credentials. */
+export function safeEndpointLabel(url: URL): string {
+  return `${url.origin}${url.pathname}`;
+}
+
+/** Sanitize a raw endpoint string for error echo: origin+path when parseable, else cut at ?/#. */
+export function safeRawEndpointLabel(raw: string): string {
+  try {
+    return safeEndpointLabel(new URL(raw.trim()));
+  } catch {
+    return raw.split(/[?#]/)[0]!;
+  }
 }
 
 function fail(
@@ -85,7 +100,7 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
   try {
     url = new URL(endpoint.trim());
   } catch {
-    fail('unsupported_option', `Invalid SPARQL endpoint URL: ${endpoint}`, token);
+    fail('unsupported_option', `Invalid SPARQL endpoint URL: ${safeRawEndpointLabel(endpoint)}`, token);
   }
   if (url!.protocol !== 'http:' && url!.protocol !== 'https:') {
     fail('unsupported_option', `Disallowed SPARQL endpoint scheme: ${url!.protocol}`, token);
@@ -98,6 +113,7 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
   }
 
   const target = `${url!.origin}${url!.pathname}${url!.search}`;
+  const label = safeEndpointLabel(url!);
   const headers: Record<string, string> = {
     Accept: 'application/sparql-results+json',
     'Content-Type': 'application/x-www-form-urlencoded',
@@ -119,28 +135,28 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
     });
   } catch (error) {
     if (error instanceof SparqlTransportError) throw error;
-    fail('transport_invalid_response', `SPARQL transport failure for ${target}: ${error instanceof Error ? error.message : String(error)}`, token, {
+    fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${error instanceof Error ? error.message : String(error)}`, token, {
       retryable: true,
       cause: error,
     });
   }
 
   if (response!.status >= 300 && response!.status < 400) {
-    fail('transport_invalid_response', `Redirect rejected for ${target}: credentials are never forwarded off the endpoint`, token, {
+    fail('transport_invalid_response', `Redirect rejected for ${label}: credentials are never forwarded off the endpoint`, token, {
       status: response!.status,
     });
   }
 
   let raw: string;
   try {
-    raw = await safeResponseText(response!, target, maxBytes);
+    raw = await safeResponseText(response!, label, maxBytes);
   } catch (error) {
     if (error instanceof SparqlTransportError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (/too large|exceeded size/i.test(message)) {
-      fail('response_too_large', `SPARQL response too large for ${target}`, token, { status: response!.status });
+      fail('response_too_large', `SPARQL response too large for ${label}`, token, { status: response!.status });
     }
-    fail('transport_invalid_response', `SPARQL transport failure for ${target}: ${message}`, token, { status: response!.status });
+    fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${message}`, token, { status: response!.status });
   }
 
   if (!response!.ok) {
@@ -154,7 +170,7 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
       }
     }
     const status = response!.status;
-    fail('transport_invalid_response', `SPARQL API error (HTTP ${status}) for ${target}${detail}`, token, {
+    fail('transport_invalid_response', `SPARQL API error (HTTP ${status}) for ${label}${detail}`, token, {
       status,
       retryable: status >= 500,
     });
@@ -165,7 +181,7 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
     parsed = JSON.parse(raw!);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    fail('transport_invalid_response', `SPARQL transport failure for ${target}: ${message}`, token, { status: response!.status });
+    fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${message}`, token, { status: response!.status });
   }
 
   return parsed as T;

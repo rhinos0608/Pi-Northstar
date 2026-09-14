@@ -11,7 +11,8 @@
 // batch-level %1/%* re-parsing fragility (metacharacters would split naive
 // `echo %1` lines); cmd.exe keeps quoted tokens intact when launching node,
 // and node applies CommandLineToArgvW — the exact rules quoteCmdArg encodes
-// (doubled embedded quotes, doubled trailing backslashes).
+// (doubled embedded quotes, doubled trailing backslashes, `%` split as `"%"`
+// toggles so cmd cannot match %NAME%).
 //
 // POSIX twin-builder coverage stays in test/cli-command.test.ts (pure
 // cmdTwinBody unit tests, portable). This file is the native counterpart.
@@ -48,6 +49,10 @@ function strippedEnv(shimDir: string): Record<string, string> {
     `shim-only PATH must not contain System32, got ${shimDir}`,
   );
   const env: Record<string, string> = { PATH: shimDir, COMSPEC: cmdExe };
+  // Regression canary for cmd.exe %VAR% expansion: the token lives in the child
+  // env (as OPENCLI_TOKEN does for OpenCLI), so any %OPENCLI_TOKEN% argv payload
+  // that cmd expands echoes the canary instead of the literal text.
+  env.OPENCLI_TOKEN = 'SECRET_CANARY_X';
   if (typeof process.env.SystemRoot === 'string' && process.env.SystemRoot.length > 0) {
     env.SystemRoot = process.env.SystemRoot;
   }
@@ -103,12 +108,40 @@ test('spaced shim path resolves and plain args round-trip', { skip: requiresWin3
 test('cmd metacharacters & | < > ^ % stay literal', { skip: requiresWin32Native }, async () => {
   await withSpacedShimDir(async (dir) => {
     await writeFile(join(dir, 'payload.cmd'), forwardShimBody(process.execPath));
-    // quoteCmdArg leaves % untouched: the pre-quoted argv rides the /c line
-    // into this shim, whose `%*` forwarding substitutes arguments without a
-    // second expansion pass, so %NAME% sequences (including token-shaped
-    // payloads) survive literally end-to-end.
+    // quoteCmdArg splits every `%` as `"%"` toggles: the inserted quotes poison
+    // cmd's %NAME% match on the /c line (a name containing `"` never resolves),
+    // while CommandLineToArgvW strips the toggles — so %NAME% sequences
+    // (including token-shaped payloads) survive literally end-to-end even when
+    // the name is defined in the child env (see strippedEnv canary).
     const args = ['a&b|c<d>e^f%g', '100%', 'a%b', 'search %OPENCLI_TOKEN% done'];
     assert.deepEqual(await roundTrip(dir, args), args);
+  });
+});
+
+test('defined %VAR% payloads echo literally (child-env canary never leaks)', { skip: requiresWin32Native }, async () => {
+  await withSpacedShimDir(async (dir) => {
+    await writeFile(join(dir, 'payload.cmd'), forwardShimBody(process.execPath));
+    // OPENCLI_TOKEN, PATH, and COMSPEC are all defined in the stripped child
+    // env: without the `"%"` split, cmd.exe would expand these on the /c line
+    // (even inside quotes) and the shim would echo the secret, not the text.
+    const args = [
+      'search %OPENCLI_TOKEN% done',
+      '%OPENCLI_TOKEN%',
+      'pre %OPENCLI_TOKEN% post',
+      '%PATH%',
+      '%COMSPEC%',
+      '%UNDEFINED_PI_VAR_XYZ%',
+      '100%',
+      'a%b',
+      '%',
+      '%%',
+    ];
+    const echoed = await roundTrip(dir, args);
+    assert.deepEqual(echoed, args);
+    assert.ok(
+      !JSON.stringify(echoed).includes('SECRET_CANARY_X'),
+      'canary value must not leak into argv',
+    );
   });
 });
 

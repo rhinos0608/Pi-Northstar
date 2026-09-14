@@ -223,19 +223,38 @@ export function createWebSearchExecute(
     if (begun.status === 'suppressed') return priorSearchResult('suppressed');
     if (begun.status === 'blocked') return priorSearchResult('blocked');
     if (begun.status === 'coalesced') {
-      try {
-        const shared = await begun.promise;
-        if (isAgentToolResult(shared)) return shared;
-        // Leader ran untracked (active cap) or resolved without a result:
-        // fall through to re-begin.
-      } catch {
+      // Follow-and-retry loop: after a leader failure one follower wins the
+      // retry run while later followers coalesce onto that retry. A single
+      // re-begin would misreport such late followers as suppressed though no
+      // success was ever recorded. Loop until a terminal state with a cap.
+      let pending: Promise<unknown> = begun.promise;
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        try {
+          const shared = await pending;
+          if (isAgentToolResult(shared)) return shared;
+          // Leader ran untracked (active cap) or resolved without a result:
+          // fall through to re-begin.
+        } catch {
+          if (signal?.aborted) throw abortLedgerError();
+          // Leader failed or cancelled: fall through to re-begin, which applies
+          // the retry budget (run) or the failure block (blocked/suppressed).
+        }
         if (signal?.aborted) throw abortLedgerError();
-        // Leader failed or cancelled: fall through to re-begin, which applies
-        // the retry budget (run) or the failure block (blocked/suppressed).
+        const next = ledger.begin(queries, options, signal);
+        if (next.status === 'run') {
+          return runLedgeredSearch({ client, env, ledger, key: next.key, params: current, signal });
+        }
+        if (next.status === 'coalesced') {
+          pending = next.promise;
+          continue;
+        }
+        // blocked/suppressed here are terminal: success recorded or retry
+        // budget exhausted. Preserve existing pointer semantics.
+        return priorSearchResult(next.status === 'blocked' ? 'blocked' : 'suppressed');
       }
-      const next = ledger.begin(queries, options, signal);
-      if (next.status !== 'run') return priorSearchResult(next.status === 'blocked' ? 'blocked' : 'suppressed');
-      return runLedgeredSearch({ client, env, ledger, key: next.key, params: current, signal });
+      if (signal?.aborted) throw abortLedgerError();
+      // Livelock cap hit: fail closed without inventing a false suppression.
+      throw new Error('Search coalescing did not settle: too many leader handoffs');
     }
     return runLedgeredSearch({ client, env, ledger, key: begun.key, params: current, signal });
   };
