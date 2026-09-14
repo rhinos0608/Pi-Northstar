@@ -248,16 +248,15 @@ def main():
 
     global model_name_arg, _auth_token
     model_name_arg = args.model
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     # Manager handshake: token line on stdin enables auth; absent (standalone
     # runs) keeps the server unauthenticated. The value itself is never logged.
     _auth_token = _read_stdin_token()
     logging.getLogger("sidecar").info(
         "Sidecar auth enabled" if _auth_token else "Sidecar auth disabled (no token on stdin)"
-    )
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
     print(f"SIDECAR_PORT={args.port}", flush=True)

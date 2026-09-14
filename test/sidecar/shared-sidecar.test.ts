@@ -18,6 +18,12 @@ const TEST_PORT = 34567;
 class MockChildProcess extends EventEmitter {
   public killedSignal: string | undefined;
   public readonly stdout = new EventEmitter();
+  public readonly stdin = {
+    write: (_chunk: string, cb?: (err?: Error | null) => void): boolean => {
+      setImmediate(() => cb?.(null));
+      return true;
+    },
+  };
   public kill(signal?: string): boolean {
     this.killedSignal = signal;
     return true;
@@ -143,6 +149,28 @@ test('local acquire returns the singleton auth token', async () => {
     assert.equal(typeof acquired.apiToken, 'string');
     assert.match(acquired.apiToken!, /^[0-9a-f]{64}$/);
     assert.equal(acquired.apiToken, manager.getAuthToken());
+  } finally {
+    acquired.release();
+  }
+});
+
+test('local acquire returns a provider that tracks the live manager token', async () => {
+  const acquired = await acquireEmbeddingSidecar({});
+  try {
+    const manager = __peekSharedSidecarForTests();
+    assert.ok(manager);
+    assert.equal(typeof acquired.apiTokenProvider, 'function');
+    // Provider matches the live token at acquisition time.
+    assert.equal(acquired.apiTokenProvider!(), manager.getAuthToken());
+    // Provider is dynamic: after stop() clears the manager token the
+    // provider reflects undefined while the apiToken snapshot is stale.
+    // (stop() here targets the singleton directly; the handle stays open.)
+    const stopping = manager.stop();
+    currentChild?.emit('exit', 0, 'SIGTERM');
+    await stopping;
+    assert.equal(manager.getAuthToken(), undefined);
+    assert.equal(acquired.apiTokenProvider!(), undefined);
+    assert.match(acquired.apiToken ?? '', /^[0-9a-f]{64}$/);
   } finally {
     acquired.release();
   }

@@ -22,9 +22,17 @@ export type SharedSidecarEnv = Record<string, string | undefined>;
 export interface AcquiredSidecar {
   /** Base URL for EmbeddingClient (external URL or local singleton URL). */
   baseUrl: string;
-  /** Local-singleton auth token for EmbeddingClient; undefined on the
-   *  external path (client falls back to its existing env-based token). */
+  /** Local-singleton auth token snapshot at acquisition, for callers that
+   *  construct short-lived clients (existing web.ts / web-sitemap.ts call
+   *  sites pass this through unchanged). Long-lived clients should prefer
+   *  `apiTokenProvider`, which re-reads the manager on every request and
+   *  survives restarts that mint a fresh token. Undefined on the external
+   *  path (client falls back to its existing env-based token). */
   apiToken?: string;
+  /** Dynamic per-request token source for the local path: re-reads the
+   *  singleton manager's current token on each call. Undefined on the
+   *  external path. The token value is never logged. */
+  apiTokenProvider?: () => string | undefined;
   /** True when an external URL was used and no local process is involved. */
   external: boolean;
   /** Idempotent: decrements the refcount; never stops the process. */
@@ -137,9 +145,15 @@ export async function acquireEmbeddingSidecar(env?: SharedSidecarEnv): Promise<A
   installShutdownHook();
   let released = false;
   const apiToken = candidate.getAuthToken();
+  // Provider closure re-reads the live manager each call so long-lived
+  // EmbeddingClient instances track restarts (fresh token per start).
+  // The apiToken snapshot stays for existing call sites that spread it into
+  // short-lived clients; no web.ts / web-sitemap.ts change required.
+  const apiTokenProvider = (): string | undefined => candidate.getAuthToken();
   return {
     baseUrl: candidate.getBaseUrl(),
     ...(apiToken !== undefined ? { apiToken } : {}),
+    apiTokenProvider,
     external: false,
     release: () => {
       if (released) return;

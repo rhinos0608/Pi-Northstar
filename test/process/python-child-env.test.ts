@@ -201,6 +201,14 @@ class SmMockChildProcess extends EventEmitter {
   public killedSignal: string | undefined;
   public readonly stdout = new EventEmitter();
   public readonly stderr = new EventEmitter();
+  // Faithful to real spawn stdio ['pipe', ...]: stdin pipe always present;
+  // write() honors the Node Writable callback contract.
+  public readonly stdin = {
+    write: (_chunk: string, cb?: (err?: Error | null) => void): boolean => {
+      setImmediate(() => cb?.(null));
+      return true;
+    },
+  };
 
   constructor() {
     super();

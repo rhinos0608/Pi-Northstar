@@ -2,6 +2,11 @@ export interface EmbeddingClientOptions {
   baseUrl?: string;
   /** Explicit per-instance token (local sidecar handshake). Wins over env. */
   apiToken?: string;
+  /** Dynamic per-request token source. When given, it wins over `apiToken`
+   *  on every request: the provider is called fresh for each request so
+   *  long-lived clients survive sidecar restarts (which mint a new token).
+   *  The token value is never logged. */
+  apiTokenProvider?: () => string | undefined;
   timeout?: number;
   maxRetries?: number;
   signal?: AbortSignal;
@@ -52,6 +57,7 @@ export class EmbeddingClient {
   private maxRetries: number;
   private signal: AbortSignal | undefined;
   private apiToken: string | undefined;
+  private readonly apiTokenProvider: (() => string | undefined) | undefined;
 
   constructor(options?: EmbeddingClientOptions) {
     this.baseUrl = options?.baseUrl ?? DEFAULT_BASE_URL;
@@ -60,6 +66,7 @@ export class EmbeddingClient {
     this.signal = options?.signal;
     // Explicit injection wins; existing env fallback for external sidecars unchanged.
     this.apiToken = options?.apiToken || process.env.EMBEDDING_SIDECAR_API_TOKEN || undefined;
+    this.apiTokenProvider = options?.apiTokenProvider;
   }
 
   async embed(text: string): Promise<Float32Array> {
@@ -90,14 +97,24 @@ export class EmbeddingClient {
   async health(): Promise<EmbeddingHealthResponse> {
     return this.request<EmbeddingHealthResponse>(
       `${this.baseUrl}/v1/health`,
-      { method: 'GET', headers: this.apiToken ? { Authorization: `Bearer ${this.apiToken}` } : {} },
+      { method: 'GET', headers: this.buildAuthHeaders() },
     );
   }
 
+  /** Resolve the current token per request. The provider (when given) wins
+   *  over the construction-time `apiToken` snapshot on every call. */
+  private currentToken(): string | undefined {
+    if (this.apiTokenProvider) return this.apiTokenProvider();
+    return this.apiToken;
+  }
+
+  private buildAuthHeaders(): Record<string, string> {
+    const token = this.currentToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
   private buildHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.apiToken) headers.Authorization = `Bearer ${this.apiToken}`;
-    return headers;
+    return { 'Content-Type': 'application/json', ...this.buildAuthHeaders() };
   }
 
   private async request<T>(url: string, options: RequestInit): Promise<T> {

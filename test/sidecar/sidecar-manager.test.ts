@@ -33,12 +33,30 @@ interface SpawnRecord {
 
 const spawnRecords: SpawnRecord[] = [];
 
+class MockStdin extends EventEmitter {
+  public written: string[] = [];
+  /** Failure injection for token-delivery tests. */
+  public writeBehavior: 'ok' | 'throw' | 'error' = 'ok';
+
+  write(chunk: string, cb?: (err?: Error | null) => void): boolean {
+    if (this.writeBehavior === 'throw') throw new Error('EPIPE: stdin write failed');
+    if (this.writeBehavior === 'error') {
+      setImmediate(() => cb?.(new Error('EPIPE: stdin write failed')));
+      return true;
+    }
+    this.written.push(String(chunk));
+    setImmediate(() => cb?.(null));
+    return true;
+  }
+}
+
 class MockChildProcess extends EventEmitter {
   public pid = 98765;
   public killed = false;
   public killedSignal: string | undefined;
   public readonly stdout = new EventEmitter();
   public readonly stderr = new EventEmitter();
+  public readonly stdin: MockStdin | undefined = new MockStdin();
 
   kill(signal?: string): boolean {
     this.killed = true;
@@ -525,7 +543,13 @@ function createTokenManager() {
   const mockSpawn = (command: string, args: string[], options: unknown) => {
     records.push({ command, args, options });
     const c = new MockChildProcess();
-    (c as any).stdin = { write: (data: string) => { written.push(String(data)); return true; } };
+    (c as any).stdin = {
+      write: (data: string, cb?: (err?: Error | null) => void) => {
+        written.push(String(data));
+        setImmediate(() => cb?.(null));
+        return true;
+      },
+    };
     child = c;
     setImmediate(() => {
       c.stdout.emit('data', Buffer.from(`SIDECAR_PORT=${TEST_PORT}\n`));
@@ -598,4 +622,61 @@ test('start throws on startup timeout', async () => {
     (mgr.health().error ?? '').toLowerCase().includes('timed out'),
     'error should mention timeout',
   );
+});
+
+test('start fails when stdin is missing (token delivery is mandatory)', async () => {
+  let child: MockChildProcess | undefined;
+  const mockSpawn = () => {
+    const c = new MockChildProcess();
+    (c as any).stdin = undefined;
+    child = c;
+    setImmediate(() => {
+      c.stdout.emit('data', Buffer.from(`SIDECAR_PORT=${TEST_PORT}\n`));
+    });
+    return c;
+  };
+  const mgr = new SidecarManager({
+    startupTimeout: 5000,
+    initialBackoffMs: 100,
+    maxBackoffMs: 5000,
+    _spawn: mockSpawn as any,
+    _createServer: (() => new MockNetServer()) as any,
+  });
+  const mock = okFetch();
+  _mocks.push({ orig: globalThis.fetch, mock });
+  globalThis.fetch = mock;
+
+  await assert.rejects(() => mgr.start(), /stdin unavailable/i);
+  assert.equal(mgr.health().status, 'error');
+  assert.equal(mgr.getAuthToken(), undefined, 'failed start must not keep a token');
+  assert.equal(child!.killed, true, 'failed start must kill the child');
+  assert.equal((mgr as any).process, undefined, 'failed start owns no process');
+});
+
+test('start fails when the stdin write fails', async () => {
+  let child: MockChildProcess | undefined;
+  const mockSpawn = () => {
+    const c = new MockChildProcess();
+    c.stdin!.writeBehavior = 'throw';
+    child = c;
+    setImmediate(() => {
+      c.stdout.emit('data', Buffer.from(`SIDECAR_PORT=${TEST_PORT}\n`));
+    });
+    return c;
+  };
+  const failing = new SidecarManager({
+    startupTimeout: 5000,
+    initialBackoffMs: 100,
+    maxBackoffMs: 5000,
+    _spawn: mockSpawn as any,
+    _createServer: (() => new MockNetServer()) as any,
+  });
+  const mock = okFetch();
+  _mocks.push({ orig: globalThis.fetch, mock });
+  globalThis.fetch = mock;
+
+  await assert.rejects(() => failing.start(), /auth token/i);
+  assert.equal(failing.health().status, 'error');
+  assert.equal(failing.getAuthToken(), undefined, 'failed start must not keep a token');
+  assert.equal(child!.killed, true, 'failed start must kill the child');
 });

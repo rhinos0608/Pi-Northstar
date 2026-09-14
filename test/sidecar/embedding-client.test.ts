@@ -178,6 +178,26 @@ test('no token sends no Authorization header', async () => {
   }
 });
 
+test('apiTokenProvider wins over apiToken snapshot per request', async () => {
+  const seen: Array<string | undefined> = [];
+  handler = (req, res) => {
+    seen.push(req.headers.authorization as string | undefined);
+    jsonResponse(res, { status: 'ok' });
+  };
+  let current = 'token-v1';
+  const client = new EmbeddingClient({
+    baseUrl,
+    apiToken: 'stale-snapshot',
+    apiTokenProvider: () => current,
+  });
+  await client.health();
+  // Simulate a sidecar restart minting a fresh token: the same long-lived
+  // client must send the new token without reconstruction.
+  current = 'token-v2';
+  await client.health();
+  assert.deepEqual(seen, ['Bearer token-v1', 'Bearer token-v2']);
+});
+
 // ---------------------------------------------------------------------------
 // Timeout
 // ---------------------------------------------------------------------------

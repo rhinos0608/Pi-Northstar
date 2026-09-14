@@ -191,13 +191,17 @@ export class SidecarManager {
         // Per-start 256-bit auth token, delivered ONLY via the child's stdin
         // pipe (never argv/env — the child env is allowlisted and would strip
         // it anyway). Written before the port-line wait so the sidecar has it
-        // before serving. Missing stdin (e.g. mocked spawns) leaves the
-        // sidecar unauthenticated; the token is still tracked for the client.
+        // before serving. Delivery is mandatory: a missing stdin or a write
+        // failure is a startup failure (the child would otherwise run
+        // unauthenticated while the manager reports running).
         authToken = randomBytes(32).toString('hex');
         this._authToken = authToken;
         try {
-          currentChild.stdin?.write(`SIDECAR_TOKEN=${authToken}\n`);
-        } catch { /* stdin unavailable — sidecar runs unauthenticated */ }
+          await this.writeAuthToken(currentChild, authToken);
+        } catch (err) {
+          portLinePromise.catch(() => {});
+          throw err;
+        }
 
         // Parse SIDECAR_PORT=<port> line from stdout
         await portLinePromise;
@@ -256,6 +260,57 @@ export class SidecarManager {
     // Suppress unhandled rejection: errors propagate via return value and are handled by caller
     this._startPromise.catch(() => {});
     return this._startPromise;
+  }
+
+  /** Deliver the per-start auth token on the child's stdin pipe.
+   *  Rejects when stdin is missing or the write fails — callers treat this
+   *  as a startup failure (kill + cleanup via the start() catch block) and
+   *  never mark the sidecar running. The token value is never logged. */
+  private writeAuthToken(child: ChildProcess, authToken: string): Promise<void> {
+    const stdin = child.stdin;
+    if (!stdin) {
+      return Promise.reject(new Error('Sidecar stdin unavailable: cannot deliver auth token'));
+    }
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const onError = (err: Error): void => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`Failed to deliver sidecar auth token: ${err.message}`));
+        }
+      };
+      // stdin is a pipe Writable in production; test doubles may expose
+      // only write(). Listener attachment is best-effort for that reason.
+      const maybeEmitter = stdin as unknown as {
+        once?: (event: string, listener: (err: Error) => void) => void;
+        removeListener?: (event: string, listener: (err: Error) => void) => void;
+      };
+      maybeEmitter.once?.('error', onError);
+      const done = (err?: Error | null): void => {
+        maybeEmitter.removeListener?.('error', onError);
+        if (settled) return;
+        settled = true;
+        if (err) reject(new Error(`Failed to deliver sidecar auth token: ${err.message}`));
+        else resolve();
+      };
+      let ok: boolean;
+      try {
+        ok = stdin.write(`SIDECAR_TOKEN=${authToken}\n`, done);
+      } catch (err) {
+        maybeEmitter.removeListener?.('error', onError);
+        settled = true;
+        reject(new Error(`Failed to deliver sidecar auth token: ${err instanceof Error ? err.message : String(err)}`));
+        return;
+      }
+      // Backpressure: wait for drain before resolving.
+      if (!ok) {
+        if (typeof maybeEmitter.once === 'function') {
+          maybeEmitter.once('drain' as string, () => done());
+        } else {
+          done();
+        }
+      }
+    });
   }
 
   private async waitForPortLine(child: ChildProcess, expectedPort: number): Promise<void> {
