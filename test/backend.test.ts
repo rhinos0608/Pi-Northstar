@@ -38,7 +38,7 @@ test('CliSearchBackend child process works from a foreign cwd', async () => {
   }
 });
 
-test('buildCliEnvironment forwards CODE* env overrides and blocks unrelated secrets', () => {
+test('buildCliEnvironment forwards CODE* env overrides to web_search and blocks unrelated secrets', () => {
   const env = buildCliEnvironment({
     PATH: '/usr/bin',
     HOME: '/home/user',
@@ -47,7 +47,7 @@ test('buildCliEnvironment forwards CODE* env overrides and blocks unrelated secr
     CODEX_HOME: '/tmp/codex-home',
     OTHER_SECRET_TOKEN: 'should-not-pass',
     UNRELATED_API_KEY: 'should-not-pass',
-  });
+  }, 'web_search');
   assert.equal(env.CODEX_ACCESS_TOKEN, 'codex-token-abc');
   assert.equal(env.CODEX_ACCOUNT_ID, 'acct-123');
   assert.equal(env.CODEX_HOME, '/tmp/codex-home');
@@ -72,7 +72,7 @@ test('buildCliEnvironment forwards reach backend auth but blocks Twitter/XHS coo
     BROWSER_CDP_ENDPOINT: 'http://127.0.0.1:9222',
     BROWSER_EXECUTABLE_PATH: '/Applications/Chromium.app/Contents/MacOS/Chromium',
     DATABASE_URL: 'secret',
-  }), {
+  }, 'reach_status'), {
     PATH: '/usr/bin',
     HTTPS_PROXY: 'http://proxy.example',
     REDDIT_COOKIE: 'session=secret',
@@ -86,14 +86,14 @@ test('buildCliEnvironment forwards reach backend auth but blocks Twitter/XHS coo
   });
 });
 
-test('buildCliEnvironment forwards REDDIT_COOKIE into the Pi-owned CLI but blocks unrelated secrets', () => {
+test('buildCliEnvironment forwards REDDIT_COOKIE into the reach child but blocks unrelated secrets', () => {
   const env = buildCliEnvironment({
     PATH: '/usr/bin',
     REDDIT_COOKIE: 'session=reddit-cookie-secret',
     STRIPE_API_KEY: 'stripe-secret',
     AWS_SECRET_ACCESS_KEY: 'aws-secret',
     DATABASE_URL: 'postgres://u:p@db',
-  });
+  }, 'reach_status');
   // REDDIT_COOKIE is allowed: it is the only path by which a logged-in Reddit
   // session reaches the Pi-owned CLI process for the native cookie fallback.
   assert.equal(env.REDDIT_COOKIE, 'session=reddit-cookie-secret');
@@ -110,7 +110,7 @@ test('buildCliEnvironment blocks TWITTER_COOKIE/TWITTER_AUTH_TOKEN like unrelate
     TWITTER_CT0: 'tw-secret',
     REDDIT_COOKIE: 'session=reddit-cookie-secret',
     STRIPE_API_KEY: 'stripe-secret',
-  });
+  }, 'reach_status');
   // Dead Twitter/XHS Pi-cookie plumbing: Stage 2 workers never consume
   // imported Pi cookie state, so these secrets must not reach the CLI child.
   assert.equal(env.TWITTER_COOKIE, undefined);
@@ -120,14 +120,14 @@ test('buildCliEnvironment blocks TWITTER_COOKIE/TWITTER_AUTH_TOKEN like unrelate
   assert.equal(env.STRIPE_API_KEY, undefined);
 });
 
-test('buildCliEnvironment forwards GH_TOKEN alongside GITHUB_TOKEN (github auth parity)', () => {
+test('buildCliEnvironment forwards GH_TOKEN alongside GITHUB_TOKEN to the github child', () => {
   // github-contract accepts GITHUB_TOKEN ?? GH_TOKEN; the CLI child must
   // receive both spellings or GH_TOKEN-only operators lose auth in children.
   const env = buildCliEnvironment({
     PATH: '/usr/bin',
     GITHUB_TOKEN: 'ghp-token',
     GH_TOKEN: 'ghp-token-alias',
-  });
+  }, 'github');
   assert.equal(env.GITHUB_TOKEN, 'ghp-token');
   assert.equal(env.GH_TOKEN, 'ghp-token-alias');
 });

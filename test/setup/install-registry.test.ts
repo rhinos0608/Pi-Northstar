@@ -181,3 +181,103 @@ test('installer pins mcporter npm spec to 0.13.12 with post-install verification
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// Deterministic supply-chain fuzz: hostile package/version/pin-like strings travel
+// only via the public `channels` selector; fixed argv and exact version pins must
+// be unchanged, and hostile version outputs must be rejected (failed) or inert
+// (skipped) — never reported installed/present. Local POSIX shims only; no
+// network, no live installers, no new dependencies.
+function hostilePlantingInstaller(dir: string, binary: string, hostileVersion: string): string {
+  // Quoted heredoc: no expansion, so $, `, ", and ; in the hostile version
+  // print literally instead of executing inside the planted binary probe.
+  const target = shQuote(`${dir}/${binary}`);
+  // Absolute /bin/cat: the installer child env PATH is the shim dir only,
+  // so a bare `cat` does not resolve (same reason plantingScript uses
+  // absolute /bin/chmod). An unresolved `cat` would leave an empty — and
+  // unspawnable (ENOEXEC) — planted binary behind.
+  return `#!/bin/sh\n/bin/cat > ${target} <<'PI_HOSTILE_EOF'\n#!/bin/sh\nprintf '%s\\n' ${shQuote(hostileVersion)}\nPI_HOSTILE_EOF\n/bin/chmod 700 ${target}\nexit 0\n`;
+}
+
+test('hostile channels cannot change fixed twitter-cli argv', { skip: requiresPosixInstallShim }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-hostile-'));
+  try {
+    await writeFile(join(dir, 'pipx'), plantingScript(dir, 'twitter', '0.8.5'));
+    await chmod(join(dir, 'pipx'), 0o700);
+
+    const hostile = [
+      'twitter-cli==9.9.9',
+      'twitter; echo pwned',
+      '$(evil)',
+      'twitter-cli==0.8.5 --user',
+      '@jackwener/opencli@9.9.9',
+      '../../etc/passwd',
+    ];
+    const result = await runSetupInstall('install_channels', { PATH: dir }, ['twitter', ...hostile]);
+    const twitterCli = result.installers.find((installer) => installer.id === 'twitter-cli');
+    assert.equal(twitterCli?.status, 'installed');
+    assert.ok(
+      twitterCli?.command?.some((part) => part.includes('twitter-cli==0.8.5')),
+      `pin drifted under hostile channels: ${JSON.stringify(twitterCli?.command)}`,
+    );
+    for (const installer of result.installers) {
+      const argv = (installer.command ?? []).join(' ');
+      for (const marker of ['9.9.9', 'pwned', '$(', '--user', '../']) {
+        assert.ok(!argv.includes(marker), `hostile marker leaked into argv: ${argv}`);
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('hostile version outputs are rejected, never verified', { skip: requiresPosixInstallShim }, async () => {
+  // Every entry must fail exact-match verification: either the bare `expected`
+  // or `<binary> <expected>` form. ('0.8.5 ' with trailing space is omitted:
+  // the probe trims it to an exact match and legitimately verifies.)
+  const hostileVersions = [
+    '9.9.9',
+    '0.8.5; echo pwned',
+    'v0.8.5',
+    'twitter  0.8.5',
+    'Twitter 0.8.5',
+    '0.8.5\ninjected',
+    '0.8.5 evil',
+    '',
+    '--version',
+  ];
+  for (const hostileVersion of hostileVersions) {
+    const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-hostile-ver-'));
+    try {
+      await writeFile(join(dir, 'pipx'), hostilePlantingInstaller(dir, 'twitter', hostileVersion));
+      await chmod(join(dir, 'pipx'), 0o700);
+
+      const result = await runSetupInstall('install_channels', { PATH: dir }, ['twitter']);
+      const twitterCli = result.installers.find((installer) => installer.id === 'twitter-cli');
+      assert.equal(twitterCli?.status, 'failed', `hostile version accepted: ${JSON.stringify(hostileVersion)}`);
+      assert.match(twitterCli?.message ?? '', /expected exact 0\.8\.5/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('pre-existing hostile binary without installer is inert (never present)', { skip: requiresPosixInstallShim }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-installer-hostile-pre-'));
+  try {
+    // A drifted/hostile `twitter` binary is already on PATH, but no package
+    // manager (pipx/uv/python3/npm) resolves in this isolated PATH, so the
+    // installer cannot reinstall and must not claim the binary is valid.
+    await writeFile(join(dir, 'twitter'), `#!/bin/sh\nprintf '%s\\n' ${shQuote('9.9.9; echo pwned')}\n`);
+    await chmod(join(dir, 'twitter'), 0o700);
+
+    const result = await runSetupInstall('install_channels', { PATH: dir }, ['twitter']);
+    const twitterCli = result.installers.find((installer) => installer.id === 'twitter-cli');
+    assert.ok(
+      twitterCli?.status === 'skipped' || twitterCli?.status === 'failed',
+      `hostile pre-existing binary claimed usable: ${twitterCli?.status}`,
+    );
+    assert.equal(twitterCli?.command, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -4,25 +4,78 @@ import { cliToolError, runCommand } from '../../src/cli/cli.js';
 import { buildCliEnvironment } from '../../src/cli/cli-backend.js';
 import { SocialError, type SocialErrorCode } from '../../src/social/social-contract.js';
 
-test('buildCliEnvironment forwards optional research API keys when set', () => {
-  const env = buildCliEnvironment({
+test('buildCliEnvironment scopes research API keys to the research child', () => {
+  const research = buildCliEnvironment({
     SEMANTIC_SCHOLAR_API_KEY: 's2-key',
     OPENALEX_API_KEY: 'openalex-key',
     NCBI_API_KEY: 'ncbi-key',
     NCBI_EMAIL: 'research@example.com',
     STACKEXCHANGE_KEY: 'se-key',
     UNRELATED_SECRET: 'never-forwarded',
+  }, 'research');
+  assert.equal(research.SEMANTIC_SCHOLAR_API_KEY, 's2-key');
+  assert.equal(research.OPENALEX_API_KEY, 'openalex-key');
+  assert.equal(research.NCBI_API_KEY, 'ncbi-key');
+  assert.equal(research.NCBI_EMAIL, 'research@example.com');
+  assert.equal(research.STACKEXCHANGE_KEY, 'se-key');
+  assert.equal(research.UNRELATED_SECRET, undefined);
+});
+
+test('buildCliEnvironment keeps research keys out of unrelated children', () => {
+  const web = buildCliEnvironment({
+    SEMANTIC_SCHOLAR_API_KEY: 'SENTINEL_S2_abc123xyz',
+    TAVILY_API_KEY: 'SENTINEL_TAVILY_abc123xyz',
+    GITHUB_TOKEN: 'SENTINEL_GITHUB_abc123xyz',
+    REDDIT_CLIENT_SECRET: 'SENTINEL_REDDIT_abc123xyz',
+  }, 'web_search');
+  assert.equal(web.TAVILY_API_KEY, 'SENTINEL_TAVILY_abc123xyz');
+  assert.equal(web.SEMANTIC_SCHOLAR_API_KEY, undefined);
+  assert.equal(web.GITHUB_TOKEN, undefined);
+  assert.equal(web.REDDIT_CLIENT_SECRET, undefined);
+
+  const github = buildCliEnvironment({
+    GITHUB_TOKEN: 'SENTINEL_GITHUB_abc123xyz',
+    TAVILY_API_KEY: 'SENTINEL_TAVILY_abc123xyz',
+    DIFFBOT_TOKEN: 'SENTINEL_DIFFBOT_abc123xyz',
+  }, 'github');
+  assert.equal(github.GITHUB_TOKEN, 'SENTINEL_GITHUB_abc123xyz');
+  assert.equal(github.TAVILY_API_KEY, undefined);
+  assert.equal(github.DIFFBOT_TOKEN, undefined);
+
+  const graph = buildCliEnvironment({
+    GRAPH_SPARQL_ENDPOINT: 'https://sparql.example.org/',
+    GRAPH_SPARQL_TOKEN: 'SENTINEL_SPARQL_abc123xyz',
+    GITHUB_TOKEN: 'SENTINEL_GITHUB_abc123xyz',
+  }, 'graph');
+  assert.equal(graph.GRAPH_SPARQL_ENDPOINT, 'https://sparql.example.org/');
+  assert.equal(graph.GRAPH_SPARQL_TOKEN, 'SENTINEL_SPARQL_abc123xyz');
+  assert.equal(graph.GITHUB_TOKEN, undefined);
+
+  const fetchEnv = buildCliEnvironment({
+    JINA_API_KEY: 'SENTINEL_JINA_abc123xyz',
+    GITHUB_TOKEN: 'SENTINEL_GITHUB_abc123xyz',
+    REDDIT_COOKIE: 'SENTINEL_REDDIT_abc123xyz',
+  }, 'fetch');
+  assert.equal(fetchEnv.JINA_API_KEY, 'SENTINEL_JINA_abc123xyz');
+  assert.equal(fetchEnv.GITHUB_TOKEN, undefined);
+  assert.equal(fetchEnv.REDDIT_COOKIE, undefined);
+});
+
+test('buildCliEnvironment gives unknown tools base config only', () => {
+  const env = buildCliEnvironment({
+    PATH: '/usr/bin',
+    PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS: '5000',
+    GITHUB_TOKEN: 'SENTINEL_GITHUB_abc123xyz',
+    TAVILY_API_KEY: 'SENTINEL_TAVILY_abc123xyz',
   });
-  assert.equal(env.SEMANTIC_SCHOLAR_API_KEY, 's2-key');
-  assert.equal(env.OPENALEX_API_KEY, 'openalex-key');
-  assert.equal(env.NCBI_API_KEY, 'ncbi-key');
-  assert.equal(env.NCBI_EMAIL, 'research@example.com');
-  assert.equal(env.STACKEXCHANGE_KEY, 'se-key');
-  assert.equal(env.UNRELATED_SECRET, undefined);
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS, '5000');
+  assert.equal(env.GITHUB_TOKEN, undefined);
+  assert.equal(env.TAVILY_API_KEY, undefined);
 });
 
 test('buildCliEnvironment omits unset research keys', () => {
-  const env = buildCliEnvironment({ PATH: '/usr/bin' });
+  const env = buildCliEnvironment({ PATH: '/usr/bin' }, 'research');
   assert.equal(env.SEMANTIC_SCHOLAR_API_KEY, undefined);
   assert.equal(env.NCBI_EMAIL, undefined);
 });
@@ -75,7 +128,7 @@ test('runCommand validates call args', async () => {
 });
 
 test('runCommand routes call through native tools', async () => {
-  const result = await runCommand(['call', 'agentic_browse', '{"action":"read","url":"file:///etc/passwd"}'], {});
+  const result = await runCommand(['call', 'browse', '{"action":"read","url":"file:///etc/passwd"}'], {});
 
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, 'tool_error');

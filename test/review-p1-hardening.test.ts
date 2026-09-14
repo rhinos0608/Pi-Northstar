@@ -202,9 +202,15 @@ test('CLI parent replaces child-store responseId so surfaced ids resolve locally
   assert.throws(() => tryServeCliCorpusAction(store, { action: 'retrieve', responseId: 'child-store-id' }), /No stored results/);
 });
 
-test('CLI env allowlist forwards the bridge session token', () => {
-  const env = buildCliEnvironment({ PATH: '/bin', PI_SEARCH_CHROME_BRIDGE_TOKEN: 'tok-abc' });
-  assert.equal(env.PI_SEARCH_CHROME_BRIDGE_TOKEN, 'tok-abc');
+test('CLI env allowlist forwards the bridge session token to scoped tool children', () => {
+  // Bridge token rides only fetch/browse/reach-family children (see
+  // CLI_TOOL_CREDENTIALS); unrelated tools and bare calls never receive it.
+  const scoped = buildCliEnvironment({ PATH: '/bin', PI_SEARCH_CHROME_BRIDGE_TOKEN: 'tok-abc' }, 'fetch');
+  assert.equal(scoped.PI_SEARCH_CHROME_BRIDGE_TOKEN, 'tok-abc');
+  const reach = buildCliEnvironment({ PATH: '/bin', PI_SEARCH_CHROME_BRIDGE_TOKEN: 'tok-abc' }, 'reach_status');
+  assert.equal(reach.PI_SEARCH_CHROME_BRIDGE_TOKEN, 'tok-abc');
+  const bare = buildCliEnvironment({ PATH: '/bin', PI_SEARCH_CHROME_BRIDGE_TOKEN: 'tok-abc' });
+  assert.equal(bare.PI_SEARCH_CHROME_BRIDGE_TOKEN, undefined, 'bare calls deny credentials');
   const empty = buildCliEnvironment({ PATH: '/bin' });
   assert.equal(empty.PI_SEARCH_CHROME_BRIDGE_TOKEN, undefined);
 });

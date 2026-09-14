@@ -28,7 +28,7 @@ test('buildCliEnvironment forwards DIFFBOT_* core-path keys when set', () => {
     DIFFBOT_NLP_MAX_CHARS: '100000',
     DIFFBOT_MAX_PROVIDERS: '3',
     DIFFBOT_FALLBACK_BUDGET: '3',
-  });
+  }, 'kg');
   assert.equal(env.DIFFBOT_TOKEN, SENTINEL);
   assert.equal(env.DIFFBOT_SEARCH_SIZE, '10');
   assert.equal(env.DIFFBOT_ENHANCE_SIZE, '1');
@@ -49,7 +49,7 @@ test('buildCliEnvironment forwards FIRECRAWL/JINA keys and web selection config 
     PI_SEARCH_EXTERNAL_FETCH: '1',
     PI_SEARCH_FETCH_BACKENDS: 'firecrawl,jina',
     PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS: '15000',
-  });
+  }, 'fetch');
   assert.equal(env.FIRECRAWL_API_KEY, 'SENTINEL_FIRECRAWL_abc123xyz');
   assert.equal(env.JINA_API_KEY, 'SENTINEL_JINA_abc123xyz');
   assert.equal(env.PI_SEARCH_WEB_BACKENDS, 'exa,tavily');
@@ -101,8 +101,10 @@ test('sentinel: DIFFBOT_* never leak to unrelated child environments', () => {
   for (const key of DIFFBOT_KEYS) {
     assert.equal(pythonEnv[key], undefined, `python child env must not carry ${key}`);
   }
-  const cliEnv = buildCliEnvironment(parent);
-  assert.equal(cliEnv.DIFFBOT_TOKEN, SENTINEL, 'core Pi-Northstar CLI path carries the token');
+  const cliEnv = buildCliEnvironment(parent, 'kg');
+  assert.equal(cliEnv.DIFFBOT_TOKEN, SENTINEL, 'kg tool child carries the token');
+  const bare = buildCliEnvironment(parent);
+  assert.equal(bare.DIFFBOT_TOKEN, undefined, 'no-toolName call denies credentials (deny-by-default)');
   assert.equal(cliEnv.DATABASE_URL, undefined, 'unrelated secrets stay out of the CLI child env');
 });
 
@@ -134,7 +136,7 @@ const NEW_PROVIDER_KEYS = [
 test('buildCliEnvironment forwards new provider keys when set (sentinel)', () => {
   const parent: Record<string, string> = { PATH: '/usr/bin' };
   for (const key of NEW_PROVIDER_KEYS) parent[key] = `SENTINEL_${key}_abc123xyz`;
-  const env = buildCliEnvironment(parent);
+  const env = buildCliEnvironment(parent, 'web_search');
   for (const key of NEW_PROVIDER_KEYS) {
     assert.equal(env[key], `SENTINEL_${key}_abc123xyz`, `${key} must be forwarded to the CLI child`);
   }

@@ -30,7 +30,7 @@ export function buildServerParameters(env: SearchMcpEnvironment): StdioServerPar
 const MAX_STDERR_BYTES = 4096;
 const MAX_TOOL_ERROR_TEXT_CHARS = 2000;
 
-/** SEARCH_MCP_* keys that are non-secret config actually read by this client. Every SEARCH_MCP_* key forwards into child env, so all other SEARCH_MCP_* values are secret-capable. */
+/** SEARCH_MCP_* keys that are non-secret config actually read by this client. Other SEARCH_MCP_* values are secret-capable and never forward implicitly. */
 const BENIGN_SEARCH_MCP_KEYS = new Set([
   'SEARCH_MCP_COMMAND',
   'SEARCH_MCP_ARGS_JSON',
@@ -261,6 +261,11 @@ function parseArgs(raw: string | undefined): string[] {
 }
 
 function toProcessEnvironment(env: SearchMcpEnvironment): Record<string, string> {
+  // Deny-by-default: only listed provider credentials, benign client config,
+  // and explicitly validated forward-list names reach the server process.
+  // There is no SEARCH_MCP_* wildcard: unknown SEARCH_MCP_* values are
+  // secret-capable and never forward implicitly.
+  const forwarded = new Set(parseForwardedEnvironmentKeys(env.SEARCH_MCP_FORWARD_ENV_JSON));
   const allowed = new Set([
     'PATH',
     'HOME',
@@ -268,6 +273,10 @@ function toProcessEnvironment(env: SearchMcpEnvironment): Record<string, string>
     'TMPDIR',
     'TEMP',
     'TMP',
+    'SEARCH_MCP_COMMAND',
+    'SEARCH_MCP_ARGS_JSON',
+    'SEARCH_MCP_CWD',
+    'SEARCH_MCP_FORWARD_ENV_JSON',
     'GITHUB_TOKEN',
     'GH_TOKEN',
     'EXA_API_KEY',
@@ -284,14 +293,17 @@ function toProcessEnvironment(env: SearchMcpEnvironment): Record<string, string>
     'CRAWL4AI_BASE_URL',
     'DEEP_RESEARCH_BASE_URL',
     'DEEP_RESEARCH_MODEL',
-    ...parseForwardedEnvironmentKeys(env.SEARCH_MCP_FORWARD_ENV_JSON),
   ]);
   const entries = Object.entries(env).filter((entry): entry is [string, string] => {
     const [key, value] = entry;
-    return typeof value === 'string' && (allowed.has(key) || key.startsWith('SEARCH_MCP_'));
+    return typeof value === 'string' && (allowed.has(key) || forwarded.has(key));
   });
   return Object.fromEntries(entries);
 }
+
+/** Names that look like credentials and must never ride the forward list. */
+const SECRET_LIKE_NAME_PATTERN = /(TOKEN|KEY|SECRET|PASSWD|PASSWORD|CREDENTIAL|AUTH|BEARER|COOKIE|SESSION)/i;
+const VALID_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function parseForwardedEnvironmentKeys(raw: string | undefined): string[] {
   if (!raw?.trim()) return [];
@@ -307,5 +319,23 @@ function parseForwardedEnvironmentKeys(raw: string | undefined): string[] {
     throw new Error('SEARCH_MCP_FORWARD_ENV_JSON must be a JSON string array.');
   }
 
-  return parsed;
+  // The forward list is an explicit allowlist, not a bypass: reject
+  // secret-like names (they belong in the listed provider credentials, not
+  // in an operator free-form list) and non-benign SEARCH_MCP_* internals
+  // (client config, never child payload). Unlisted values never forward.
+  for (const item of parsed as string[]) {
+    const name = item.trim();
+    if (!VALID_ENV_NAME_PATTERN.test(name)) {
+      throw new Error(`SEARCH_MCP_FORWARD_ENV_JSON must list valid env names, got: ${JSON.stringify(item)}`);
+    }
+    const normalized = name.toUpperCase();
+    if (normalized.startsWith('SEARCH_MCP_') && !BENIGN_SEARCH_MCP_KEYS.has(normalized)) {
+      throw new Error(`SEARCH_MCP_FORWARD_ENV_JSON must not forward SEARCH_MCP_* internals, got: ${name}`);
+    }
+    if (SECRET_LIKE_NAME_PATTERN.test(name)) {
+      throw new Error(`SEARCH_MCP_FORWARD_ENV_JSON must not forward secret-like names, got: ${name}`);
+    }
+  }
+
+  return (parsed as string[]).map((item) => item.trim());
 }

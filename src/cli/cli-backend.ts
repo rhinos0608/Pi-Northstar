@@ -90,10 +90,16 @@ export class CliSearchBackend implements SearchBackend {
         return;
       }
       // Forward the process-local bridge token explicitly at spawn time so
-      // late-bound bridges reach one-shot children without global env writes.
+      // late-bound bridges reach related children without global env writes.
+      // Scoped like buildCliEnvironment: only tool scopes carrying
+      // PI_SEARCH_CHROME_BRIDGE_TOKEN (fetch/browse/reach family) receive it.
       const childEnv = buildCliEnvironment(this.env, toolName);
       const bridgeToken = getProcessLocalBridgeToken();
-      if (bridgeToken !== undefined && childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN === undefined) {
+      if (
+        bridgeToken !== undefined &&
+        (CLI_TOOL_CREDENTIALS[toolName ?? ''] ?? []).includes('PI_SEARCH_CHROME_BRIDGE_TOKEN') &&
+        childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN === undefined
+      ) {
         childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN = bridgeToken;
       }
       const child = spawn(process.execPath, ['--import', TSX_LOADER_URL, this.cliPath, ...args], {
@@ -258,140 +264,189 @@ export function tryServeCliCorpusAction(
   }
 }
 
+/** Nonsecret base config forwarded to every one-shot CLI child when set.
+ *  Timeouts, feature flags, backend selectors, operator-owned base URLs,
+ *  browser paths, and tuning sizes carry no credentials. */
+const CLI_BASE_ENV_KEYS = [
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'PYTHONIOENCODING',
+  'SEARCH_BACKEND',
+  'PI_SEARCH_BOOTSTRAP',
+  'PI_SEARCH_ALLOW_INSTALL',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'TAVILY_RESEARCH_MODEL',
+  'SEARXNG_BASE_URL',
+  'NITTER_BASE_URL',
+  'CRAWL4AI_BASE_URL',
+  'DEEP_RESEARCH_BASE_URL',
+  'DEEP_RESEARCH_WORKER_BASE_URL',
+  'DEEP_RESEARCH_MODEL',
+  'DEEP_RESEARCH_WORKER_MODEL',
+  'PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS',
+  'PI_SEARCH_WEB_AGENT_TIMEOUT_MS',
+  'PI_SEARCH_NATIVE_SUMMARIES',
+  'PI_SEARCH_NATIVE_ANSWERS',
+  'PI_SEARCH_KG_ENRICHMENT',
+  'PI_SEARCH_EXTERNAL_FETCH',
+  'PI_SEARCH_FETCH_BACKENDS',
+  'PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS',
+  'DIFFBOT_SEARCH_SIZE',
+  'DIFFBOT_ENHANCE_SIZE',
+  'DIFFBOT_NLP_MAX_CHARS',
+  'DIFFBOT_MAX_PROVIDERS',
+  'DIFFBOT_FALLBACK_BUDGET',
+  'EMBEDDING_SIDECAR_PROVIDER',
+  'EMBEDDING_SIDECAR_BASE_URL',
+  'EMBEDDING_SIDECAR_DIMENSIONS',
+  'EMBEDDING_SIDECAR_CODE_MODEL',
+  'SEARCH_LLM_PROVIDER',
+  'SEARCH_LLM_BASE_URL',
+  'OLLAMA_SEARCH_BASE_URL',
+  'SEARCH_OLLAMA_BASE_URL',
+  'BROWSER_EXECUTABLE_PATH',
+  'BROWSER_PROXY_SERVER',
+  'BROWSER_CDP_ENDPOINT',
+  'BROWSER_PROFILE_DIR',
+  'SEARCH_MCP_CONFIG_PATH',
+  'TWITTER_BACKEND',
+  'PI_SEARCH_TWITTER_BACKEND',
+  'REDDIT_BACKEND',
+  'PI_SEARCH_REDDIT_BACKEND',
+  'XIAOHONGSHU_BACKEND',
+  'PI_SEARCH_XIAOHONGSHU_BACKEND',
+  'FACEBOOK_BACKEND',
+  'PI_SEARCH_FACEBOOK_BACKEND',
+  'INSTAGRAM_BACKEND',
+  'PI_SEARCH_INSTAGRAM_BACKEND',
+  'YOUTUBE_BACKEND',
+  'PI_SEARCH_YOUTUBE_BACKEND',
+  'BILIBILI_BACKEND',
+  'PI_SEARCH_BILIBILI_BACKEND',
+  'PI_SEARCH_BROWSER_AUTOMATION',
+  'PI_SEARCH_ENV_PATH',
+  'PI_SEARCH_AUTO_INSTALL',
+  'PI_SEARCH_COOKIE_BROWSER',
+  'PI_SEARCH_COOKIE_STALE_MS',
+  'PI_SEARCH_STATE_DIR',
+  'PI_SEARCH_EMBEDDING_ENABLED',
+  'PI_SEARCH_EMBEDDING_MODEL',
+  'PI_SEARCH_EMBEDDING_DIMENSIONS',
+  'PI_SEARCH_SCRAPLING_ENABLED',
+  'PI_SEARCH_SCRAPLING_PYTHON_PATH',
+  'PI_SEARCH_WEB_BACKENDS',
+  'PI_SEARCH_EMBEDDING_PORT',
+  'SIDECAR_DEVICE',
+];
+
+/** Search provider credentials for the web_search child (src/web/providers/*). */
+const WEB_SEARCH_CREDENTIALS = [
+  'BRAVE_API_KEY',
+  'EXA_API_KEY',
+  'TAVILY_API_KEY',
+  'PARALLEL_API_KEY',
+  'TINYFISH_API_KEY',
+  'QUERIT_API_KEY',
+  'VALYU_API_KEY',
+  'BOCHA_API_KEY',
+  'XCRAWL_API_KEY',
+  'XAI_API_KEY',
+  'MISTRAL_API_KEY',
+  'BRIGHTDATA_API_KEY',
+  'BRIGHTDATA_SERP_ZONE',
+  'SERPAPI_KEY',
+  'SERPER_API_KEY',
+  'CODEX_ACCESS_TOKEN',
+  'CODEX_ACCOUNT_ID',
+  'CODEX_HOME',
+  'CRAWL4AI_API_TOKEN',
+  'DEEP_RESEARCH_API_TOKEN',
+  'FIRECRAWL_API_KEY',
+  'JINA_API_KEY',
+  'DIFFBOT_TOKEN',
+  'SEARCH_LLM_API_TOKEN',
+  'OLLAMA_SEARCH_API_KEY',
+  'SEARCH_OLLAMA_API_KEY',
+  'EMBEDDING_SIDECAR_API_TOKEN',
+];
+
+/** Page-read credentials for fetch/browse children (native-fetch, page-reader). */
+const FETCH_CREDENTIALS = [
+  'JINA_API_KEY',
+  'FIRECRAWL_API_KEY',
+  'CRAWL4AI_API_TOKEN',
+  'DIFFBOT_TOKEN',
+  'BRIGHTDATA_API_KEY',
+  'BRIGHTDATA_SERP_ZONE',
+  'PI_SEARCH_CHROME_BRIDGE_TOKEN',
+  'PI_SEARCH_SCRAPLING_PROXY',
+];
+
+/** Academic API keys for the research child (src/research/*). */
+const RESEARCH_CREDENTIALS = [
+  'SEMANTIC_SCHOLAR_API_KEY',
+  'OPENALEX_API_KEY',
+  'NCBI_API_KEY',
+  'NCBI_EMAIL',
+  'STACKEXCHANGE_KEY',
+];
+
+/** Social/dev/media presence keys for reach_* children. These tools report
+ *  provider auth status across families (reach_setup status), so the child
+ *  needs the same presence keys the parent checks in reach-tools. */
+const REACH_CREDENTIALS = [
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'REDDIT_COOKIE',
+  'REDDIT_CLIENT_ID',
+  'REDDIT_CLIENT_SECRET',
+  'REDDIT_USER_AGENT',
+  'OPENCLI_HOST',
+  'OPENCLI_PORT',
+  'OPENCLI_TOKEN',
+  'YOUTUBE_API_KEY',
+  'LISTENNOTES_API_KEY',
+  'PRODUCTHUNT_API_TOKEN',
+  'PATENTSVIEW_API_KEY',
+  'PI_SEARCH_CHROME_BRIDGE_TOKEN',
+  ...WEB_SEARCH_CREDENTIALS,
+];
+
+/** Per-tool credential scope. Unknown tool names get base config only. */
+const CLI_TOOL_CREDENTIALS: Record<string, readonly string[]> = {
+  web_search: WEB_SEARCH_CREDENTIALS,
+  fetch: FETCH_CREDENTIALS,
+  browse: FETCH_CREDENTIALS,
+  research: RESEARCH_CREDENTIALS,
+  github: ['GITHUB_TOKEN', 'GH_TOKEN'],
+  kg: ['DIFFBOT_TOKEN', 'EMBEDDING_SIDECAR_API_TOKEN'],
+  // SPARQL endpoint/token stay out of unrelated children. The graph tool
+  // child is the related target: forward env-only operator config so
+  // process-env GRAPH_SPARQL_* survives the default CLI boundary.
+  graph: ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN'],
+  reach_status: REACH_CREDENTIALS,
+  reach_setup: REACH_CREDENTIALS,
+  social: REACH_CREDENTIALS,
+  video: REACH_CREDENTIALS,
+  feeds: REACH_CREDENTIALS,
+  media: REACH_CREDENTIALS,
+};
+
 export function buildCliEnvironment(env: Record<string, string | undefined>, toolName?: string): Record<string, string> {
-  const allowed = [
-    'PATH',
-    'HOME',
-    'TMPDIR',
-    'TEMP',
-    'TMP',
-    'SHELL',
-    'LANG',
-    'LC_ALL',
-    'PYTHONIOENCODING',
-    'GITHUB_TOKEN',
-    'GH_TOKEN',
-    'SEARCH_BACKEND',
-    'PI_SEARCH_BOOTSTRAP',
-    'PI_SEARCH_ALLOW_INSTALL',
-    'HTTP_PROXY',
-    'HTTPS_PROXY',
-    'ALL_PROXY',
-    'NO_PROXY',
-    'REDDIT_COOKIE',
-    'OPENCLI_HOST',
-    'OPENCLI_PORT',
-    'OPENCLI_TOKEN',
-    'BRAVE_API_KEY',
-    'EXA_API_KEY',
-    'TAVILY_API_KEY',
-    'TAVILY_RESEARCH_MODEL',
-    'PARALLEL_API_KEY',
-    'TINYFISH_API_KEY',
-    'QUERIT_API_KEY',
-    'VALYU_API_KEY',
-    'BOCHA_API_KEY',
-    'XCRAWL_API_KEY',
-    'XAI_API_KEY',
-    'MISTRAL_API_KEY',
-    'BRIGHTDATA_API_KEY',
-    'BRIGHTDATA_SERP_ZONE',
-    'SERPAPI_KEY',
-    'SERPER_API_KEY',
-    'CODEX_ACCESS_TOKEN',
-    'CODEX_ACCOUNT_ID',
-    'CODEX_HOME',
-    'REDDIT_CLIENT_ID',
-    'REDDIT_CLIENT_SECRET',
-    'REDDIT_USER_AGENT',
-    'YOUTUBE_API_KEY',
-    'SEARXNG_BASE_URL',
-    'NITTER_BASE_URL',
-    'LISTENNOTES_API_KEY',
-    'PRODUCTHUNT_API_TOKEN',
-    'PATENTSVIEW_API_KEY',
-    // Optional research API keys (Pi conventions; forwarded only when set).
-    'SEMANTIC_SCHOLAR_API_KEY',
-    'OPENALEX_API_KEY',
-    'NCBI_API_KEY',
-    'NCBI_EMAIL',
-    'STACKEXCHANGE_KEY',
-    'CRAWL4AI_BASE_URL',
-    'CRAWL4AI_API_TOKEN',
-    'DEEP_RESEARCH_BASE_URL',
-    'DEEP_RESEARCH_WORKER_BASE_URL',
-    'DEEP_RESEARCH_API_TOKEN',
-    'DEEP_RESEARCH_MODEL',
-    'DEEP_RESEARCH_WORKER_MODEL',
-    'FIRECRAWL_API_KEY',
-    'JINA_API_KEY',
-    'PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS',
-    'PI_SEARCH_WEB_AGENT_TIMEOUT_MS',
-    'PI_SEARCH_NATIVE_SUMMARIES',
-    'PI_SEARCH_NATIVE_ANSWERS',
-    'PI_SEARCH_KG_ENRICHMENT',
-    'PI_SEARCH_EXTERNAL_FETCH',
-    'PI_SEARCH_FETCH_BACKENDS',
-    'PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS',
-    'DIFFBOT_TOKEN',
-    'DIFFBOT_SEARCH_SIZE',
-    'DIFFBOT_ENHANCE_SIZE',
-    'DIFFBOT_NLP_MAX_CHARS',
-    'DIFFBOT_MAX_PROVIDERS',
-    'DIFFBOT_FALLBACK_BUDGET',
-    'EMBEDDING_SIDECAR_PROVIDER',
-    'EMBEDDING_SIDECAR_BASE_URL',
-    'EMBEDDING_SIDECAR_API_TOKEN',
-    'EMBEDDING_SIDECAR_DIMENSIONS',
-    'EMBEDDING_SIDECAR_CODE_MODEL',
-    'SEARCH_LLM_PROVIDER',
-    'SEARCH_LLM_API_TOKEN',
-    'SEARCH_LLM_BASE_URL',
-    'OLLAMA_SEARCH_BASE_URL',
-    'OLLAMA_SEARCH_API_KEY',
-    'SEARCH_OLLAMA_BASE_URL',
-    'SEARCH_OLLAMA_API_KEY',
-    'BROWSER_EXECUTABLE_PATH',
-    'BROWSER_PROXY_SERVER',
-    'BROWSER_CDP_ENDPOINT',
-    'BROWSER_PROFILE_DIR',
-    'SEARCH_MCP_CONFIG_PATH',
-    'TWITTER_BACKEND',
-    'PI_SEARCH_TWITTER_BACKEND',
-    'REDDIT_BACKEND',
-    'PI_SEARCH_REDDIT_BACKEND',
-    'XIAOHONGSHU_BACKEND',
-    'PI_SEARCH_XIAOHONGSHU_BACKEND',
-    'FACEBOOK_BACKEND',
-    'PI_SEARCH_FACEBOOK_BACKEND',
-    'INSTAGRAM_BACKEND',
-    'PI_SEARCH_INSTAGRAM_BACKEND',
-    'YOUTUBE_BACKEND',
-    'PI_SEARCH_YOUTUBE_BACKEND',
-    'BILIBILI_BACKEND',
-    'PI_SEARCH_BILIBILI_BACKEND',
-    'PI_SEARCH_BROWSER_AUTOMATION',
-    'PI_SEARCH_ENV_PATH',
-    'PI_SEARCH_AUTO_INSTALL',
-    'PI_SEARCH_COOKIE_BROWSER',
-    'PI_SEARCH_COOKIE_STALE_MS',
-    'PI_SEARCH_STATE_DIR',
-    'PI_SEARCH_CHROME_BRIDGE_TOKEN',
-    'PI_SEARCH_SCRAPLING_PROXY',
-    'PI_SEARCH_EMBEDDING_ENABLED',
-    'PI_SEARCH_EMBEDDING_MODEL',
-    'PI_SEARCH_EMBEDDING_DIMENSIONS',
-    'PI_SEARCH_SCRAPLING_ENABLED',
-    'PI_SEARCH_SCRAPLING_PYTHON_PATH',
-    'PI_SEARCH_WEB_BACKENDS',
-    'PI_SEARCH_EMBEDDING_PORT',
-    'SIDECAR_DEVICE',
-  ];
-  // SPARQL endpoint/token stay out of unrelated children by default. The
-  // graph tool child is the related target: forward env-only operator config
-  // so process-env GRAPH_SPARQL_* survives the default CLI boundary.
-  const scoped = toolName === 'graph' ? ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN'] : [];
+  // Deny-by-default: every child gets the nonsecret base config only.
+  // Credentials are scoped per tool family below, so a web_search fanout
+  // child never carries github/reddit/graph secrets and vice versa.
+  const scoped = CLI_TOOL_CREDENTIALS[toolName ?? ''] ?? [];
   return Object.fromEntries(
-    [...allowed, ...scoped].flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),
+    [...CLI_BASE_ENV_KEYS, ...scoped].flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),
   );
 }

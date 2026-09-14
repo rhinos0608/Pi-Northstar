@@ -20,6 +20,7 @@ import {
   parseChromeBridgeResult,
   parseChromeProfileOperation,
 } from '../src/chrome/chrome-profile-contract.js';
+import { runSetupInstall } from '../src/setup/installer.js';
 import {
   ChromeBridgeServer,
   parseBridgeInstanceClaim,
@@ -258,5 +259,103 @@ describe('property: bridge protocol transitions', () => {
     }
     // Family stored lowercase; heartbeat on unknown false
     assert.equal(server.heartbeat('no-such-instance'), false);
+  });
+});
+
+describe('property: supply-chain hostile inputs inert (installer public API only)', () => {
+  // No live installers/network: PATH points at a dead directory so no
+  // candidate binary resolves and no child process spawns. Hostile
+  // package/version/pin-like strings travel only via the public
+  // `channels` selector of runSetupInstall.
+  const DEAD_PATH = '/nonexistent-pi-supply-chain-fuzz-path';
+  const KNOWN_IDS = new Set([
+    'gh',
+    'yt-dlp',
+    'opencli',
+    'twitter-cli',
+    'rdt-cli',
+    'bili-cli',
+    'xhs-cli',
+    'mcporter',
+  ]);
+  const PINNED_SPECS = [
+    '@jackwener/opencli@1.8.6',
+    'twitter-cli==0.8.5',
+    'rdt-cli',
+    'bilibili-cli==0.6.2',
+    'xhs-cli==0.1.4',
+    'mcporter@0.13.12',
+  ];
+  const HOSTILE = [
+    'twitter-cli==9.9.9',
+    'twitter-cli==0.8.5; rm -rf /',
+    'twitter; echo pwned',
+    'twitter|evil',
+    '$(evil)',
+    '`evil`',
+    '--version',
+    '-g evil',
+    '@jackwener/opencli@9.9.9',
+    '..',
+    '../../etc/passwd',
+    '/etc/passwd',
+    '',
+    'TWITTER',
+    'twitter\nevil',
+    'twitter\0evil',
+    'xhs-cli==0.1.4 --user',
+    'git+https://evil.example/x.git',
+    'npm install -g evil',
+    '*',
+    'opencli@1.8.6;evil',
+  ];
+  const frand = mulberry32(0x51ab1e);
+  const fpick = <T>(arr: readonly T[]): T => arr[Math.floor(frand() * arr.length)]!;
+
+  it('hostile-only channels select nothing; mixed channels keep fixed pins', async () => {
+    for (let i = 0; i < 60; i++) {
+      const hostileOnly = [fpick(HOSTILE), fpick(HOSTILE)];
+      const none = await runSetupInstall('install_channels', { PATH: DEAD_PATH }, hostileOnly);
+      assert.equal(none.installAllowed, true);
+      assert.deepEqual(none.installers, [], `hostile channels selected installers: ${JSON.stringify(hostileOnly)}`);
+      assert.equal(none.status, 'ok');
+
+      const mixed = await runSetupInstall('install_channels', { PATH: DEAD_PATH }, ['twitter', fpick(HOSTILE), fpick(HOSTILE)]);
+      const ids = mixed.installers.map((r) => r.id).sort();
+      assert.deepEqual(ids, ['opencli', 'twitter-cli']);
+      for (const r of mixed.installers) {
+        assert.ok(KNOWN_IDS.has(r.id), `unknown installer id: ${r.id}`);
+        // Dead PATH: nothing resolvable, so every installer skips with no argv.
+        assert.equal(r.status, 'skipped');
+        assert.equal(r.command, undefined);
+      }
+    }
+  });
+
+  it('any emitted argv carries only fixed pins; version claims impossible without binaries', async () => {
+    for (let i = 0; i < 40; i++) {
+      const channels = i % 2 === 0 ? ['twitter', fpick(HOSTILE)] : [fpick(HOSTILE)];
+      const result = await runSetupInstall('install_channels', { PATH: DEAD_PATH }, channels);
+      for (const r of result.installers) {
+        assert.ok(KNOWN_IDS.has(r.id), `unknown installer id: ${r.id}`);
+        const status: string = r.status;
+        assert.ok(status === 'skipped' || status === 'present', `unexpected status without binaries: ${status}`);
+        if (r.command !== undefined) {
+          const argv = r.command.join(' ');
+          for (const h of ['rm -rf', '$(', '`', ';', '--user', 'evil.example', '9.9.9']) {
+            assert.ok(!argv.includes(h), `hostile marker in argv: ${argv}`);
+          }
+          assert.ok(
+            PINNED_SPECS.some((pin) => argv.includes(pin)) || argv.length === 0,
+            `argv lost fixed pin: ${argv}`,
+          );
+        }
+        // Exact version format: without binaries nothing may claim installed/present
+        // with a version string; skipped carries no version claim.
+        if (r.status === 'present' || r.status === 'installed') {
+          assert.fail(`version claim without binary: ${r.id} ${r.status} ${r.message}`);
+        }
+      }
+    }
   });
 });
