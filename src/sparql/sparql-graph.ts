@@ -166,7 +166,7 @@ function stripSparqlComments(query: string): string {
 function firstKeyword(query: string): string {
   const noComments = stripSparqlComments(query);
   const noPreamble = noComments.replace(
-    /\b(?:PREFIX\s+[A-Za-z][\w.-]*\s*:\s*<[^>]*>|BASE\s*<[^>]*>)/gi,
+    /\b(?:PREFIX\s+(?:[A-Za-z][\w.-]*\s*)?:\s*<[^>]*>|BASE\s*<[^>]*>)/gi,
     ' ',
   );
   const match = /\b([A-Za-z]+)\b/.exec(noPreamble);
@@ -214,6 +214,71 @@ function classifySparqlForm(query: string): SparqlForm {
     }
   }
   return keyword === 'SELECT' ? 'select' : 'ask';
+}
+
+/** Blank string literals (same length) so preamble matching never sees
+ *  declaration-shaped text inside "...", '...', or triple-quoted literals. */
+function maskSparqlStrings(query: string): string {
+  const out = query.split('');
+  let i = 0;
+  const n = query.length;
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to; k += 1) out[k] = ' ';
+  };
+  while (i < n) {
+    let quote: string | undefined;
+    if (query.startsWith("'''", i)) quote = "'''";
+    else if (query.startsWith('"""', i)) quote = '"""';
+    else if (query[i] === "'" || query[i] === '"') quote = query[i]!;
+    if (quote === undefined) {
+      i += 1;
+      continue;
+    }
+    const start = i;
+    i += quote.length;
+    let closed = false;
+    while (i < n) {
+      if (quote.length === 1 && query[i] === '\\') {
+        i += 2;
+        continue;
+      }
+      if (query.startsWith(quote, i)) {
+        i += quote.length;
+        closed = true;
+        break;
+      }
+      i += 1;
+    }
+    blank(start, closed ? i : n);
+    if (!closed) break;
+  }
+  return out.join('');
+}
+
+/** Hoist PREFIX/BASE preamble above the COUNT(*) wrapper: declarations
+ *  embedded inside WHERE braces are invalid SPARQL. Operates on
+ *  comment-stripped text (comments carry no semantics for the probe). */
+function splitProbePreamble(query: string): { preamble: string; body: string } {
+  const stripped = stripSparqlComments(query);
+  // Match against a string-blanked copy: a "PREFIX ex: <...>" literal must
+  // not hoist. Offsets transfer 1:1, so slices come from the original text.
+  const masked = maskSparqlStrings(stripped);
+  const pattern = /\b(?:PREFIX\s+(?:[A-Za-z][\w.-]*\s*)?:\s*<[^>]*>|BASE\s*<[^>]*>)/gi;
+  const ranges: Array<{ start: number; end: number }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(masked)) !== null) {
+    ranges.push({ start: match.index, end: match.index + match[0].length });
+  }
+  if (ranges.length === 0) return { preamble: '', body: stripped };
+  const declarations = ranges.map((range) => stripped.slice(range.start, range.end).trim());
+  let body = '';
+  let cursor = 0;
+  for (const range of ranges) {
+    body += `${stripped.slice(cursor, range.start)} `;
+    cursor = range.end;
+  }
+  body += stripped.slice(cursor);
+  return { preamble: declarations.join('\n'), body };
 }
 
 /** Extract non-negative integer hits from a COUNT(*) results payload. */
@@ -502,7 +567,11 @@ export function createSparqlGraphAdapter(options: SparqlGraphAdapterOptions): Gr
         pending.map(async ({ index, query }) => {
           let parsed: unknown;
           try {
-            parsed = await runSparql(`SELECT (COUNT(*) AS ?count) WHERE { { ${query} } }`, options, ctx);
+            const { preamble, body } = splitProbePreamble(query);
+            const wrapped = preamble.length > 0
+              ? `${preamble}\nSELECT (COUNT(*) AS ?count) WHERE { { ${body} } }`
+              : `SELECT (COUNT(*) AS ?count) WHERE { { ${query} } }`;
+            parsed = await runSparql(wrapped, options, ctx);
           } catch (error) {
             items[index] = { query, status: 'error', error: fromTransportError(error, ctx.token, ctx.signal) };
             return;

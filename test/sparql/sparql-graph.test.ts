@@ -247,6 +247,61 @@ test('query executes prefixed SELECT without misclassifying preamble', async () 
   assert.equal(calls, 1);
 });
 
+test('query executes default-prefix SELECT without misclassifying preamble', async () => {
+  const payload = { head: { vars: ['s'] }, results: { bindings: [] } };
+  let calls = 0;
+  const fetchFn: SparqlFetchFn = (async () => {
+    calls += 1;
+    return jsonResponse(payload);
+  }) as SparqlFetchFn;
+  const adapter = createSparqlGraphAdapter({ endpoint: ENDPOINT, fetchFn });
+  const outcome = await adapter.executeQuery(
+    { query: 'PREFIX : <https://e/> SELECT * WHERE { ?s ?p ?o }', pageSize: 10, from: 0 },
+    { token: SENTINEL },
+  );
+  assert.equal(outcome.error, undefined);
+  assert.equal(calls, 1);
+});
+
+test('probe hoists PREFIX preamble above the COUNT(*) wrapper', async () => {
+  const seenBodies: string[] = [];
+  const fetchFn: SparqlFetchFn = (async (_url: string, init?: RequestInit) => {
+    seenBodies.push(String(init?.body ?? ''));
+    return jsonResponse({
+      head: { vars: ['count'] },
+      results: { bindings: [{ count: { type: 'literal', value: '7' } }] },
+    });
+  }) as SparqlFetchFn;
+  const adapter = createSparqlGraphAdapter({ endpoint: ENDPOINT, fetchFn });
+  const outcome = await adapter.probeCardinality(
+    { queries: ['PREFIX ex: <http://ex.org/> SELECT * WHERE { ?s ?p ?o }'] },
+    { token: SENTINEL },
+  );
+  assert.equal(outcome.items[0]?.status, 'ok');
+  const dispatched = decodeURIComponent(seenBodies[0] ?? '');
+  const prefixAt = dispatched.indexOf('PREFIX ex:');
+  const whereAt = dispatched.search(/WHERE\s*\{/i);
+  assert.ok(prefixAt >= 0 && whereAt > prefixAt, 'PREFIX preamble must lead the COUNT(*) wrapper');
+});
+
+test('probe leaves PREFIX-shaped text inside string literals untouched', async () => {
+  const seenBodies: string[] = [];
+  const fetchFn: SparqlFetchFn = (async (_url: string, init?: RequestInit) => {
+    seenBodies.push(String(init?.body ?? ''));
+    return jsonResponse({
+      head: { vars: ['count'] },
+      results: { bindings: [{ count: { type: 'literal', value: '3' } }] },
+    });
+  }) as SparqlFetchFn;
+  const adapter = createSparqlGraphAdapter({ endpoint: ENDPOINT, fetchFn });
+  const query = 'SELECT * WHERE { ?s ?p "PREFIX ex: <http://ex.org/>" }';
+  const outcome = await adapter.probeCardinality({ queries: [query] }, { token: SENTINEL });
+  assert.equal(outcome.items[0]?.status, 'ok');
+  const dispatched = decodeURIComponent(seenBodies[0] ?? '');
+  assert.ok(dispatched.includes('"PREFIX ex: <http://ex.org/>"'), 'string literal must survive verbatim');
+  assert.ok(!/^\s*PREFIX\b/i.test(dispatched), 'no hoisted preamble when PREFIX occurs only in a literal');
+});
+
 test('query classifies SELECT with hash-IRI PREFIX preamble as SELECT', async () => {
   const payload = { head: { vars: ['s'] }, results: { bindings: [] } };
   let calls = 0;
