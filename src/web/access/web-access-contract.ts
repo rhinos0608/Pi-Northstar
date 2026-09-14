@@ -953,12 +953,30 @@ export interface WebAccessStoredEntry {
   bytes: number;
   queries: string[];
   results: WebAccessQueryResult[];
+  /**
+   * Per-entry owner binding (Plan B1): session id threaded from the call
+   * context, job id for job-derived entries, or a per-request random id
+   * fallback. Absent = legacy unowned entry (pre-owner callers).
+   */
+  owner?: string | undefined;
 }
 
 export interface WebAccessContentStore {
-  get(responseId: string): WebAccessStoredEntry | undefined;
-  put(entry: WebAccessStoredEntry): void;
-  delete(responseId: string): void;
+  /**
+   * Owner-gated read: an owned entry resolves only for its owner.
+   * Foreign or missing owner on an owned entry resolves to undefined
+   * (same as a miss — no existence signal). Unowned legacy entries
+   * resolve for any caller.
+   */
+  get(responseId: string, owner?: string): WebAccessStoredEntry | undefined;
+  /**
+   * Owner-binding write: the `owner` param wins; otherwise the entry's
+   * own `owner` field is preserved. Singleton Map stays; binding is
+   * per entry, not per store.
+   */
+  put(entry: WebAccessStoredEntry, owner?: string): void;
+  /** Owner-gated delete: foreign owner on an owned entry is a no-op. */
+  delete(responseId: string, owner?: string): void;
   size(): number;
 }
 

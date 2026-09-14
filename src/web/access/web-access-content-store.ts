@@ -29,6 +29,7 @@ export interface WebAccessEntryDeps {
   idGenerator?: WebAccessIdGenerator | undefined;
   now?: (() => number) | undefined;
   randomId?: (() => string) | undefined;
+  owner?: string | undefined;
 }
 
 function nowOf(deps: WebAccessEntryDeps | WebAccessStoreDeps): number {
@@ -57,13 +58,15 @@ export function buildWebAccessStoredEntry(
       `stored entry exceeds maximum of ${WEB_ACCESS_STORE_MAX_BYTES} bytes`,
     );
   }
-  return {
+  const entry: WebAccessStoredEntry = {
     responseId: idOf(deps),
     createdAt: nowOf(deps),
     bytes,
     queries: [...input.queries],
     results: input.results,
   };
+  if (deps.owner !== undefined) entry.owner = deps.owner;
+  return entry;
 }
 
 export interface WebAccessMemoryStore extends WebAccessContentStore {
@@ -93,7 +96,7 @@ export function createWebAccessContentStore(deps: WebAccessStoreDeps = {}): WebA
   }
 
   return {
-    get(responseId: string): WebAccessStoredEntry | undefined {
+    get(responseId: string, owner?: string): WebAccessStoredEntry | undefined {
       const entry = entries.get(responseId);
       if (!entry) return undefined;
       if (expired(entry, now())) {
@@ -101,27 +104,35 @@ export function createWebAccessContentStore(deps: WebAccessStoreDeps = {}): WebA
         totalBytes -= entry.bytes;
         return undefined;
       }
+      // Per-entry owner gate: owned entries resolve only for their owner.
+      // Foreign/missing owner resolves as a miss (no LRU refresh, no signal).
+      if (entry.owner !== undefined && owner !== entry.owner) return undefined;
       // Refresh LRU recency on access.
       entries.delete(responseId);
       entries.set(responseId, entry);
       return entry;
     },
-    put(entry: WebAccessStoredEntry): void {
-      if (entry.bytes > WEB_ACCESS_STORE_MAX_BYTES) {
+    put(entry: WebAccessStoredEntry, owner?: string): void {
+      // Per-entry owner binding: explicit owner wins, else the entry's own
+      // owner field is preserved. Stored as a copy so the caller's object
+      // cannot mutate the bound owner after admission.
+      const bound: WebAccessStoredEntry =
+        owner !== undefined ? { ...entry, owner } : { ...entry };
+      if (bound.bytes > WEB_ACCESS_STORE_MAX_BYTES) {
         throw new WebAccessContractError(
           `stored entry exceeds maximum of ${WEB_ACCESS_STORE_MAX_BYTES} bytes`,
         );
       }
       prune();
-      const existing = entries.get(entry.responseId);
+      const existing = entries.get(bound.responseId);
       if (existing) {
         totalBytes -= existing.bytes;
-        entries.delete(entry.responseId);
+        entries.delete(bound.responseId);
       }
       // Evict oldest until both caps hold.
       while (
         entries.size >= WEB_ACCESS_STORE_MAX_ENTRIES ||
-        totalBytes + entry.bytes > WEB_ACCESS_STORE_MAX_BYTES
+        totalBytes + bound.bytes > WEB_ACCESS_STORE_MAX_BYTES
       ) {
         const oldest = entries.keys().next();
         if (oldest.done) break;
@@ -129,12 +140,13 @@ export function createWebAccessContentStore(deps: WebAccessStoreDeps = {}): WebA
         entries.delete(oldest.value);
         if (evicted) totalBytes -= evicted.bytes;
       }
-      entries.set(entry.responseId, entry);
-      totalBytes += entry.bytes;
+      entries.set(bound.responseId, bound);
+      totalBytes += bound.bytes;
     },
-    delete(responseId: string): void {
+    delete(responseId: string, owner?: string): void {
       const entry = entries.get(responseId);
       if (!entry) return;
+      if (entry.owner !== undefined && owner !== entry.owner) return;
       entries.delete(responseId);
       totalBytes -= entry.bytes;
     },
