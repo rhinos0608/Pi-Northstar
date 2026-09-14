@@ -5,6 +5,19 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { GITHUB_ACTIONS } from '../../src/github/github-contract.js';
 import { registerGitHubTool } from '../../src/github/github.js';
 
+function branchAction(branch: any): unknown {
+  if (branch.properties?.action?.const !== undefined) return branch.properties.action.const;
+  for (const part of branch.anyOf ?? []) {
+    const found = branchAction(part);
+    if (found !== undefined) return found;
+  }
+  for (const part of branch.allOf ?? []) {
+    const found = part.properties?.action?.const as unknown;
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 interface CapturedTool {
   name: string;
   parameters: { properties: Record<string, any> };
@@ -37,7 +50,7 @@ test('github tool nests canonical action union under request', async () => {
   assert.equal(tool.name, 'github');
   const request = tool.parameters.properties.request;
   assert.equal(request.anyOf?.length, GITHUB_ACTIONS.length);
-  assert.deepEqual(request.anyOf.map((branch: any) => branch.properties?.action?.const ?? branch.anyOf?.[0]?.properties?.action?.const ?? branch.allOf?.[0]?.properties?.action?.const).sort(), [...GITHUB_ACTIONS].sort());
+  assert.deepEqual(request.anyOf.map((branch: any) => branchAction(branch)).sort(), [...GITHUB_ACTIONS].sort());
 });
 
 test('anthropic object flattening preserves nested github action union', async () => {
@@ -59,6 +72,41 @@ test('github schema validates every action and rejects cross-action fields', asy
   for (const request of requests) assert.equal(Value.Check(schema, { request }), true, request.action);
   assert.equal(Value.Check(schema, { request: { action: 'commits', labels: ['bug'], ...common } }), false);
   assert.equal(Value.Check(schema, { request: { action: 'file', ...common } }), false);
+});
+
+test('github schema rejects schema-valid-but-runtime-invalid numerics and paths', async () => {
+  const schema = (await captureGitHubTool()).parameters;
+  const common = { owner: 'octo', repo: 'kit' };
+  const pathsOf = (n: number): string[] => Array.from({ length: n }, (_, i) => `src/f${i}.ts`);
+  // file selector is XOR: exactly one of path / paths (paths 1-10 entries).
+  assert.equal(Value.Check(schema, { request: { action: 'file', ...common, path: 'src/a.ts' } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'file', ...common, paths: pathsOf(1) } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'file', ...common, paths: pathsOf(10) } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'file', ...common, path: 'src/a.ts', paths: pathsOf(10) } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'file', ...common, paths: pathsOf(11) } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'file', ...common, paths: [] } }), false);
+  // limit/perPage: positive integers within per-action caps (trending 1-25, others 1-50).
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, limit: 50 } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, limit: 51 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, limit: 0 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, limit: -1 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, limit: 1.5 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, perPage: 50 } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, perPage: 51 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, perPage: 1.5 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'trending', limit: 25 } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'trending', limit: 26 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'trending', perPage: 26 } }), false);
+  // labels: capped at 10 entries to mirror runtime validateLabels (GITHUB_LABELS_MAX).
+  const labelsOf = (n: number): string[] => Array.from({ length: n }, (_, i) => `label-${i}`);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, labels: labelsOf(10) } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, labels: labelsOf(11) } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'pulls', ...common, labels: labelsOf(11) } }), false);
+  // number: positive integer, no upper cap.
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, number: 1 } }), true);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, number: 0 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, number: -3 } }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, number: 1.5 } }), false);
 });
 
 test('github schema exposes per-action selectors, caps, and cursor', async () => {

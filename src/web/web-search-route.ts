@@ -85,6 +85,18 @@ function assertSupportedSearchCombination(params: SearchRouteParams): void {
   if (params.cursor !== undefined && params.category !== 'research') {
     throw new Error('cursor requires category "research"');
   }
+  // includeContent/recency/domains refine plain search only: the research
+  // backend takes query/source/limit/yearFrom/cursor. Reject research use
+  // here so direct route callers fail loudly instead of silent drop.
+  if (params.category === 'research' && params.includeContent !== undefined) {
+    throw new Error('includeContent is not supported with category "research"');
+  }
+  if (params.category === 'research' && params.recency !== undefined) {
+    throw new Error('recency is not supported with category "research"');
+  }
+  if (params.category === 'research' && params.domains !== undefined) {
+    throw new Error('domains is not supported with category "research"');
+  }
   // Source pins one exact research source; non-research callers must not
   // send it (the canonical route would otherwise silently drop it).
   if (params.source !== undefined && params.category !== 'research') {

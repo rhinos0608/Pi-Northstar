@@ -47,10 +47,13 @@ export interface GithubActionFieldSpec {
   readonly repoSelector: boolean | 'optional';
 }
 
-/** Schema-generation input. validateGithubRequest remains enforcement authority. */
+/** Schema-generation input. validateGithubRequest remains enforcement authority.
+ * file carries path/paths as optional here because the selector is XOR
+ * (exactly one of path, paths): actionBranch builds the union and the
+ * validator rejects neither/both. */
 export const GITHUB_ACTION_FIELD_SPECS: Readonly<Record<GithubAction, GithubActionFieldSpec>> = {
   repo: { required: [], optional: ['includeReadme'], repoSelector: true },
-  file: { required: ['path'], optional: ['paths', 'branch', 'ref'], repoSelector: true },
+  file: { required: [], optional: ['path', 'paths', 'branch', 'ref'], repoSelector: true },
   tree: { required: [], optional: ['path', 'branch', 'ref', 'recursive'], repoSelector: true },
   search: { required: ['query'], optional: ['language', 'limit', 'perPage', 'cursor'], repoSelector: 'optional' },
   trending: { required: [], optional: ['language', 'since', 'limit', 'perPage'], repoSelector: false },
@@ -515,6 +518,10 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
     if (cursor.length > GITHUB_MAX_CURSOR_LENGTH) {
       throw githubError('cursor_invalid', `cursor exceeds maximum length of ${GITHUB_MAX_CURSOR_LENGTH}`);
     }
+  }
+
+  if (action === 'file' && path === undefined && paths === undefined) {
+    throw githubError('invalid_request', 'github file requires selector: path or paths');
   }
 
   const request: GithubRequest = { action, limit };

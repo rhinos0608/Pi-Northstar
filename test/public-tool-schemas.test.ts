@@ -60,6 +60,20 @@ test('web_search research continuation requires single query + exact source + cu
   assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'nope', cursor: 'opaque' }), false);
 });
 
+test('web_search schema narrows source/knowledge to their branches', () => {
+  const schema = buildWebSearchParameters();
+  // source is research-only: plain single/batch branches carry no source.
+  assert.equal(Value.Check(schema, { query: 'a', source: 'arxiv' }), false);
+  assert.equal(Value.Check(schema, { queries: ['a'], source: 'arxiv' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'news', source: 'arxiv' }), false);
+  // knowledge is web-only: research branches carry no knowledge.
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', knowledge: { facts: true } }), false);
+  assert.equal(Value.Check(schema, { queries: ['a'], category: 'research', knowledge: { facts: true } }), false);
+  // Each field still validates on its home branch.
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv' }), true);
+  assert.equal(Value.Check(schema, { query: 'a', knowledge: { facts: true } }), true);
+});
+
 test('graph schema accepts dql and sparql query/probe/schema branches', () => {
   const schema = buildGraphParameters();
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Organization' }), true);
@@ -191,4 +205,30 @@ test('browser parameters keep bounded action branches and reject unknown fields'
   assert.equal(Value.Check(schema, { action: 'navigate' }), false);
   assert.equal(Value.Check(schema, { action: 'navigate', url: 'https://example.com', bogus: 1 }), false);
   assert.equal(Value.Check(schema, { action: 'dance' }), false);
+});
+
+test('web_search research branches drop includeContent/recency/domains (no silent drop)', () => {
+  const schema = buildWebSearchParameters();
+  // Plain branches keep the filters.
+  assert.equal(Value.Check(schema, { query: 'a', includeContent: true }), true);
+  assert.equal(Value.Check(schema, { query: 'a', recency: 'week' }), true);
+  assert.equal(Value.Check(schema, { query: 'a', domains: ['example.com'] }), true);
+  // Research branches reject them: route/backend take query/source/limit/yearFrom/cursor only.
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', includeContent: true }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', recency: 'week' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', domains: ['example.com'] }), false);
+  assert.equal(Value.Check(schema, { queries: ['a'], category: 'research', includeContent: true }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque', recency: 'week' }), false);
+  // yearFrom stays honored everywhere.
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', yearFrom: 2020 }), true);
+});
+
+test('web_search route rejects research + includeContent/recency/domains loudly', async () => {
+  const { buildSearchRoute } = await import('../src/web/web-search-route.js');
+  assert.throws(() => buildSearchRoute({ query: 'a', category: 'research', includeContent: true } as never), /includeContent/);
+  assert.throws(() => buildSearchRoute({ query: 'a', category: 'research', recency: 'week' } as never), /recency/);
+  assert.throws(() => buildSearchRoute({ query: 'a', category: 'research', domains: ['example.com'] } as never), /domains/);
+  // Plain search still routes with the filters.
+  const routed = buildSearchRoute({ query: 'a', includeContent: true, recency: 'week', domains: ['example.com'] });
+  assert.equal(routed.tool, 'web_search');
 });

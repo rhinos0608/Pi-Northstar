@@ -312,8 +312,10 @@ function findWebSearchBranch(branches: WebSearchBranch[], kind: 'single' | 'batc
 
 test('web_search schema union branches', async () => {
   const { schema, branches } = await captureWebSearchUnion();
-  // Strict union: single/batch plain (limit max 20) + single/batch research
-  // (category research, limit max 30) + agent {query, mode:"agent"}.
+  // Strict union: single/batch plain (limit max 20) + single research
+  // (category research, limit max 30) + research continuation
+  // {query, category, source, cursor} + agent {query, mode:"agent"}.
+  // No batch-research branch: the router rejects multi-query research.
   assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
   assert.ok(/Exactly one of query/i.test(schema.description ?? ''), 'union must state the query/queries XOR');
   const branchCases = [
@@ -328,8 +330,8 @@ test('web_search schema union branches', async () => {
   const agent = findWebSearchBranch(branches, 'agent')!;
   assert.ok(agent.properties.knowledge === undefined, 'agent branch must carry no knowledge');
   assert.ok(single.properties.knowledge, 'single branch must carry knowledge');
-  const singles = branches.filter((branch) => branch.properties?.query && !branch.properties?.queries && !branch.properties?.mode);
-  assert.equal(singles.length, 2, 'single must branch into plain and research caps');
+  const singles = branches.filter((branch) => branch.properties?.query && !branch.properties?.queries && !branch.properties?.mode && !branch.properties?.cursor);
+  assert.equal(singles.length, 2, 'single must branch into plain and research caps (continuation carries cursor)');
   const researchSingle = singles.find((branch) => (branch.properties.category as { const?: string } | undefined)?.const === 'research');
   assert.ok(researchSingle, 'research single branch must pin category to research');
   assert.equal(researchSingle!.properties.limit?.maximum, 30);
@@ -867,10 +869,14 @@ test('web_search strict union exposes optional knowledge booleans; fetch schema 
   const singleProps = byBranch((props) => 'query' in props && !('queries' in props) && !('mode' in props));
   const batchProps = byBranch((props) => 'queries' in props);
   const agentProps = byBranch((props) => 'mode' in props);
-  for (const key of ['query', 'knowledge', 'source']) {
+  for (const key of ['query', 'knowledge']) {
     assert.ok(key in singleProps, `web_search single branch must expose field ${key}`);
   }
+  assert.ok(!('source' in singleProps), 'web_search plain single branch must not advertise source (research-only)');
   assert.ok(!('cursor' in singleProps), 'web_search single branch must not advertise cursor (validateWebRequest rejects it)');
+  const researchSingle = branches.find((branch) => (branch.properties as Record<string, unknown>)?.category !== undefined && 'source' in ((branch.properties ?? {}) as Record<string, unknown>) && !('cursor' in ((branch.properties ?? {}) as Record<string, unknown>)));
+  assert.ok(researchSingle, 'research single branch must exist');
+  assert.ok(!('knowledge' in ((researchSingle!.properties ?? {}) as Record<string, unknown>)), 'web_search research branch must not advertise knowledge (web-only)');
   assert.ok('queries' in batchProps, 'web_search batch branch must expose queries');
   assert.ok(!('knowledge' in agentProps), 'web_search agent branch must not expose knowledge');
   assert.deepEqual(Object.keys(singleProps.knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
@@ -923,7 +929,7 @@ test('buildSearchRoute rejects invalid knowledge via contract validation', () =>
   }
 });
 
-test('tool_result hook adds a fresh outer fence over pre-wrapped kg text', async () => {
+test('tool_result hook keeps own pre-wrapped kg text to a single fence', async () => {
   const handlers = await captureHooks();
   const { wrapUntrustedText } = await import('../src/core/untrusted-content.js');
   const once = wrapUntrustedText('entity data', { source: 'kg' });
@@ -1010,16 +1016,19 @@ test('guidance: web_search single-branch fields and research-only docs', async (
   assert.ok(/Exactly one of query/i.test(schema.description ?? ''), 'web_search schema must state the query/queries XOR');
   const singleBranch = findWebSearchBranch(branches, 'single');
   const props = singleBranch?.properties ?? {};
-  for (const key of ['query', 'limit', 'category', 'source', 'yearFrom']) {
+  for (const key of ['query', 'limit', 'category', 'yearFrom']) {
     assert.ok(key in props, `web_search single branch must expose flat field ${key}`);
   }
+  assert.ok(!('source' in props), 'web_search plain single branch must not advertise source (research-only)');
   assert.ok(!('cursor' in props), 'web_search single branch must not advertise cursor');
+  const researchProps = (branches.find((branch) => 'source' in (((branch as { properties?: unknown }).properties ?? {}) as Record<string, unknown>))?.properties ?? {}) as Record<string, { description?: string }>;
+  assert.ok('source' in researchProps, 'web_search research branch must expose source');
   const docCases = [
-    { field: 'source', pattern: /research-only/i, message: 'source param must say research-only' },
-    { field: 'yearFrom', pattern: /1900, current UTC year/i, message: 'yearFrom param must document the supported range' },
+    { target: researchProps, field: 'source', pattern: /research-only/i, message: 'source param must say research-only' },
+    { target: props, field: 'yearFrom', pattern: /1900, current UTC year/i, message: 'yearFrom param must document the supported range' },
   ];
-  for (const { field, pattern, message } of docCases) {
-    assert.ok(pattern.test(props[field]?.description ?? ''), message);
+  for (const { target, field, pattern, message } of docCases) {
+    assert.ok(pattern.test(target[field]?.description ?? ''), message);
   }
 });
 

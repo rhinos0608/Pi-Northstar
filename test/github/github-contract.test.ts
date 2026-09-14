@@ -246,13 +246,21 @@ test('resolveGithubLimit rejects out-of-range with field and cap named', () => {
   }
 });
 
+test('file requires exactly one of path / paths (XOR)', () => {
+  assert.equal(validateGithubRequest({ action: 'file', owner: 'o', repo: 'r', path: 'src/a.ts' }).request.path, 'src/a.ts');
+  assert.deepEqual(validateGithubRequest({ action: 'file', owner: 'o', repo: 'r', paths: ['src/a.ts', 'src/b.ts'] }).request.paths, ['src/a.ts', 'src/b.ts']);
+  githubError('invalid_request', () => validateGithubRequest({ action: 'file', owner: 'o', repo: 'r' }));
+  githubError('invalid_request', () => validateGithubRequest({ action: 'file', owner: 'o', repo: 'r', path: 'src/a.ts', paths: ['src/b.ts'] }));
+  githubError('invalid_request', () => validateGithubRequest({ action: 'file', owner: 'o', repo: 'r', paths: [] }));
+});
+
 test('per-action limit caps hold: lists 50, trending 25, search perPage 51+ rejected', () => {
-  assert.equal(validateGithubRequest({ action: 'file', owner: 'o', repo: 'r', limit: 50 }).request.limit, 50);
+  assert.equal(validateGithubRequest({ action: 'file', owner: 'o', repo: 'r', path: 'src/a.ts', limit: 50 }).request.limit, 50);
   assert.equal(validateGithubRequest({ action: 'commits', owner: 'o', repo: 'r', limit: 50 }).request.limit, 50);
   assert.equal(validateGithubRequest({ action: 'trending', limit: 25 }).request.limit, 25);
   assert.equal(validateGithubRequest({ action: 'search', query: 'q', perPage: 50 }).request.limit, 50);
   for (const input of [
-    { action: 'file', owner: 'o', repo: 'r', limit: 51 },
+    { action: 'file', owner: 'o', repo: 'r', path: 'src/a.ts', limit: 51 },
     { action: 'issues', owner: 'o', repo: 'r', limit: 51 },
     { action: 'trending', limit: 26 },
     { action: 'search', query: 'q', perPage: 51 },

@@ -22,22 +22,35 @@ function webFilterFields(options?: { agent?: boolean; limitMax?: number; researc
   const fields: Record<string, TSchema> = {
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: options?.limitMax ?? RESEARCH_SEARCH_LIMIT_MAX, description: 'Max results: plain default 8 max 20; research default 12 max 30. Out-of-range rejected, never clamped.' })),
     yearFrom: Type.Optional(Type.Integer({ minimum: WEB_PROVIDER_MIN_YEAR_FROM, maximum: new Date().getUTCFullYear(), description: 'Earliest year in [1900, current UTC year].' })),
-    includeContent: Type.Optional(Type.Boolean({ description: 'Reuse full content when providers return it (cost-gated); default false. Search-only.' })),
-    recency: Type.Optional(StringEnum(['day', 'week', 'month', 'year'], { description: 'Recency filter; intersects with yearFrom (later bound wins). Search-only.' })),
-    domains: Type.Optional(Type.Array(Type.String(), { maxItems: WEB_SEARCH_MAX_DOMAINS, description: "Domain allow/exclude list, '-host' excludes. Search-only." })),
   };
+  // includeContent/recency/domains refine plain search only: the research
+  // route (buildResearchRoute) forwards query/source/limit/yearFrom/cursor
+  // and the research backend has no content/recency/domain inputs, so the
+  // research branches must not advertise them (silent drop otherwise).
+  if (options?.researchOnly !== true) {
+    fields.includeContent = Type.Optional(Type.Boolean({ description: 'Reuse full content when providers return it (cost-gated); default false. Search-only.' }));
+    fields.recency = Type.Optional(StringEnum(['day', 'week', 'month', 'year'], { description: 'Recency filter; intersects with yearFrom (later bound wins). Search-only.' }));
+    fields.domains = Type.Optional(Type.Array(Type.String(), { maxItems: WEB_SEARCH_MAX_DOMAINS, description: "Domain allow/exclude list, '-host' excludes. Search-only." }));
+  }
   if (options?.agent !== true) {
-    fields.category = options?.researchOnly === true
-      ? Type.Literal('research', { description: 'Research category pin for the research limit cap (30).' })
-      : Type.Optional(StringEnum(SEARCH_CATEGORY_NAMES, { description: 'Result set: plain web discovery, or "research" for the 12 academic/public-data sources. mode "agent" rejects category "research".' }));
-    fields.source = Type.Optional(StringEnum(['all', ...researchSourceIds()], { description: 'Research-only source pin (default all). Cursor needs one exact source, not all.' }));
-    fields.knowledge = Type.Optional(Type.Object({
-      entities: Type.Optional(Type.Boolean()),
-      facts: Type.Optional(Type.Boolean()),
-      topics: Type.Optional(Type.Boolean()),
-      sentiment: Type.Optional(Type.Boolean()),
-      enhance: Type.Optional(Type.Boolean()),
-    }, { minProperties: 1, additionalProperties: false, description: 'Optional knowledge composition over top results. Requires PI_SEARCH_KG_ENRICHMENT=1 plus at least one true flag (all-false stays runtime-rejected). Not supported with category "research".' }));
+    if (options?.researchOnly === true) {
+      // Research branches pin category; source is research-only; knowledge is
+      // web-only (route rejects it with research categories) so it is omitted.
+      fields.category = Type.Literal('research', { description: 'Research category pin for the research limit cap (30).' });
+      fields.source = Type.Optional(StringEnum(['all', ...researchSourceIds()], { description: 'Research-only source pin (default all). Cursor needs one exact source, not all.' }));
+    } else {
+      // Plain branches: category excludes research (research matches the
+      // researchOnly branches); source is research-only so it is omitted;
+      // knowledge stays (web-only composition).
+      fields.category = Type.Optional(StringEnum(SEARCH_CATEGORY_NAMES.filter((name) => name !== 'research'), { description: 'Result set: plain web discovery, or "research" for the 12 academic/public-data sources. mode "agent" rejects category "research".' }));
+      fields.knowledge = Type.Optional(Type.Object({
+        entities: Type.Optional(Type.Boolean()),
+        facts: Type.Optional(Type.Boolean()),
+        topics: Type.Optional(Type.Boolean()),
+        sentiment: Type.Optional(Type.Boolean()),
+        enhance: Type.Optional(Type.Boolean()),
+      }, { minProperties: 1, additionalProperties: false, description: 'Optional knowledge composition over top results. Requires PI_SEARCH_KG_ENRICHMENT=1 plus at least one true flag (all-false stays runtime-rejected). Not supported with category "research".' }));
+    }
   }
   return fields;
 }
@@ -66,10 +79,9 @@ export function buildWebSearchParameters(): TSchema {
       queries: batchField,
       ...webFilterFields({ limitMax: WEB_SEARCH_LIMIT_MAX }),
     }, { additionalProperties: false, description: 'Batch web search (1..8 queries).' }),
-    Type.Object({
-      queries: batchField,
-      ...webFilterFields({ limitMax: RESEARCH_SEARCH_LIMIT_MAX, researchOnly: true }),
-    }, { additionalProperties: false, description: 'Batch research search (category research, limit max 30).' }),
+    // No batch-research branch: the router (buildSearchRoute) rejects
+    // multi-query research (queries batch is not supported with category
+    // "research": pass a single query), so the schema must not advertise it.
     Type.Object({
       query: queryField,
       mode: Type.Literal('agent', { description: 'Agent mode: returns a provider-generated research report as the tool text (untrusted evidence). Single-query only; no cursor/source/knowledge/research category.' }),
