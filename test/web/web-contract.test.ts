@@ -83,10 +83,10 @@ test('canonical actions resolve; unknown rejected with capped echo', () => {
   assert.ok(!err.message.includes(long));
 });
 
-test('tool routing: web_search=search, fetch query-less=read, fetch query=crawl', () => {
+test('tool routing: web_search=search, fetch always=read (no crawl inference)', () => {
   assert.equal(resolveWebActionForTool('web_search', { query: 'q' }), 'search');
   assert.equal(resolveWebActionForTool('fetch', { url: 'https://example.com' }), 'read');
-  assert.equal(resolveWebActionForTool('fetch', { url: 'https://example.com', query: 'q' }), 'crawl');
+  assert.equal(resolveWebActionForTool('fetch', { url: 'https://example.com', query: 'q' }), 'read');
   assert.equal(resolveWebActionForTool('fetch', { url: 'https://example.com', query: '  ' }), 'read');
   const err = webError('unsupported_action', () => resolveWebActionForTool('github', {}));
   assert.ok(err.message.includes('github'));
@@ -321,4 +321,22 @@ test('web contract: agent mode rejects knowledge and research categories', async
       (err: unknown) => (err as { code?: string }).code === 'invalid_request',
     );
   }
+});
+
+test('video is a provider-neutral discovery category capped at the plain limit', async () => {
+  const mod = await import('../../src/web/web-contract.js');
+  assert.ok((mod.SEARCH_CATEGORY_NAMES as readonly string[]).includes('video'));
+  const ok = mod.validateWebRequest({ action: 'search', query: 'trailers', category: 'video', limit: 20 });
+  assert.equal(ok.request.limit, 20);
+  assert.equal(ok.request.researchCategory, false);
+  webError('invalid_request', () =>
+    mod.validateWebRequest({ action: 'search', query: 'trailers', category: 'video', limit: 21 }),
+  );
+});
+
+test('fetch tool maps to read without query-path crawl inference', async () => {
+  const mod = await import('../../src/web/web-contract.js');
+  assert.equal(mod.resolveWebActionForTool('fetch', { query: 'q' }), 'read');
+  assert.equal(mod.resolveWebActionForTool('fetch', {}), 'read');
+  assert.equal(mod.resolveWebActionForTool('web_search', {}), 'search');
 });

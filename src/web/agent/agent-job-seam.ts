@@ -1,0 +1,50 @@
+// Agent-job seam (Plan A5): the interface Plan C implements. buildSearchRoute
+// routes mode:'agent' here; the jobs registry owns the runtime. No
+// agent_jobs_unavailable throw ships on the green gate.
+
+import { createAgentJobEntry } from './agent-jobs.js';
+
+export interface AgentJobPointer {
+  jobId: string;
+}
+
+export interface CreateAgentJobParams {
+  query: string;
+  limit?: number;
+  category?: string;
+  yearFrom?: number;
+  recency?: string;
+  domains?: string[];
+  owner?: string;
+}
+
+let creator: (params: CreateAgentJobParams) => AgentJobPointer = (params) => {
+  const job = createAgentJobEntry({
+    query: params.query,
+    ...(params.owner !== undefined ? { owner: params.owner } : {}),
+  });
+  return { jobId: job.jobId };
+};
+
+/** Test seam: swap the job creator. Unset restores the registry path. */
+export function __setAgentJobCreator(next: ((params: CreateAgentJobParams) => AgentJobPointer) | undefined): void {
+  creator =
+    next ??
+    ((params) => {
+      const job = createAgentJobEntry({
+        query: params.query,
+        ...(params.owner !== undefined ? { owner: params.owner } : {}),
+      });
+      return { jobId: job.jobId };
+    });
+}
+
+export function createAgentJob(params: CreateAgentJobParams): AgentJobPointer {
+  const query = params.query.trim();
+  if (query === '') throw new Error('agent job requires a non-empty query');
+  const pointer = creator(params);
+  if (typeof pointer.jobId !== 'string' || pointer.jobId === '') {
+    throw new Error('agent job creator returned an invalid job pointer');
+  }
+  return { jobId: pointer.jobId };
+}

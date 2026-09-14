@@ -904,6 +904,11 @@ export function parseWebAccessFetchRequest(raw: Record<string, unknown>): WebAcc
   if (raw.provider !== undefined) {
     throw new WebAccessContractError('provider selection is operator-only (PI_SEARCH_WEB_BACKENDS); omit provider');
   }
+  // Presence-based union routing: claims selects claim-check, responseId
+  // selects retrieve. The legacy input `action` key is rejected upstream
+  // (fetch router); the action branches below remain for compat only.
+  if (raw.claims !== undefined) return parseSourceCheckFetch(raw);
+  if (raw.responseId !== undefined) return parseRetrieveFetch(raw);
   if (raw.action === undefined) return parseNormalFetch(raw);
   if (raw.action === 'retrieve') return parseRetrieveFetch(raw);
   if (raw.action === 'source_check') return parseSourceCheckFetch(raw);

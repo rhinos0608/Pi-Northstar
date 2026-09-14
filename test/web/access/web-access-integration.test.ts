@@ -4,24 +4,25 @@ import { buildFetchRoute } from '../../../src/index.js';
 import { callNativeTool } from '../../../src/native-tools.js';
 
 test('buildFetchRoute registers retrieve union', () => {
-  const route = buildFetchRoute({ mode: 'retrieve', responseId: 'r1', findText: 'x' });
+  const route = buildFetchRoute({ responseId: 'r1', offset: 0, limit: 10, findText: 'x' });
   assert.equal(route.tool, 'fetch');
-  assert.equal((route.args as { action: string }).action, 'retrieve');
+  assert.equal((route.args as { responseId: string }).responseId, 'r1');
+  assert.equal((route.args as { findText: string }).findText, 'x');
 });
 
 test('buildFetchRoute registers source_check union', () => {
-  const route = buildFetchRoute({ mode: 'source_check', responseId: 'r1', claims: ['c1'] });
-  assert.equal((route.args as { action: string }).action, 'source_check');
+  const route = buildFetchRoute({ responseId: 'r1', claims: ['c1'] });
+  assert.deepEqual((route.args as { claims: string[] }).claims, ['c1']);
 });
 
 test('buildFetchRoute registers urls array', () => {
-  const route = buildFetchRoute({ mode: 'read', urls: ['https://example.com/a', 'https://example.com/b'] });
+  const route = buildFetchRoute({ urls: ['https://example.com/a', 'https://example.com/b'] });
   assert.equal(route.tool, 'fetch');
   assert.deepEqual((route.args as { urls: string[] }).urls, ['https://example.com/a', 'https://example.com/b']);
 });
 
 test('buildFetchRoute urls array preserves query passage selector', async () => {
-  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', urls: ['https://example.com/a'] }, query: 'passage' });
+  const route = buildFetchRoute({ urls: ['https://example.com/a'], query: 'passage' });
   assert.equal(route.tool, 'fetch');
   assert.equal((route.args as { query: string }).query, 'passage');
   // Contract accepts urls+query on the fetch tool (old route threw 'url is required').
@@ -35,31 +36,31 @@ test('web_search caches fused hits for retrieve', async () => {
     { title: 'Alpha', url: 'https://example.com/alpha', snippet: 'alpha snippet', backend: 'tavily' },
   ]);
   assert.ok(typeof responseId === 'string' && responseId.length > 0, 'search must issue a responseId');
-  const out = await callNativeTool('fetch', { action: 'retrieve', responseId });
+  const out = await callNativeTool('fetch', { responseId });
   assert.ok(JSON.stringify(out).includes('alpha snippet'), 'cached corpus must serve stored hits');
 });
 
 test('removed batch_read/batch_crawl modes reject', () => {
-  assert.throws(() => buildFetchRoute({ mode: 'batch_read', urls: ['https://example.com/a'] } as never), /mode must be one of/);
-  assert.throws(() => buildFetchRoute({ mode: 'batch_crawl', urls: ['https://example.com/a'], query: 'q' } as never), /mode must be one of/);
+  assert.throws(() => buildFetchRoute({ mode: 'batch_read', urls: ['https://example.com/a'] } as never), /fetch no longer accepts 'mode'/);
+  assert.throws(() => buildFetchRoute({ mode: 'batch_crawl', urls: ['https://example.com/a'], query: 'q' } as never), /fetch no longer accepts 'mode'/);
 });
 
 test('buildFetchRoute rejects unknown action; contract rejects mixed selectors', async () => {
-  assert.throws(() => buildFetchRoute({ action: 'read', responseId: 'r' } as never), /fetch requires explicit mode/);
+  assert.throws(() => buildFetchRoute({ action: 'read', responseId: 'r' } as never), /fetch no longer accepts 'action'/);
   const { parseWebAccessFetchRequest } = await import('../../../src/web/access/web-access-contract.js');
   assert.throws(() => parseWebAccessFetchRequest({ url: 'https://example.com', urls: ['https://example.com'] }), /urls accepts only/);
 });
 
 test('fetch retrieve on empty cache throws contract-guided error, no network', async () => {
   await assert.rejects(
-    () => callNativeTool('fetch', { action: 'retrieve', responseId: 'missing-id' }, { env: {} }),
+    () => callNativeTool('fetch', { responseId: 'missing-id' }, { env: {} }),
     /No stored results for responseId/,
   );
 });
 
 test('fetch source_check on empty cache throws contract-guided error, no network', async () => {
   await assert.rejects(
-    () => callNativeTool('fetch', { action: 'source_check', responseId: 'missing-id', claims: ['claim'] }, { env: {} }),
+    () => callNativeTool('fetch', { responseId: 'missing-id', claims: ['claim'] }, { env: {} }),
     /No stored results for responseId/,
   );
 });

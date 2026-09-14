@@ -250,39 +250,27 @@ test('explicit override excludes codex unless listed; listed-but-unconfigured co
   );
 });
 
-test('semantic source URL discovery uses uniform RRF ordering', async () => {
+test('multi-url fetch reads explicit urls in input order with per-url isolation', async () => {
   const requestedPaths: string[] = [];
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async (input: string | URL | Request) => {
     const url = new URL(String(input));
-    if (url.href.startsWith(CHATGPT_URL)) {
-      return new Response(JSON.stringify({ results: [
-        { url: 'http://127.0.0.1:1/private', title: 'Private', snippet: 'skip' },
-        { url: 'https://example.com/a', title: 'A', snippet: 'a' },
-      ] }), { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    if (url.href.startsWith('https://duckduckgo.com/html/')) {
-      return new Response(
-        '<html><body><div><a class="result__a" href="https://example.com/b">B</a>' +
-        '<a class="result__snippet" href="https://example.com/b">b</a></div></body></html>',
-        { status: 200, headers: { 'content-type': 'text/html' } },
-      );
-    }
     requestedPaths.push(url.pathname);
     return new Response(`<html><body><h1>Page ${url.pathname.slice(1).toUpperCase()}</h1><p>This page contains unique ${url.pathname === '/a' ? 'alpha' : 'beta'} material about ranking order.</p></body></html>`, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
   };
 
   try {
+    // Crawl-from-search-source is deleted by the fetch clean break: callers
+    // pass explicit urls (e.g. from web_search); each URL reads in order.
     await callNativeTool('fetch', {
+      urls: ['https://example.com/a', 'https://example.com/b'],
       query: 'alpha beta',
-      source: { type: 'search', query: 'x' },
-      maxPages: 3,
       topK: 4,
     }, {
       env: { CODEX_ACCESS_TOKEN: 'tk', PI_SEARCH_EMBEDDING_ENABLED: '0', PI_SEARCH_WEB_BACKENDS: 'codex,duckduckgo' },
       lookup: async () => [{ address: '93.184.216.34', family: 4 }],
     });
-    assert.deepEqual(requestedPaths, ['/b', '/a'], 'uniform RRF orders by score; private discovered URL skipped');
+    assert.deepEqual(requestedPaths, ['/a', '/b'], 'explicit urls read in input order with per-url isolation');
   } finally {
     globalThis.fetch = savedFetch;
   }

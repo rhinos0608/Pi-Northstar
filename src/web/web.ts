@@ -977,7 +977,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
   if (embeddingEnabled) {
     try {
       acquired = await acquireEmbeddingSidecar(embeddingEnv);
-      embeddingClient = new EmbeddingClient({ baseUrl: acquired.baseUrl });
+      embeddingClient = new EmbeddingClient({ baseUrl: acquired.baseUrl, ...(acquired.apiToken !== undefined ? { apiToken: acquired.apiToken } : {}) });
       // External sidecars are caller-managed — verify reachability; the
       // local singleton is already health-poll verified by ensureRunning.
       if (acquired.external) await embeddingClient.health();

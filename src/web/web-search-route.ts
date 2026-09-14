@@ -1,4 +1,5 @@
 import { validateWebRequest } from './web-contract.js';
+import { createAgentJob } from './agent/agent-job-seam.js';
 import { DEFAULT_WEB_AGENT_TIMEOUT_MS } from './web-agent-report.js';
 
 // Discriminated model-facing shape (hard cutover, no legacy flat adapter):
@@ -193,6 +194,23 @@ export function buildSearchRoute(params: SearchRouteParams | Record<string, unkn
   assertSingleQueryCursor(normalized as SearchRouteParams);
   if (normalized.category === 'research') {
     return buildResearchRoute(normalized as SearchRouteParams, contractInput);
+  }
+  // Agent branch constructs via the agent-job seam into the parent-owned
+  // jobs registry. buildCanonicalSearchRoute stays untouched for non-agent
+  // paths. No inline report generation here: the job runs the opaque
+  // Tavily leg synchronously inside job execution; poll serves the snapshot.
+  if (normalized.mode === 'agent') {
+    const agent = normalized as AgentSearchParams;
+    const query = typeof contractInput.query === 'string' ? contractInput.query : agent.query;
+    const pointer = createAgentJob({
+      query,
+      ...(typeof contractInput.limit === 'number' ? { limit: contractInput.limit } : {}),
+      ...(typeof agent.category === 'string' ? { category: agent.category } : {}),
+      ...(typeof agent.yearFrom === 'number' ? { yearFrom: agent.yearFrom } : {}),
+      ...(typeof agent.recency === 'string' ? { recency: agent.recency } : {}),
+      ...(Array.isArray(agent.domains) ? { domains: agent.domains } : {}),
+    });
+    return { tool: 'agent_job', args: { jobId: pointer.jobId }, timeout: DEFAULT_WEB_AGENT_TIMEOUT_MS };
   }
   return buildCanonicalSearchRoute(normalized as SearchRouteParams, contractInput);
 }

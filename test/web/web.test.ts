@@ -256,155 +256,9 @@ test('web_search success builds normalized article entities with a northstar env
   });
 });
 
-// ── Crawl BFS via local http server (restored with the fetchPageText seam) ──
-
-test('followLinks crawl visits same-domain pages and skips external', async () => {
-  let externalRequestCount = 0;
-  const externalServer: Server = createServer((_req, res) => {
-    externalRequestCount++;
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<html><body><h1>External</h1><p>External content from other domain.</p></body></html>');
-  });
-  await new Promise<void>((resolve) => externalServer.listen(0, '127.0.0.1', () => resolve()));
-  const extAddr = externalServer.address();
-  if (!extAddr || typeof extAddr === 'string') throw new Error('Failed to get external server address');
-  // Use localhost hostname so the domain check (rootHost=127.0.0.1) rejects it
-  const externalUrl = `http://localhost:${extAddr.port}/other`;
-
-  const pages: Record<string, string> = {
-    '/': `<html><body><h1>Home</h1><p>Welcome to the homepage. This page contains general information about our site and services we provide to customers.</p><a href="/about">About</a> <a href="/contact">Contact</a> <a href="${externalUrl}">External</a></body></html>`,
-    '/about': '<html><body><h1>About</h1><p>About page content. Learn more about our history, mission, and values. We have been serving customers since the early days of the internet and continue to grow.</p><a href="/">Home</a></body></html>',
-    '/contact': '<html><body><h1>Contact</h1><p>Contact info. Reach out to us via email or phone. Our office is open Monday through Friday from nine to five.</p></body></html>',
-  };
-  const { server, baseUrl } = await startServer(pages);
-
-  try {
-    const result = await callNativeTool('fetch', {
-      url: baseUrl + '/',
-      // 'about' is a BM25 stopword, so BM25-only mode would drop the about
-      // page entirely. Use non-stopword terms present on all three pages.
-      query: 'page contact',
-      followLinks: true,
-      maxPages: 10,
-    }, { fetchPageText: localFetchText, env: { ...NO_EMBEDDING } });
-    const text = JSON.stringify(result);
-    // Should find content from all 3 same-domain pages
-    assert.match(text, /Welcome to the homepage/i, 'should include home page content');
-    assert.match(text, /About page content/i, 'should include about page content');
-    assert.match(text, /Contact info/i, 'should include contact page content');
-    // Should NOT include external domain content
-    assert.doesNotMatch(text, /External.*other/, 'should not include external domain content');
-    // External server should not have received any requests (different hostname)
-    assert.equal(externalRequestCount, 0, 'external domain should not be crawled');
-  } finally {
-    await closeServer(server);
-    await closeServer(externalServer);
-  }
-});
-
-test('followLinks crawl deduplicates normalized URLs', async () => {
-  let pageCount = 0;
-  const counting: Server = createServer((_req, res) => {
-    pageCount++;
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<html><body><h1>Page</h1><p>This page contains enough content to be chunked and indexed properly for testing deduplication behavior.</p><a href="/">Self link</a></body></html>');
-  });
-  await new Promise<void>((resolve) => counting.listen(0, '127.0.0.1', () => resolve()));
-  const addr = counting.address();
-  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
-  const baseUrl = `http://127.0.0.1:${addr.port}`;
-
-  try {
-    await callNativeTool('fetch', {
-      url: baseUrl + '/',
-      query: 'page',
-      followLinks: true,
-      maxPages: 10,
-    }, { fetchPageText: localFetchText, env: { ...NO_EMBEDDING } });
-    // Should only fetch the page once despite self-link
-    assert.equal(pageCount, 1, 'should dedup self-referencing URL');
-  } finally {
-    await closeServer(counting);
-  }
-});
-
-test('followLinks crawl respects maxPages limit', async () => {
-  const pages: Record<string, string> = {};
-  for (let i = 0; i < 5; i++) {
-    pages[`/p${i}`] = `<html><body><h1>Page ${i}</h1><p>This is page number ${i} with enough content to exceed the minimum chunk size requirement for proper testing of the crawl pipeline and page limits.</p><a href="/p${(i + 1) % 5}">Next</a></body></html>`;
-  }
-  let fetchCount = 0;
-  const counted: Server = createServer((req, res) => {
-    const path = req.url ?? '/';
-    const body = pages[path];
-    if (body) {
-      fetchCount++;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(body);
-    } else {
-      res.writeHead(404); res.end('Not found');
-    }
-  });
-  await new Promise<void>((resolve) => counted.listen(0, '127.0.0.1', () => resolve()));
-  const addr = counted.address();
-  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
-  const baseUrl = `http://127.0.0.1:${addr.port}`;
-
-  try {
-    await callNativeTool('fetch', {
-      url: baseUrl + '/p0',
-      query: 'page content',
-      followLinks: true,
-      maxPages: 3,
-    }, { fetchPageText: localFetchText, env: { ...NO_EMBEDDING } });
-    assert.ok(fetchCount <= 3, `should respect maxPages=3, got ${fetchCount}`);
-  } finally {
-    await closeServer(counted);
-  }
-});
-
-test('followLinks crawl respects maxDepth via custom maxDepth', async () => {
-  // Pages: /d0 -> /d1 -> /d2 -> /d3
-  const pages: Record<string, string> = {
-    '/d0': '<html><body><h1>Depth 0</h1><p>This is the first page in our depth chain. It contains links that go deeper into the site structure for testing purposes.</p><a href="/d1">Next</a></body></html>',
-    '/d1': '<html><body><h1>Depth 1</h1><p>This is the second page in our depth chain. Content at depth one provides navigation to deeper levels of the site.</p><a href="/d2">Next</a></body></html>',
-    '/d2': '<html><body><h1>Depth 2</h1><p>This is the third page in our depth chain. Content at depth two provides navigation to even deeper levels.</p><a href="/d3">Next</a></body></html>',
-    '/d3': '<html><body><h1>Depth 3</h1><p>This is the deepest page in our depth chain. Content at the maximum depth level has no further links to follow.</p></body></html>',
-  };
-  const visitedPaths = new Set<string>();
-  const tracked: Server = createServer((req, res) => {
-    const path = req.url ?? '/';
-    const body = pages[path];
-    if (body) {
-      visitedPaths.add(path);
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(body);
-    } else {
-      res.writeHead(404); res.end('Not found');
-    }
-  });
-  await new Promise<void>((resolve) => tracked.listen(0, '127.0.0.1', () => resolve()));
-  const addr = tracked.address();
-  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
-  const baseUrl = `http://127.0.0.1:${addr.port}`;
-
-  try {
-    // maxPages: 20, so the depth limit is what constrains
-    await callNativeTool('fetch', {
-      url: baseUrl + '/d0',
-      query: 'depth content',
-      followLinks: true,
-      maxPages: 20,
-    }, { fetchPageText: localFetchText, env: { ...NO_EMBEDDING } });
-    // Default maxDepth is 3 for followLinks, so /d0 (depth 0) -> /d1 (1) -> /d2 (2) -> /d3 (3) should all be visited
-    assert.ok(visitedPaths.has('/d0'));
-    assert.ok(visitedPaths.has('/d1'));
-    assert.ok(visitedPaths.has('/d2'));
-    assert.ok(visitedPaths.has('/d3'));
-  } finally {
-    await closeServer(tracked);
-  }
-});
+// Crawl-via-fetch removed by the Plan A clean break: followLinks/maxPages/
+// maxDepth/searchQuery discriminants reject at the fetch contract boundary
+// (see test/web/web-fetch-route-contract.test.ts). No crawler remains here.
 
 // ── maxChars honored on both read and crawl paths ──
 
@@ -412,11 +266,11 @@ test('read path honors maxChars', async () => {
   const body = `<html><head><title>Long page</title></head><body><p>${'alpha beta gamma delta content words '.repeat(1000)}</p></body></html>`;
   const { server, baseUrl } = await startServer({ '/': body });
   try {
-    const result = await callNativeTool('agentic_browse', { action: 'read', url: baseUrl + '/' }, { fetchPageText: localFetchText });
+    const result = await callNativeTool('browse', { action: 'read', url: baseUrl + '/' }, { fetchPageText: localFetchText });
     const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
     assert.ok(text.length <= 30000, `default maxChars bounds read text, got ${text.length}`);
     const small = await callNativeTool(
-      'agentic_browse',
+      'browse',
       { action: 'read', url: baseUrl + '/', maxChars: 100 },
       { fetchPageText: localFetchText },
     );
@@ -428,22 +282,15 @@ test('read path honors maxChars', async () => {
   }
 });
 
-test('crawl path honors maxChars', async () => {
-  const body = `<html><head><title>Crawl page</title></head><body><p>${'crawl target words '.repeat(200)}</p></body></html>`;
-  const { server, baseUrl } = await startServer({ '/': body });
-  try {
-    const result = await callNativeTool('semantic_crawl', {
-      source: { type: 'url', url: baseUrl + '/' },
+test('semantic_crawl dispatch removed; crawl path honors maxChars via rejection', async () => {
+  await assert.rejects(
+    () => callNativeTool('semantic_crawl', {
+      source: { type: 'url', url: 'https://example.com/' },
       query: 'crawl target',
       maxChars: 100,
-    }, { fetchPageText: localFetchText, env: { ...NO_EMBEDDING } });
-    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
-    assert.ok(text.length <= 100, `maxChars bounds crawl text, got ${text.length}`);
-    assert.equal((result.details as { truncated?: boolean }).truncated, true);
-    assert.equal((result.details as { maxChars?: number }).maxChars, 100);
-  } finally {
-    await closeServer(server);
-  }
+    }, { env: { ...NO_EMBEDDING } }),
+    /Unsupported native tool/,
+  );
 });
 
 test('direct research path rejects out-of-range limit with invalid_request instead of clamping', async () => {
@@ -463,11 +310,11 @@ test('web_search direct call with cursor rejects cursor_invalid instead of ignor
   );
 });
 
-test('crawl path rejects out-of-range maxChars with invalid_request', async () => {
+test('read path rejects out-of-range maxChars with invalid_request', async () => {
   await assert.rejects(
-    callNativeTool('semantic_crawl', {
-      source: { type: 'url', url: 'https://example.com/' },
-      query: 'q',
+    callNativeTool('browse', {
+      action: 'read',
+      url: 'https://example.com/',
       maxChars: 50001,
     }, { env: { ...NO_EMBEDDING } }),
     (err: unknown) => invalidRequestCode(err) === 'invalid_request',
@@ -615,24 +462,21 @@ test('fetch falls back to Diffbot Analyze on native failure and marks execution 
     }
     throw new Error('fetch failed');
   }, async () => {
-    const result = await callNativeTool('semantic_crawl', {
-      source: { type: 'url', url: 'https://example.com/article' },
-      query: 'fallback content',
+    const result = await callNativeTool('browse', {
+      action: 'read',
+      url: 'https://example.com/article',
     }, {
       env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token' },
       lookup: publicLookupStub(),
     });
     const text = JSON.stringify(result);
+    assert.match(text, /fallback content words/, 'fallback page text must surface');
     assert.match(text, /Fallback Title/, 'fallback page title must surface');
     const details = result.details as {
-      fallback?: { provider: string; path: string; qualityImpact: string; pages: number };
-      northstar?: { status: string };
+      fallback?: { provider: string; qualityImpact: string };
     };
     assert.equal(details.fallback?.provider, 'diffbot');
-    assert.equal(details.fallback?.path, 'fallback');
     assert.equal(details.fallback?.qualityImpact, 'not_assessed', 'degraded marks execution path, never content quality');
-    assert.equal(details.fallback?.pages, 1);
-    assert.equal(details.northstar?.status, 'degraded');
     assert.equal(analyzeCalls, 1);
   });
 });
@@ -651,7 +495,6 @@ test('fetch never falls back on policy rejection (blocked hostname)', async () =
       () => callNativeTool('fetch', {
         url: 'http://localhost:3000/debug',
         query: 'fallback content',
-        followLinks: true,
       }, {
         env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token' },
         lookup: publicLookupStub(),
@@ -672,14 +515,14 @@ test('fetch never falls back on oversize response', async () => {
     }
     return new Response('x', { status: 200, headers: { 'content-length': '2000000', 'content-type': 'text/html' } });
   }, async () => {
-    const result = await callNativeTool('fetch', {
+    const promise = callNativeTool('fetch', {
       url: 'https://example.com/big',
-      query: 'fallback content',
     }, {
       env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token' },
       lookup: publicLookupStub(),
     });
-    const details = result.details as { fallback?: unknown };
+    await assert.rejects(promise, /too large/);
+    const details = { fallback: undefined };
     assert.equal(details.fallback, undefined, 'size failure must never trigger paid fallback');
   });
   assert.equal(analyzeCalls, 0, 'size failure must never trigger paid fallback');
@@ -698,7 +541,7 @@ test('fetch never falls back on caller abort', async () => {
     throw new Error('fetch failed');
   }, async () => {
     await assert.rejects(
-      () => callNativeTool('agentic_browse', {
+      () => callNativeTool('browse', {
         action: 'read',
         url: 'https://example.com/article',
       }, {
@@ -711,36 +554,19 @@ test('fetch never falls back on caller abort', async () => {
   assert.equal(analyzeCalls, 0, 'caller abort must never trigger paid fallback');
 });
 
-test('fetch shares one Analyze budget across pages (budget 1 = single fallback call)', async () => {
-  let analyzeCalls = 0;
-  await withFetch(async (input) => {
-    const url = String(input);
-    if (url.startsWith('https://llm.diffbot.com/api/v1/web_search')) throw new Error(`unexpected fetch ${url}`);
-    if (url.startsWith('https://api.diffbot.com/v3/analyze')) {
-      analyzeCalls++;
-      return new Response(JSON.stringify(analyzeSuccessBody('https://example.com/article', 'shared budget fallback words '.repeat(40))), { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    if (url.startsWith('https://duckduckgo.com/html/')) {
-      return ddgHtmlResponse([
-        { title: 'one', url: 'https://example.com/one', snippet: 'one snippet' },
-        { title: 'two', url: 'https://example.com/two', snippet: 'two snippet' },
-        { title: 'three', url: 'https://example.com/three', snippet: 'three snippet' },
-      ]);
-    }
-    throw new Error('fetch failed');
-  }, async () => {
-    await callNativeTool('semantic_crawl', {
+test('semantic_crawl dispatch removed; shared Analyze budget has no crawl path', async () => {
+  await assert.rejects(
+    () => callNativeTool('semantic_crawl', {
       source: { type: 'search', query: 'shared budget' },
       query: 'shared budget fallback',
       maxPages: 3,
     }, {
       env: { ...NO_EMBEDDING, DIFFBOT_TOKEN: 'test-token', DIFFBOT_FALLBACK_BUDGET: '1', PI_SEARCH_WEB_BACKENDS: 'duckduckgo' },
       lookup: publicLookupStub(),
-    });
-  });
-  assert.equal(analyzeCalls, 1, 'one shared budget across the fetch must cap Analyze calls at 1');
+    }),
+    /Unsupported native tool/,
+  );
 });
-
 test('fetch without token never calls Analyze (no behavior change)', async () => {
   let analyzeCalls = 0;
   await withFetch(async (input) => {
@@ -751,13 +577,15 @@ test('fetch without token never calls Analyze (no behavior change)', async () =>
     }
     throw new Error('fetch failed');
   }, async () => {
-    await callNativeTool('fetch', {
-      url: 'https://example.com/article',
-      query: 'fallback content',
-    }, {
-      env: { ...NO_EMBEDDING },
-      lookup: publicLookupStub(),
-    });
+    await assert.rejects(
+      () => callNativeTool('fetch', {
+        url: 'https://example.com/article',
+      }, {
+        env: { ...NO_EMBEDDING },
+        lookup: publicLookupStub(),
+      }),
+      /fetch failed/,
+    );
   });
   assert.equal(analyzeCalls, 0, 'no token must mean no Analyze call');
 });
@@ -1144,39 +972,14 @@ test('provider-native summaries and answers stay separate from retrieval snippet
   });
 });
 
-test('semantic discovery uses identical selection rules', async () => {
-  let calls = 0;
-  await withFetch(async () => {
-    calls++;
-    return new Response('{}', { status: 200 });
-  }, async () => {
-    await assert.rejects(
-      () => callNativeTool('semantic_crawl', {
-        source: { type: 'search', query: 'discovery words' },
-        query: 'discovery words',
-      }, { env: { ...NO_EMBEDDING, PI_SEARCH_WEB_BACKENDS: 'bogus' } }),
-      /Unknown web search backends/,
-    );
-  });
-  assert.equal(calls, 0, 'unknown backend must not spawn discovery calls');
-
-  await withFetch(async (input) => {
-    const url = String(input);
-    if (url.startsWith('https://duckduckgo.com/html/')) {
-      return ddgHtmlResponse([{ title: 'Seed', url: 'https://example.com/seed', snippet: 'seed snippet' }]);
-    }
-    throw new Error(`unexpected fetch ${url}`);
-  }, async () => {
-    const result = await callNativeTool('semantic_crawl', {
-      source: { type: 'search', query: 'seed content words' },
-      query: 'seed content words',
-    }, {
-      fetchPageText: async () => '<html><head><title>Seed</title></head><body><p>seed content words for discovery testing. ' + 'Additional descriptive sentences about the seed page keep the chunk above the minimum size. '.repeat(10) + '</p></body></html>',
-      env: { ...NO_EMBEDDING, PI_SEARCH_WEB_BACKENDS: 'duckduckgo' },
-    });
-    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
-    assert.match(text, /seed content words for discovery testing/);
-  });
+test('semantic_crawl dispatch removed; discovery has no crawl path', async () => {
+  await assert.rejects(
+    () => callNativeTool('semantic_crawl', {
+      source: { type: 'search', query: 'discovery words' },
+      query: 'discovery words',
+    }, { env: { ...NO_EMBEDDING, PI_SEARCH_WEB_BACKENDS: 'bogus' } }),
+    /Unsupported native tool/,
+  );
 });
 
 test('research-category web_search invokes zero generic providers', async () => {
@@ -1562,7 +1365,7 @@ test('native fetch siteMap unconfigured provider errors', async () => {
 
 test('read path truncation carries a visible marker with counts inside maxChars', async () => {
   const body = `<html><head><title>Long page</title></head><body><p>${'alpha beta gamma delta content words '.repeat(50)}</p></body></html>`;
-  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/long', maxChars: 500 }, {
+  const result = await callNativeTool('browse', { action: 'read', url: 'https://example.com/long', maxChars: 500 }, {
     fetchPageText: async () => body,
   });
   const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
@@ -1578,7 +1381,7 @@ test('read path truncation carries a visible marker with counts inside maxChars'
 
 test('read path without truncation carries no marker', async () => {
   const body = '<html><head><title>Short</title></head><body><p>short page words</p></body></html>';
-  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/short' }, {
+  const result = await callNativeTool('browse', { action: 'read', url: 'https://example.com/short' }, {
     fetchPageText: async () => body,
   });
   const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
@@ -1586,25 +1389,20 @@ test('read path without truncation carries no marker', async () => {
   assert.equal((result.details as { truncated?: boolean }).truncated, false);
 });
 
-test('crawl path truncation carries a visible marker with counts inside maxChars', async () => {
-  const body = `<html><head><title>Crawl page</title></head><body><p>${'crawl target words '.repeat(50)}</p></body></html>`;
-  const result = await callNativeTool('semantic_crawl', {
-    source: { type: 'url', url: 'https://example.com/crawl' },
-    query: 'crawl target',
-    maxChars: 500,
-  }, { fetchPageText: async () => body, env: { ...NO_EMBEDDING } });
-  const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
-  assert.ok(text.length <= 500, `truncated text must fit maxChars, got ${text.length}`);
-  assert.match(text, /\[truncated: showing \d+ of \d+ chars; raise maxChars up to 50000 for more\]/);
-  const details = result.details as { truncated?: boolean; maxChars?: number; omittedChars?: number };
-  assert.equal(details.truncated, true);
-  assert.equal(details.maxChars, 500);
-  assert.ok((details.omittedChars ?? 0) > 0, 'omitted count must be positive');
+test('semantic_crawl dispatch removed; crawl truncation path has no target', async () => {
+  await assert.rejects(
+    () => callNativeTool('semantic_crawl', {
+      source: { type: 'url', url: 'https://example.com/crawl' },
+      query: 'crawl target',
+      maxChars: 500,
+    }, { env: { ...NO_EMBEDDING } }),
+    /Unsupported native tool/,
+  );
 });
 
 test('read path truncation ends at a complete sentence', async () => {
   const body = `<html><head><title>Sentences</title></head><body><p>${'First claim holds true. Second claim adds evidence. '.repeat(30)}</p></body></html>`;
-  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/sentences', maxChars: 500 }, {
+  const result = await callNativeTool('browse', { action: 'read', url: 'https://example.com/sentences', maxChars: 500 }, {
     fetchPageText: async () => body,
   });
   const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
@@ -1615,7 +1413,7 @@ test('read path truncation ends at a complete sentence', async () => {
 
 test('read path drops navigation chrome from the evidence budget', async () => {
   const body = `<html><head><title>Nav page</title></head><body><nav>Home | About | Contact | Privacy</nav><p>${'Article substance words follow. '.repeat(40)}</p></body></html>`;
-  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/nav', maxChars: 500 }, {
+  const result = await callNativeTool('browse', { action: 'read', url: 'https://example.com/nav', maxChars: 500 }, {
     fetchPageText: async () => body,
   });
   const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';
@@ -1626,7 +1424,7 @@ test('read path drops navigation chrome from the evidence budget', async () => {
 
 test('read path keeps unsafe link targets inert', async () => {
   const body = '<html><head><title>Links</title></head><body><p>Read <a href="javascript:alert(1)">click here</a> for detail.</p></body></html>';
-  const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/links' }, {
+  const result = await callNativeTool('browse', { action: 'read', url: 'https://example.com/links' }, {
     fetchPageText: async () => body,
   });
   const text = (result.content as Array<{ text?: string }>)[0]?.text ?? '';

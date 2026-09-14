@@ -75,19 +75,19 @@ export function resolveWebAction(action: string): WebAction {
   return action;
 }
 
-function hasQuery(value: unknown): boolean {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
 /**
  * Route a public tool call to its canonical web action.
- * web_search maps to search; the fetch tool's query-less path is read and its
- * query path is crawl. Anything else throws unsupported_action with the tool
- * name echoed capped to 32 chars.
+ * web_search maps to search; fetch maps to read (the mode-free 5-branch
+ * union carries no crawl/read discriminant — query-bearing fetches route
+ * through the read-query path). Anything else throws unsupported_action
+ * with the tool name echoed capped to 32 chars.
  */
 export function resolveWebActionForTool(tool: string, args: Record<string, unknown>): WebAction {
   if (tool === 'web_search') return 'search';
-  if (tool === 'fetch') return hasQuery(args.query) ? 'crawl' : 'read';
+  if (tool === 'fetch') {
+    void args;
+    return 'read';
+  }
   throw webError('unsupported_action', `Unsupported web tool: ${String(tool).slice(0, 32)}`);
 }
 
@@ -109,7 +109,9 @@ export const MAX_WEB_URL_LENGTH = 2048;
 export const WEB_SEARCH_MAX_BATCH_QUERIES = 8;
 export const WEB_SEARCH_MAX_DOMAINS = 32;
 
-/** Canonical model-facing web_search category names (single source of truth). */
+/** Canonical model-facing web_search category names (single source of truth).
+ *  'video' is a provider-neutral discovery category capped at the plain
+ *  search limit (WEB_SEARCH_LIMIT_MAX=20). */
 export const SEARCH_CATEGORY_NAMES = [
   'company',
   'research paper',
@@ -121,6 +123,7 @@ export const SEARCH_CATEGORY_NAMES = [
   'people',
   'financial report',
   'research',
+  'video',
 ] as const;
 const WEB_SEARCH_RECENCIES: readonly string[] = ['day', 'week', 'month', 'year'];
 
@@ -498,12 +501,12 @@ export function validateWebEntity(value: unknown): { ok: boolean; issues: string
   if (entity.content !== undefined) {
     if (typeof entity.content !== 'string') {
       issues.push('content must be a string');
-    } else if (entity.content.length > WEB_ENTITY_CONTENT_MAX) {
-      issues.push(`content exceeds maximum length of ${WEB_ENTITY_CONTENT_MAX}`);
+    } else if (Buffer.byteLength(entity.content, 'utf8') > WEB_ENTITY_CONTENT_MAX) {
+      issues.push(`content exceeds maximum of ${WEB_ENTITY_CONTENT_MAX} bytes (UTF-8)`);
     }
   }
-  if (typeof entity.snippet === 'string' && entity.snippet.length > WEB_ENTITY_CONTENT_MAX) {
-    issues.push(`snippet exceeds maximum length of ${WEB_ENTITY_CONTENT_MAX}`);
+  if (typeof entity.snippet === 'string' && Buffer.byteLength(entity.snippet, 'utf8') > WEB_ENTITY_CONTENT_MAX) {
+    issues.push(`snippet exceeds maximum of ${WEB_ENTITY_CONTENT_MAX} bytes (UTF-8)`);
   }
   for (const key of Object.keys(entity)) {
     if (!WEB_ARTICLE_FIELDS.has(key)) issues.push(`${key} is not a known field for kind article`);
@@ -539,7 +542,7 @@ export function dedupeWebEntities(entities: WebEntityV1[]): WebEntityV1[] {
 }
 
 function webEntityTextLength(entity: WebEntityV1): number {
-  return (entity.snippet?.length ?? 0) + (entity.content?.length ?? 0);
+  return Buffer.byteLength(entity.snippet ?? '', 'utf8') + Buffer.byteLength(entity.content ?? '', 'utf8');
 }
 
 export function validateWebPage(value: unknown): { ok: boolean; issues: string[]; page?: WebPageV1 } {
@@ -571,7 +574,7 @@ export function validateWebPage(value: unknown): { ok: boolean; issues: string[]
       }
       const total = entities.reduce((sum, entity) => sum + webEntityTextLength(entity), 0);
       if (total > WEB_PAGE_CONTENT_MAX) {
-        issues.push(`page content exceeds maximum of ${WEB_PAGE_CONTENT_MAX} chars`);
+        issues.push(`page content exceeds maximum of ${WEB_PAGE_CONTENT_MAX} bytes (UTF-8)`);
       }
     }
   }

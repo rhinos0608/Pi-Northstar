@@ -1,4 +1,7 @@
-// Provider-neutral agent-report registry for web_search mode:"agent".
+// Internal report provider for web_search mode:"agent" jobs.
+// Demoted to internal provider: no direct route reaches this module.
+// src/web/agent/agent-report-route.ts wraps it opaquely (sync-inside-job)
+// and the jobs registry owns execution; poll serves the snapshot.
 // First provider is Tavily Research (POST /research streaming SSE).
 // Future report-capable providers append to REPORT_PROVIDERS; web.ts never
 // sees provider specifics. Terminal provider failure throws immediately with
