@@ -68,6 +68,35 @@ test('redactProvenance strips provider/model/secret keys deeply', () => {
   assert.deepEqual(out, { a: 1, nested: { keep: true }, list: [{ ok: 2 }] });
 });
 
+test('redactProvenance keeps author/authors but strips auth variants', () => {
+  const out = redactProvenance({
+    author: 'Jane', authors: ['Jane', 'Jo'],
+    auth: 'x', authToken: 't', authorization: 'b', AuthHeaders: 'h',
+    nested: { author: 'Nested', authToken: 'strip' },
+  });
+  assert.deepEqual(out, {
+    author: 'Jane', authors: ['Jane', 'Jo'],
+    nested: { author: 'Nested' },
+  });
+});
+
+test('redactProvenance strips extended secret stems deeply', () => {
+  const out = redactProvenance({
+    title: 'T', url: 'https://example.com', text: 'body', query: 'q',
+    sources: [{ id: 's-0' }], claims: ['c'],
+    passwd: 'x', password: 'y', credentials: 'z', credential: 'w',
+    bearer: 'b', bearerToken: 'bt', private_key: 'pk', 'private-key': 'pk2',
+    nested: { password: 'strip', author: 'Keep', keep: true },
+    list: [{ passwd: 1, ok: 2 }],
+  });
+  assert.deepEqual(out, {
+    title: 'T', url: 'https://example.com', text: 'body', query: 'q',
+    sources: [{ id: 's-0' }], claims: ['c'],
+    nested: { author: 'Keep', keep: true },
+    list: [{ ok: 2 }],
+  });
+});
+
 test('core clips overlong claims to the byte budget', async () => {
   const { AGENT_CLAIM_MAX_BYTES } = await import('../../../src/web/agent/agent-contract.js');
   const long = 'é'.repeat(AGENT_CLAIM_MAX_BYTES);

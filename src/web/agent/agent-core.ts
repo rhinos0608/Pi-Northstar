@@ -39,14 +39,19 @@ export interface AgentCoreDeps {
 
 /** Strip provider/model/secret provenance before composition. Substring stems
  *  catch key variants (providers, modelName, providerId, authToken, apiKeys,
- *  backendName, tokens, x-provider); composed keys (title/url/text/query/
- *  sources/claims) carry none of these stems and survive. */
+ *  backendName, tokens, x-provider, passwd, password, credential, bearer,
+ *  private_key); exact author/authors survive the auth stem; composed keys
+ *  (title/url/text/query/sources/claims) carry none of these stems and survive. */
 export function redactProvenance<T>(value: T): T {
   if (Array.isArray(value)) return value.map(redactProvenance) as unknown as T;
   if (typeof value === 'object' && value !== null) {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (/(provider|model|token|secret|api[_-]?key|auth|backend)/i.test(key)) continue;
+      if (/^authors?$/i.test(key)) {
+        out[key] = redactProvenance(entry);
+        continue;
+      }
+      if (/(provider|model|token|secret|api[_-]?key|auth|backend|passwd|password|credential|bearer|private[_-]?key)/i.test(key)) continue;
       out[key] = redactProvenance(entry);
     }
     return out as T;
