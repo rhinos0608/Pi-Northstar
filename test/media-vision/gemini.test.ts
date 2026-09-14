@@ -8,8 +8,11 @@ import { test } from 'node:test';
 import {
   GEMINI_DEFAULT_VISION_MODEL,
   GEMINI_MAX_INLINE_BYTES,
+  GEMINI_UNCONFIGURED_CODE,
+  GeminiUnconfiguredError,
   createGeminiTransport,
   describeImageWithGemini,
+  isGeminiUnconfiguredError,
   resolveGeminiConfig,
   type GeminiConfig,
   type GeminiTransport,
@@ -19,6 +22,19 @@ import {
   askGeminiWeb,
   geminiWebEnabled,
 } from '../../src/media-vision/gemini-web.js';
+
+/** Minimal valid PNG bytes (signature + IHDR): sniffable by sniffImageMime. */
+function tinyPng(): Uint8Array {
+  return new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x02, 0x00, 0x00, 0x00,
+  ]);
+}
+
+/** Enabled-only env: every direct Gemini construction test opts in explicitly. */
+const ENABLED_ENV = { PI_VISION_GEMINI_ENABLED: '1' };
 
 function mockTransport(responses: { text: string; usageTokens?: number } = { text: 'seen' }): { transport: GeminiTransport; calls: { count: number } } {
   const calls = { count: 0 };
@@ -63,8 +79,49 @@ test('gemini vertex resolves GOOGLE_VERTEX_PROJECT alias like GOOGLE_CLOUD_PROJE
 
 test('gemini developer transport without a key rejects before SDK construction', async () => {
   const config: GeminiConfig = { model: GEMINI_DEFAULT_VISION_MODEL, auth: { kind: 'developer' } };
-  const transport = createGeminiTransport(config, {});
+  const transport = createGeminiTransport(config, ENABLED_ENV);
   await assert.rejects(transport.generateContent({ prompt: 'hi' }), /unconfigured/);
+});
+
+test('gemini constructor without the exact opt-in throws before any call', () => {
+  const config: GeminiConfig = { model: GEMINI_DEFAULT_VISION_MODEL, auth: { kind: 'developer' } };
+  assert.throws(
+    () => createGeminiTransport(config, {}),
+    (error: unknown) => isGeminiUnconfiguredError(error) && /disabled/.test((error as Error).message),
+  );
+  assert.throws(
+    () => createGeminiTransport(config, { PI_VISION_GEMINI_ENABLED: 'true' }),
+    (error: unknown) => isGeminiUnconfiguredError(error),
+  );
+});
+
+test('local-unconfigured errors stay distinct from retryable provider failures', async () => {
+  const config: GeminiConfig = { model: GEMINI_DEFAULT_VISION_MODEL, auth: { kind: 'developer' } };
+  const transport = createGeminiTransport(config, ENABLED_ENV);
+  // Missing key: unwrapped local error (no 'generate failed' prefix), machine-readable code.
+  await assert.rejects(transport.generateContent({ prompt: 'hi' }), (error: unknown) => {
+    assert.ok(error instanceof GeminiUnconfiguredError);
+    assert.equal((error as GeminiUnconfiguredError).code, GEMINI_UNCONFIGURED_CODE);
+    assert.ok(isGeminiUnconfiguredError(error));
+    assert.ok(!(error instanceof Error && error.message.includes('gemini generate failed')));
+    return true;
+  });
+  // True provider failure through the seam: keeps the 'generate failed' prefix, not unconfigured.
+  const failing: GeminiTransport = {
+    async generateContent(): Promise<never> {
+      throw new Error('upstream 503');
+    },
+    async countTokens() {
+      return {};
+    },
+  };
+  const providerTransport = createGeminiTransport(config, ENABLED_ENV, {
+    createClient: () => ({ generate: failing }),
+  });
+  await assert.rejects(providerTransport.generateContent({ prompt: 'hi' }), (error: unknown) => {
+    assert.ok(!isGeminiUnconfiguredError(error));
+    return error instanceof Error && error.message.startsWith('gemini generate failed:');
+  });
 });
 
 test('gemini enabled without key is unconfigured (never broadens tier)', () => {
@@ -112,7 +169,7 @@ test('gemini vertex config carries exact project/location to client factory', as
   };
   const transport = createGeminiTransport(
     { model: 'gemini-2.0-flash', auth: { kind: 'vertex', project: 'proj-1', location: 'us-central1' } },
-    {},
+    ENABLED_ENV,
     { createClient: factory },
   );
   await transport.generateContent({ prompt: 'hi' });
@@ -136,10 +193,24 @@ test('describeImage rejects oversize payload before any transport call', async (
 test('describeImage returns text + usage verbatim through mock transport', async () => {
   const { transport, calls } = mockTransport({ text: 'a cat', usageTokens: 42 });
   const config: GeminiConfig = { model: GEMINI_DEFAULT_VISION_MODEL, auth: { kind: 'developer' } };
-  const result = await describeImageWithGemini(new Uint8Array([1, 2, 3]), 'image/png', 'describe', config, { transport });
+  const result = await describeImageWithGemini(tinyPng(), 'image/png', 'describe', config, { transport });
   assert.equal(result.text, 'a cat');
   assert.equal(result.usageTokens, 42);
   assert.equal(calls.count, 1);
+});
+
+test('describeImage sniffs MIME first: caller MIME never trusted verbatim', async () => {
+  const { transport, calls } = mockTransport({ text: 'must not be called' });
+  const config: GeminiConfig = { model: GEMINI_DEFAULT_VISION_MODEL, auth: { kind: 'developer' } };
+  // Mismatched hint rejects like the image pipeline (unknown-image-type).
+  const mismatched = await describeImageWithGemini(tinyPng(), 'image/jpeg', 'describe', config, { transport });
+  assert.equal(mismatched.text, '');
+  assert.ok(mismatched.warnings.includes('unknown-image-type'));
+  // Unsniffable bytes reject the same way.
+  const unknown = await describeImageWithGemini(new Uint8Array([1, 2, 3]), 'image/png', 'describe', config, { transport });
+  assert.equal(unknown.text, '');
+  assert.ok(unknown.warnings.includes('unknown-image-type'));
+  assert.equal(calls.count, 0);
 });
 
 test('gemini transport errors redact credential-shaped material', async () => {
@@ -153,7 +224,7 @@ test('gemini transport errors redact credential-shaped material', async () => {
     },
   };
   const config: GeminiConfig = { model: GEMINI_DEFAULT_VISION_MODEL, auth: { kind: 'developer' } };
-  const transport = createGeminiTransport(config, {}, { createClient: () => ({ generate: failing }) });
+  const transport = createGeminiTransport(config, ENABLED_ENV, { createClient: () => ({ generate: failing }) });
   await assert.rejects(transport.generateContent({ prompt: 'x' }), (error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     return !message.includes(secret) && message.includes('[redacted]');

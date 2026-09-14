@@ -143,6 +143,9 @@ export function readImageDimensions(bytes: Uint8Array, mimeType: string): { widt
         // 14-bit (width - 1) in bits 0-13 and 14-bit (height - 1) in bits
         // 14-27. The top height bits live in byte 24, so all four bytes are
         // required; `>>>` avoids signed 32-bit truncation of the height field.
+        // Verify the signature before parsing dims: without it these bytes
+        // are not a VP8L bitstream and the packed fields would be garbage.
+        if ((bytes[20] ?? 0) !== 0x2f) return undefined;
         const bits = u32le(bytes, 21);
         const width = (bits & 0x3fff) + 1;
         const height = ((bits >>> 14) & 0x3fff) + 1;

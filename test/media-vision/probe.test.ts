@@ -9,8 +9,12 @@ import {
 } from '../../src/media-vision/openai-compatible.js';
 import {
   buildSyntheticProbeImage,
+  isProbeAnswerPassing,
   isVisionRefusal,
+  matchedProbeValues,
   mentionsProbeValue,
+  PROBE_COLORS,
+  PROBE_SHAPES,
   probeVisionModels,
   runVisionProbe,
   VISION_PROBE_PROMPT,
@@ -236,6 +240,46 @@ describe('synthetic vision probe', () => {
     assert.equal(mentionsProbeValue('a colored square', 'square'), true);
     assert.equal(mentionsProbeValue('a colored square', 'red'), false);
     assert.equal(mentionsProbeValue('a red square', 'red'), true);
+  });
+
+  it('mentionsProbeValue escapes RegExp metacharacters (literal match)', () => {
+    assert.equal(mentionsProbeValue('a red square', 'red'), true);
+    // '.' must not act as a wildcard: 'red' does not contain 'r.d' literally.
+    assert.equal(mentionsProbeValue('a red square', 'r.d'), false);
+    assert.equal(mentionsProbeValue('price (red) here', 'red'), true);
+    assert.equal(mentionsProbeValue('a red square', '(red)'), false);
+    assert.equal(mentionsProbeValue('a red+blue square', 'red+blue'), true);
+  });
+
+  it('exclusivity: full-vocabulary enumeration fails even naming expected pair', () => {
+    const enumeration = [...PROBE_SHAPES, ...PROBE_COLORS.map((c) => c.name)].join(' ');
+    assert.ok(matchedProbeValues(enumeration, PROBE_SHAPES).length > 1);
+    assert.ok(matchedProbeValues(enumeration, PROBE_COLORS.map((c) => c.name)).length > 1);
+    assert.equal(isProbeAnswerPassing(enumeration, 'circle', 'red'), false);
+    assert.equal(isProbeAnswerPassing(enumeration, 'square', 'blue'), false);
+  });
+
+  it('exclusivity: single wrong pair fails, exact single pair passes', () => {
+    assert.equal(isProbeAnswerPassing('a red circle on white', 'square', 'blue'), false);
+    assert.equal(isProbeAnswerPassing('a blue square on white', 'square', 'blue'), true);
+    // Extra vocab hit on either axis fails: two shapes or two colors.
+    assert.equal(isProbeAnswerPassing('a blue square and a red circle', 'square', 'blue'), false);
+    assert.equal(isProbeAnswerPassing('a blue and red square', 'square', 'blue'), false);
+  });
+
+  it('exclusivity: plural forms of the single pair still pass', () => {
+    assert.equal(isProbeAnswerPassing('two blue squares on white', 'square', 'blue'), true);
+    assert.equal(isProbeAnswerPassing('red circles everywhere', 'circle', 'red'), true);
+  });
+
+  it('rejects a full-vocabulary enumeration answer without vision', async () => {
+    const enumeration = [...PROBE_SHAPES, ...PROBE_COLORS.map((c) => c.name)].join(' ');
+    const transport: VisionProbeTransport = {
+      describe: async () => ({ ok: true, text: enumeration }),
+    };
+    const result = await runVisionProbe(transport, { modelId: 'vocab-lister' });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'probe_mismatch');
   });
 
   it('accepts a model that describes the probe image', async () => {

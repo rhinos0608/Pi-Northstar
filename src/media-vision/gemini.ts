@@ -12,6 +12,7 @@ import {
   GEMINI_ENABLED_ENV_VAR,
   VERTEX_PROJECT_ENV_VARS,
 } from './eligibility.js';
+import { sniffImageMime } from './pipeline-image.js';
 
 export { GEMINI_ENABLED_ENV_VAR };
 
@@ -114,6 +115,33 @@ export interface GeminiTransportSeams {
   createClient?: ((config: GeminiConfig) => { generate: GeminiTransport }) | undefined;
 }
 
+/** Machine-readable code marking a local Gemini misconfiguration (not a provider failure). */
+export const GEMINI_UNCONFIGURED_CODE = 'gemini-unconfigured';
+
+/**
+ * Local configuration failure: Gemini route disabled or credential missing.
+ * Thrown unwrapped (never prefixed with `gemini generate failed:`) so
+ * callers can distinguish it from retryable provider errors via
+ * `isGeminiUnconfiguredError` without string-matching message text.
+ */
+export class GeminiUnconfiguredError extends Error {
+  readonly code = GEMINI_UNCONFIGURED_CODE;
+  constructor(message: string) {
+    super(message);
+    this.name = 'GeminiUnconfiguredError';
+  }
+}
+
+/** True for local Gemini misconfiguration; false for provider failures. */
+export function isGeminiUnconfiguredError(error: unknown): boolean {
+  if (error instanceof GeminiUnconfiguredError) return true;
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === GEMINI_UNCONFIGURED_CODE
+  );
+}
+
 function buildSdkClient(config: GeminiConfig, apiKey: string | undefined): GoogleGenAI {
   if (config.auth.kind === 'vertex') {
     return new GoogleGenAI({
@@ -123,7 +151,7 @@ function buildSdkClient(config: GeminiConfig, apiKey: string | undefined): Googl
     });
   }
   if (apiKey === undefined || apiKey.trim().length === 0) {
-    throw new Error('gemini unconfigured: developer API key missing');
+    throw new GeminiUnconfiguredError('gemini unconfigured: developer API key missing');
   }
   return new GoogleGenAI({ apiKey });
 }
@@ -137,11 +165,19 @@ export function createGeminiTransport(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
   seams: GeminiTransportSeams = {},
 ): GeminiTransport {
+  // Local misconfiguration fails fast here (before any SDK construction)
+  // so a disabled route never reaches the network, even lazily.
+  if (env[GEMINI_ENABLED_ENV_VAR] !== '1') {
+    throw new GeminiUnconfiguredError(
+      `gemini disabled: set ${GEMINI_ENABLED_ENV_VAR}=1 to enable this route`,
+    );
+  }
   const wrap = (inner: GeminiTransport): GeminiTransport => ({
     async generateContent(request: GeminiGenerateRequest): Promise<GeminiGenerateResponse> {
       try {
         return await inner.generateContent(request);
       } catch (error) {
+        if (isGeminiUnconfiguredError(error)) throw error;
         throw new Error(`gemini generate failed: ${redactGeminiError(error)}`);
       }
     },
@@ -149,6 +185,7 @@ export function createGeminiTransport(
       try {
         return await inner.countTokens(request);
       } catch (error) {
+        if (isGeminiUnconfiguredError(error)) throw error;
         throw new Error(`gemini count failed: ${redactGeminiError(error)}`);
       }
     },
@@ -183,6 +220,7 @@ export function createGeminiTransport(
         const usageTokens = response.usageMetadata?.totalTokenCount ?? undefined;
         return usageTokens === undefined ? { text } : { text, usageTokens };
       } catch (error) {
+        if (isGeminiUnconfiguredError(error)) throw error;
         throw new Error(`gemini generate failed: ${redactGeminiError(error)}`);
       }
     },
@@ -196,6 +234,7 @@ export function createGeminiTransport(
           ? {}
           : { totalTokens: response.totalTokens };
       } catch (error) {
+        if (isGeminiUnconfiguredError(error)) throw error;
         throw new Error(`gemini count failed: ${redactGeminiError(error)}`);
       }
     },
@@ -238,6 +277,12 @@ export async function describeImageWithGemini(
   }
   if (imageBytes.byteLength > GEMINI_MAX_INLINE_BYTES) {
     return { text: '', warnings: ['image-over-byte-ceiling'] };
+  }
+  // Never trust caller MIME verbatim: sniff first, reject disagreements with
+  // the same unknown-image-type failure the image pipeline uses.
+  const sniffed = sniffImageMime(imageBytes);
+  if (sniffed === undefined || sniffed !== mimeType) {
+    return { text: '', warnings: ['unknown-image-type'] };
   }
   const active = options.transport ?? createGeminiTransport(config, options.env ?? process.env);
   const response = await active.generateContent({

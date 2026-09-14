@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   IMAGE_MAX_BYTES,
+  IMAGE_MAX_MEGAPIXELS,
   chunkVisionEvidence,
   fuseVisionRankings,
   rankVisionChunks,
@@ -92,6 +93,37 @@ test('dimensions parse VP8L height bits from the fourth packed byte', () => {
   ]);
   assert.equal(sniffImageMime(bytes), 'image/webp');
   assert.deepEqual(readImageDimensions(bytes, 'image/webp'), { width: 1, height: 16384 });
+});
+
+test('VP8L dims reject a bad signature byte before parsing', () => {
+  // Same layout as above but byte 20 is 0x00, not the 0x2f signature:
+  // not a VP8L bitstream, so dims are unreadable instead of garbage.
+  const bytes = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00,
+    0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+    0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xff, 0x0f,
+  ]);
+  assert.equal(sniffImageMime(bytes), 'image/webp');
+  assert.equal(readImageDimensions(bytes, 'image/webp'), undefined);
+});
+
+test('over-megapixel dims reject before any vision call (truncated payload, under byte cap)', async () => {
+  // PNG header claiming 10000x10000 = 100MP > cap, payload truncated to the
+  // header: far under the byte ceiling, so only the megapixel gate fires.
+  assert.ok((10000 * 10000) / 1_000_000 > IMAGE_MAX_MEGAPIXELS);
+  const bytes = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x27, 0x10, 0x00, 0x00, 0x27, 0x10,
+    0x08, 0x02, 0x00, 0x00, 0x00,
+  ]);
+  assert.ok(bytes.byteLength < IMAGE_MAX_BYTES);
+  assert.deepEqual(readImageDimensions(bytes, 'image/png'), { width: 10000, height: 10000 });
+  const { seams, calls } = visionSeams();
+  const result = await runImagePipeline(bytes, seams);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'over-megapixel-ceiling');
+  assert.deepEqual(calls, { ocr: 0, describe: 0 });
 });
 
 test('ocr and description are distinct sourceKind entries with locators', async () => {

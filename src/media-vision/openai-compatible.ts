@@ -166,6 +166,11 @@ export function createOpenAICompatibleVisionTransport(config: OpenAICompatibleVi
       () => controller.abort(),
       request.timeoutMs ?? VISION_REQUEST_TIMEOUT_MS,
     );
+    // Never hold the event loop open for a hung upstream: unref the abort
+    // timer (guarded so non-Node runtimes without unref still work).
+    if (typeof (timeout as unknown as { unref?: unknown }).unref === 'function') {
+      (timeout as unknown as { unref: () => void }).unref();
+    }
     try {
       const response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
         method: 'POST',

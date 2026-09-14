@@ -97,13 +97,38 @@ export interface VisionProbeResult {
   reason?: string;
 }
 
+/** Escape RegExp metacharacters so vocab values match literally. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * True when the response names the expected probe value (word match, optional
  * plural). Word boundaries keep color names like "red" from matching inside
  * words such as "colored" or "rendered".
  */
 export function mentionsProbeValue(text: string, value: string): boolean {
-  return new RegExp(`\\b${value}s?\\b`, 'i').test(text);
+  return new RegExp(`\\b${escapeRegExp(value)}s?\\b`, 'i').test(text);
+}
+
+/**
+ * Distinct vocabulary entries named in the text (word match, optional
+ * plural). Exclusivity counting uses the same matcher as mentionsProbeValue.
+ */
+export function matchedProbeValues(text: string, vocabulary: readonly string[]): string[] {
+  return vocabulary.filter((value) => mentionsProbeValue(text, value));
+}
+
+/**
+ * Exclusive answer check: exactly one vocabulary shape (the expected one)
+ * and exactly one vocabulary color (the expected one). An answer
+ * enumerating the whole vocabulary names more than one hit per axis and
+ * fails even though it mentions the expected values.
+ */
+export function isProbeAnswerPassing(text: string, shape: string, color: string): boolean {
+  const shapes = matchedProbeValues(text, PROBE_SHAPES);
+  const colors = matchedProbeValues(text, PROBE_COLORS.map((entry) => entry.name));
+  return shapes.length === 1 && shapes[0] === shape && colors.length === 1 && colors[0] === color;
 }
 
 /** True when model text is a non-vision refusal rather than a description. */
@@ -148,7 +173,7 @@ export async function runVisionProbe(
   if (isVisionRefusal(text)) {
     return { ok: false, modelId: options.modelId, reason: 'non_vision_model' };
   }
-  if (!mentionsProbeValue(text, expected.shape) || !mentionsProbeValue(text, expected.color)) {
+  if (!isProbeAnswerPassing(text, expected.shape, expected.color)) {
     return { ok: false, modelId: options.modelId, reason: 'probe_mismatch' };
   }
   return { ok: true, modelId: options.modelId, text };
