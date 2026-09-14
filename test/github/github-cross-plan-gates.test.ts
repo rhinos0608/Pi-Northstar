@@ -92,9 +92,12 @@ test('routing prefers REST-first for file and drops unknown backends', () => {
   assert.deepEqual(resolveGithubBackendChain('repo', []), []);
 });
 
-test('unregistered clone executor falls back to REST with no warning path taken', () => {
-  // W-E1 mid-write: no executor registered, so the domain serves REST.
-  assert.equal(isGithubCloneBackendAvailable(), false);
+test('registered clone executor is available; default chain stays REST-first', () => {
+  // W-E1 landed: the executor is registered, so the seam reports available
+  // and repo/tree resolve clone-first when the clone backend is offered.
+  assert.equal(isGithubCloneBackendAvailable(), true);
+  assert.deepEqual(resolveGithubBackendChain('repo', ['github-clone', 'github-api']), ['github-clone', 'github-api']);
+  assert.deepEqual(resolveGithubBackendChain('tree', ['github-clone', 'github-api']), ['github-clone', 'github-api']);
   assert.deepEqual(resolveGithubBackendChain('repo'), ['github-api']);
   assert.deepEqual(resolveGithubBackendChain('tree'), ['github-api']);
   assert.deepEqual(resolveGithubBackendChain('file'), ['github-api']);

@@ -297,12 +297,29 @@ async function releaseCloneRoot(root: string): Promise<void> {
   await rm(root, { recursive: true, force: true, maxRetries: 2 });
 }
 
+function sanitizeCloneOutput(text: string, token: string | undefined): string {
+  if (token === undefined || token.length === 0) return text;
+  return text.split(token).join('[redacted]');
+}
+
+function sanitizeCloneResult(result: GithubCloneResult, token: string | undefined): GithubCloneResult {
+  if (token === undefined || token.length === 0) return result;
+  return {
+    ...result,
+    stdout: sanitizeCloneOutput(result.stdout, token),
+    stderr: sanitizeCloneOutput(result.stderr, token),
+  };
+}
+
 async function writeCredentialHelper(root: string, token: string | undefined): Promise<string> {
   const helper = join(root, 'askpass.sh');
+  const quoted = token === undefined ? undefined : token.replace(/'/g, `'\\''`);
+  // Dual-role helper: git credential-helper protocol on `get` (username= /
+  // password= lines plus trailing blank line), bare token for GIT_ASKPASS.
   const body =
-    token === undefined
+    quoted === undefined
       ? '#!/bin/sh\nexit 1\n'
-      : `#!/bin/sh\nprintf '%s' '${token.replace(/'/g, `'\\''`)}'\n`;
+      : `#!/bin/sh\nif [ "$1" = "get" ]; then\nprintf 'username=%s\\npassword=%s\\n\\n' 'x-access-token' '${quoted}'\nelse\nprintf '%s' '${quoted}'\nfi\n`;
   await writeFile(helper, body, { mode: 0o700 });
   await chmod(helper, 0o700);
   return helper;
@@ -325,8 +342,8 @@ function isBinarySample(sample: Buffer): boolean {
 
 async function realpathWithinRoot(abs: string, workdir: string): Promise<boolean> {
   try {
-    const resolved = await realpath(abs);
-    return resolved === workdir || resolved.startsWith(`${workdir}${sep}`);
+    const [resolved, resolvedRoot] = await Promise.all([realpath(abs), realpath(workdir)]);
+    return resolved === resolvedRoot || resolved.startsWith(`${resolvedRoot}${sep}`);
   } catch {
     return false;
   }
@@ -344,8 +361,14 @@ interface CloneScanState {
   queue: string[];
 }
 
+function pushWarning(state: CloneScanState, formatted: string): void {
+  if (state.warnings.includes(formatted)) return;
+  if (state.warnings.length >= state.policy.maxTreeEntries) return;
+  state.warnings.push(formatted);
+}
+
 function warn(state: CloneScanState, message: string, rel: string): void {
-  state.warnings.push(`${message}: ${rel.slice(0, 64)}`);
+  pushWarning(state, `${message}: ${rel.slice(0, 64)}`);
 }
 
 async function scanSymlinkEntry(state: CloneScanState, rel: string, abs: string): Promise<void> {
@@ -382,12 +405,13 @@ async function scanFileEntry(state: CloneScanState, rel: string, abs: string, si
     return;
   }
   const text = sample.toString('utf8');
-  if (state.textBytes + text.length > state.policy.maxTextBytes) {
-    state.warnings.push('text budget exhausted, remaining files metadata-only');
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (state.textBytes + bytes > state.policy.maxTextBytes) {
+    pushWarning(state, 'text budget exhausted, remaining files metadata-only');
     state.metadataOnly.push(rel);
     return;
   }
-  state.textBytes += text.length;
+  state.textBytes += bytes;
   state.files.push({ path: rel, size, text });
 }
 
@@ -443,6 +467,87 @@ async function scanCloneTree(workdir: string, policy: GithubClonePolicy): Promis
   return { owner: '', repo: '', ref: '', files, metadataOnly, warnings, repoBytes };
 }
 
+// ── Live repo-size enforcement (during the child run) ──
+
+/** Bounded poll interval for live clone-size enforcement. No new deps. */
+const CLONE_SIZE_POLL_MS = 250;
+
+async function cloneRootSizeBytes(root: string): Promise<number> {
+  let total = 0;
+  const queue: string[] = [root];
+  while (queue.length > 0) {
+    const current = queue.pop() as string;
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      try {
+        if (entry.isDirectory() && !entry.isSymbolicLink()) queue.push(full);
+        else if (entry.isFile() || entry.isSymbolicLink()) total += (await lstat(full)).size;
+      } catch {
+        // Races with the live child: ignore and keep measuring.
+      }
+    }
+  }
+  return total;
+}
+
+function cloneCeilingError(policy: GithubClonePolicy): SocialError {
+  return cloneError('upstream_error', `clone exceeds repo ceiling of ${policy.maxRepoBytes} bytes`);
+}
+
+/**
+ * Run one clone child under a live repo-size ceiling. Polls the clone root
+ * (including .git) on a bounded interval and aborts the child as soon as
+ * the ceiling is exceeded; the post-clone scan stays as final safeguard.
+ */
+async function runCloneChild(
+  run: GithubCloneRunner,
+  command: string,
+  argv: readonly string[],
+  options: GithubCloneRunOptions,
+  root: string,
+  policy: GithubClonePolicy,
+): Promise<GithubCloneResult> {
+  const controller = new AbortController();
+  const onCallerAbort = (): void => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener('abort', onCallerAbort, { once: true });
+  let exceeded = false;
+  let inFlight = false;
+  const timer = setInterval(() => {
+    if (inFlight || exceeded || controller.signal.aborted) return;
+    inFlight = true;
+    void cloneRootSizeBytes(root).then(
+      (size) => {
+        inFlight = false;
+        if (size > policy.maxRepoBytes && !controller.signal.aborted) {
+          exceeded = true;
+          controller.abort();
+        }
+      },
+      () => {
+        inFlight = false;
+      },
+    );
+  }, CLONE_SIZE_POLL_MS);
+  try {
+    const result = await run(command, argv, { ...options, signal: controller.signal });
+    if (exceeded) throw cloneCeilingError(policy);
+    return result;
+  } catch (error) {
+    if (exceeded) throw cloneCeilingError(policy);
+    throw error;
+  } finally {
+    clearInterval(timer);
+    options.signal?.removeEventListener('abort', onCallerAbort);
+  }
+}
+
 // ── Public clone entrypoint ──
 
 export interface GithubCloneOutcome {
@@ -485,6 +590,7 @@ export async function cloneGithubRepo(
 
   const root = await acquireCloneRoot();
   const warnings: string[] = [];
+  let failed = false;
   try {
     const workdir = join(root, 'work');
     const hooksDir = join(root, 'no-hooks');
@@ -495,19 +601,20 @@ export async function cloneGithubRepo(
 
     let ghAbsent = false;
     let cloned = false;
-    let authenticatedFailure = false;
     try {
-      const ghResult = await run(ghArgv.command, ghArgv.argv, { env, cwd: root, timeoutMs: policy.cloneTimeoutMs, ...(signal !== undefined ? { signal } : {}) });
+      // gh runs on the token-stripped child env: it never carries our token,
+      // so its auth-pattern failure must not arm no-anonymous-retry. Fall
+      // back to git, which owns the credential helper.
+      const ghResult = sanitizeCloneResult(
+        await runCloneChild(run, ghArgv.command, ghArgv.argv, { env, cwd: root, timeoutMs: policy.cloneTimeoutMs, ...(signal !== undefined ? { signal } : {}) }, root, policy),
+        token,
+      );
       if (ghResult.code === 0) {
         cloned = true;
-      } else if (token !== undefined && isGithubCloneAuthFailure(ghResult.stderr, ghResult.code)) {
-        authenticatedFailure = true;
-        throw cloneError('authentication_required', 'GitHub clone authentication_required: invalid or missing token');
       } else {
         warnings.push(`gh clone failed (code ${ghResult.code}), falling back to git`);
       }
     } catch (error) {
-      if (error instanceof SocialError) throw error;
       if (signal?.aborted) throw error;
       if (isMissingBinary(error)) {
         ghAbsent = true;
@@ -518,9 +625,6 @@ export async function cloneGithubRepo(
     }
 
     if (!cloned) {
-      if (authenticatedFailure) {
-        throw cloneError('authentication_required', 'GitHub clone authentication_required: invalid or missing token');
-      }
       const gitArgv = buildGithubGitCloneArgv({
         owner: input.owner,
         repo: input.repo,
@@ -531,21 +635,33 @@ export async function cloneGithubRepo(
       });
       let gitResult: GithubCloneResult;
       try {
-        gitResult = await run(gitArgv.command, gitArgv.argv, { env, cwd: root, timeoutMs: policy.cloneTimeoutMs, ...(signal !== undefined ? { signal } : {}) });
+        gitResult = sanitizeCloneResult(
+          await runCloneChild(run, gitArgv.command, gitArgv.argv, { env, cwd: root, timeoutMs: policy.cloneTimeoutMs, ...(signal !== undefined ? { signal } : {}) }, root, policy),
+          token,
+        );
       } catch (error) {
         if (signal?.aborted) throw error;
         if (isMissingBinary(error)) throw cloneError('upstream_error', 'GitHub clone upstream_error: no git binary available');
         throw cloneError('upstream_error', 'GitHub clone upstream_error: clone process failed');
       }
       if (gitResult.code !== 0) {
-        if (isGithubCloneAuthFailure(gitResult.stderr, gitResult.code)) {
+        // No-anonymous-retry applies only when the failed attempt actually
+        // carried the token (git owns the credential helper).
+        if (token !== undefined && isGithubCloneAuthFailure(gitResult.stderr, gitResult.code)) {
           throw cloneError('authentication_required', 'GitHub clone authentication_required: invalid or missing token');
         }
         throw cloneError('upstream_error', `GitHub clone upstream_error: clone failed with code ${gitResult.code}`);
       }
     }
 
-    const scanned = await scanCloneTree(workdir, policy);
+    let scanned;
+    try {
+      scanned = await scanCloneTree(workdir, policy);
+    } catch (error) {
+      if (error instanceof SocialError) throw error;
+      if (signal?.aborted) throw error;
+      throw cloneError('upstream_error', `GitHub clone upstream_error: scan failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const payload: GithubClonePayload = {
       owner: input.owner,
       repo: input.repo,
@@ -558,8 +674,17 @@ export async function cloneGithubRepo(
       payload.warnings.push(`tree entries capped at ${policy.maxTreeEntries}`);
     }
     return { payload, ghAbsent, warnings: payload.warnings };
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await releaseCloneRoot(root);
+    // Cleanup failure only propagates when no earlier error exists: it must
+    // never replace the original clone error/SocialError code.
+    try {
+      await releaseCloneRoot(root);
+    } catch (cleanupError) {
+      if (!failed) throw cleanupError;
+    }
   }
 }
 

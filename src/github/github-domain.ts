@@ -18,6 +18,7 @@ import { mayTransferPrivateGithubToVision, PRIVATE_GITHUB_VISION_TRANSFER_ENV_VA
 import { buildNorthstarResult, type NorthstarEntityV1 } from '../result-contract.js';
 import { northstarTextResult } from '../core/tool-output.js';
 import { SocialError } from '../social/social-contract.js';
+import { createGithubCloneWorker, GITHUB_CLONE_BACKEND } from './github-clone.js';
 import {
   decodeGithubCursor,
   encodeGithubCursor,
@@ -560,9 +561,11 @@ function normalizeCodeItem(row: Record<string, unknown>): GithubEntityV1 {
 // behind the GithubBackendPlan seam; until it registers, the domain filters
 // it as unavailable and serves REST.
 
-/** Clone-executor availability. W-E1 registers the executor on landing. */
+/** Clone-executor availability. The W-E1 executor is registered
+ * (github-clone.ts lands createGithubCloneWorker); binary-level readiness
+ * (gh/git present) resolves at execution time with REST fallback. */
 export function isGithubCloneBackendAvailable(): boolean {
-  return false;
+  return typeof createGithubCloneWorker === 'function';
 }
 
 /**
@@ -576,6 +579,24 @@ export function resolveGithubBackendChain(action: GithubAction, available: reado
   return available
     .filter((backend) => rank.has(backend))
     .sort((a, b) => rank.get(a)! - rank.get(b)!);
+}
+
+/**
+ * Serve repo/tree through the clone executor when the backend chain selects
+ * it. Throws when the executor is unavailable or fails: the caller falls back
+ * to REST per the defined fallback policy. Abort always propagates.
+ */
+async function serveGithubCloneBackend(
+  request: GithubRequest,
+  env: Record<string, string | undefined>,
+  signal?: AbortSignal,
+): Promise<{ page: GithubPageV1; degraded: boolean }> {
+  const worker = createGithubCloneWorker({ parentEnv: env });
+  const plans = await worker.plans(request, { ...(signal !== undefined ? { signal } : {}) });
+  const plan = plans.find((entry) => entry.backend === GITHUB_CLONE_BACKEND);
+  if (plan === undefined) throw githubError('upstream_error', 'github-clone backend unavailable, using REST fallback');
+  const payload = await plan.execute(signal);
+  return { page: worker.normalize(request, plan, payload), degraded: false };
 }
 
 /**
@@ -1343,19 +1364,26 @@ export async function callGithubTool(
 
   const signal = options.signal;
   // Plan E3 routing: resolve the ordered backend chain and serve the first
-  // available entry. The clone executor has not registered (W-E1 owns
-  // github-clone.ts), so this always selects REST today; repo/tree will
-  // prefer clone once isGithubCloneBackendAvailable() flips. Chain
-  // resolution runs now so preference ordering + the REST-fallback warning
-  // are covered by tests; executor dispatch lands with W-E1 (transfer + // ledger gates wire at the clone-acquisition call site there).
+  // available entry. Repo/tree prefer clone with REST fallback; blob/file
+  // stay REST-first. Clone dispatch runs the W-E1 executor; REST fallback
+  // (with warning) applies only when clone execution is unavailable or fails.
   const availableBackends = isGithubCloneBackendAvailable() ? ['github-clone', BACKEND] : [BACKEND];
   const backendChain = resolveGithubBackendChain(request.action, availableBackends);
   const backendWarnings: string[] = [];
-  if (backendChain[0] !== BACKEND) {
-    // Clone selected but no executor behind the seam: REST fallback.
-    backendWarnings.push('github-clone backend unavailable, using REST fallback');
+  let servingBackend = BACKEND;
+  let result: { page: GithubPageV1; degraded: boolean } | undefined;
+  if (backendChain[0] === GITHUB_CLONE_BACKEND) {
+    try {
+      result = await serveGithubCloneBackend(request, env, signal);
+      servingBackend = GITHUB_CLONE_BACKEND;
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error;
+      if (signal?.aborted) throw error;
+      const code = error instanceof SocialError ? error.code : 'upstream_error';
+      backendWarnings.push(`github-clone execution failed (${code}), using REST fallback`);
+    }
   }
-  let result: { page: GithubPageV1; degraded: boolean };
+  if (result === undefined) {
   switch (request.action) {
     case 'repo': result = await handleRepo(request, args, env, signal); break;
     case 'file': result = await handleFile(request, paths, env, signal); break;
@@ -1370,17 +1398,18 @@ export async function callGithubTool(
     case 'workflows': result = await handleWorkflows(request, env, signal); break;
     case 'runs': result = await handleRuns(request, args, env, signal); break;
   }
+  }
 
-  const { page, degraded } = result;
+  const { page, degraded } = result as { page: GithubPageV1; degraded: boolean };
   const allWarnings = [...validationWarnings, ...backendWarnings, ...page.warnings];
   const notes = [...allWarnings];
   if (page.partial) notes.push('partial: some upstream rows were dropped or truncated');
   if (degraded) notes.push('degraded: github-api is a limited fallback backend');
   const envelope = buildNorthstarResult({
-    request: { tool: 'github', channel: 'github', action: request.action, source: BACKEND },
+    request: { tool: 'github', channel: 'github', action: request.action, source: servingBackend },
     outcomes: [{
       source: 'github',
-      backend: BACKEND,
+      backend: servingBackend,
       ...(page.entities.length > 0 ? { entities: page.entities.map(toNorthstarEntity) } : {}),
       ...(degraded ? { degraded: true } : {}),
     }],
@@ -1395,7 +1424,7 @@ export async function callGithubTool(
   const legacyDetails: Record<string, unknown> = {
     action: request.action,
     canonicalAction: request.action,
-    backend: BACKEND,
+    backend: servingBackend,
     entities: page.entities,
     pagination: page.pagination,
     partial: page.partial,

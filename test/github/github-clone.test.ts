@@ -1,6 +1,7 @@
 // Plan E1 clone tests: fake git binary fixture, argv smuggling, sentinel
 // env leak, cleanup on abort/failure, no anonymous retry after auth failure.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -135,6 +136,52 @@ test('sanitized env carries no sentinel; token never in argv', async () => {
   await assertRemoved(calls[0]?.cwd as string);
 });
 
+test('private-repo gh auth failure falls back to git which owns the helper', async () => {
+  const calls: RecordedCall[] = [];
+  const token = 'private-repo-token';
+  const runner: GithubCloneRunner = async (command, argv, options) => {
+    calls.push({ command, argv, env: options.env, cwd: options.cwd });
+    if (command === 'gh') return { stdout: '', stderr: 'ERROR: repository not found', code: 1 };
+    await materialize(destOf(command, argv));
+    return { stdout: '', stderr: '', code: 0 };
+  };
+  const outcome = await cloneGithubRepo({ owner: 'o', repo: 'r' }, { token, runProcess: runner });
+  assert.ok(calls.some((call) => call.command === 'git'), 'gh auth failure must fall back to git');
+  assert.ok(outcome.payload.files.some((file) => file.path === 'README.md'));
+  for (const call of calls) {
+    assert.ok(!call.argv.join(' ').includes(token), 'argv must not carry secrets');
+    assert.ok(!Object.values(call.env).join(' ').includes(token), 'child env must not carry secrets');
+  }
+  assert.ok(!JSON.stringify(outcome.payload).includes(token));
+  assert.ok(!outcome.warnings.join(' ').includes(token));
+  await assertRemoved(calls[0]?.cwd as string);
+});
+
+test('credential helper speaks git protocol; token never in stderr-derived errors', async () => {
+  const token = 'stderr-secret-token';
+  let helperGet = '';
+  let helperAskpass = '';
+  const runner: GithubCloneRunner = async (command, _argv, options) => {
+    const helper = options.env.GIT_ASKPASS;
+    assert.ok(helper, 'GIT_ASKPASS must be set');
+    helperGet = execFileSync('sh', [helper, 'get'], { encoding: 'utf8' });
+    helperAskpass = execFileSync('sh', [helper, 'prompt text'], { encoding: 'utf8' });
+    if (command === 'gh') throw enoent();
+    return { stdout: '', stderr: `fatal: unable to access 'https://${token}@github.com/o/r.git/': Could not resolve host`, code: 128 };
+  };
+  await assert.rejects(cloneGithubRepo({ owner: 'o', repo: 'r' }, { token, runProcess: runner }), (error: unknown) => {
+    assert.ok(error instanceof SocialError);
+    assert.ok(!String(error.message).includes(token), 'error message must not carry the token');
+    assert.ok(!JSON.stringify(error).includes(token), 'error body must not carry the token');
+    return true;
+  });
+  assert.match(helperGet, /^username=\S+\npassword=\S+\n\n$/, 'helper get must emit credential-helper protocol lines');
+  assert.ok(!helperGet.replace(`password=${token}`, '').includes(token), 'token appears only inside the password= line');
+  assert.equal(helperAskpass, token);
+  const helperBody = helperGet;
+  assert.ok(helperBody.length > 0);
+});
+
 test('cleanup runs on clone failure', async () => {
   const calls: RecordedCall[] = [];
   const failing: GithubCloneRunner = async (command, argv, options) => {
@@ -176,7 +223,9 @@ test('no anonymous retry after authenticated failure', async () => {
     assert.ok(error instanceof SocialError && error.code === 'authentication_required');
     return true;
   });
-  assert.deepEqual(seen, ['gh']);
+  // gh runs token-stripped so its auth failure falls back to git (which owns
+  // the credential helper); git carried the token, so no anonymous retry.
+  assert.deepEqual(seen, ['gh', 'git']);
 });
 
 test('gh absent degrades with warning, git carries the clone', async () => {
