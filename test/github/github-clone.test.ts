@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SocialError } from '../../src/social/social-contract.js';
@@ -13,6 +13,7 @@ import {
   createGithubCloneWorker,
   defaultGithubCloneRunner,
   isGithubCloneAuthFailure,
+  terminateCloneChild,
   type GithubCloneResult,
   type GithubCloneRunner,
   type GithubCloneDependencies,
@@ -228,12 +229,135 @@ test('no anonymous retry after authenticated failure', async () => {
   assert.deepEqual(seen, ['gh', 'git']);
 });
 
-test('gh absent degrades with warning, git carries the clone', async () => {
+test('gh absent uses git with an informational notice, page not partial', async () => {
   const calls: RecordedCall[] = [];
   const outcome = await cloneGithubRepo({ owner: 'o', repo: 'r' }, { runProcess: successRunner(calls) });
   assert.equal(outcome.ghAbsent, true);
-  assert.ok(outcome.warnings.join(' ').includes('REST-only'));
+  assert.ok(outcome.warnings.join(' ').includes('gh absent, using git'));
+  assert.ok(!outcome.warnings.join(' ').includes('REST-only'), 'clone-served page must not claim REST-only');
   assert.ok(calls.some((call) => call.command === 'git'));
+  const worker = createGithubCloneWorker({ runProcess: successRunner([]) });
+  const [plan] = await worker.plans(repoRequest(), {});
+  assert.ok(plan);
+  const page = worker.normalize(repoRequest(), plan, outcome.payload);
+  assert.equal(page.partial, false);
+});
+
+test('gh attempt carries no ambient identity: empty HOME, no helper, no token env', async () => {
+  const calls: RecordedCall[] = [];
+  // Ambient gh identity: parent HOME holds hosts.yml credentials.
+  const fakeHome = await mkdtemp(join(tmpdir(), 'pi-gh-fakehome-'));
+  await writeFile(join(fakeHome, 'hosts.yml'), 'github.com:\n  oauth_token: ambient-token\n');
+  const parentEnv: Record<string, string | undefined> = {
+    PATH: process.env.PATH,
+    HOME: fakeHome,
+    GITHUB_TOKEN: 'sentinel-token',
+    GH_TOKEN: 'sentinel-gh-token',
+  };
+  const runner: GithubCloneRunner = async (command, argv, options) => {
+    calls.push({ command, argv, env: options.env, cwd: options.cwd });
+    if (command === 'gh') throw enoent();
+    await materialize(destOf(command, argv));
+    return { stdout: '', stderr: '', code: 0 };
+  };
+  try {
+    const outcome = await cloneGithubRepo({ owner: 'o', repo: 'r' }, { parentEnv, runProcess: runner });
+    const ghCall = calls.find((call) => call.command === 'gh');
+    const gitCall = calls.find((call) => call.command === 'git');
+    assert.ok(ghCall && gitCall);
+    assert.notEqual(ghCall.env.HOME, fakeHome);
+    assert.ok((ghCall.env.HOME ?? '').startsWith(ghCall.cwd), 'gh HOME must live inside the clone root');
+    assert.ok((ghCall.env.GH_CONFIG_DIR ?? '').startsWith(ghCall.cwd), 'gh config dir must live inside the clone root');
+    assert.equal(ghCall.env.GIT_ASKPASS, undefined);
+    assert.equal(ghCall.env.GITHUB_TOKEN, undefined);
+    assert.equal(ghCall.env.GH_TOKEN, undefined);
+    assert.ok(!ghCall.argv.some((entry) => entry.includes('credential.helper')), 'gh argv must not carry the helper');
+    assert.ok(gitCall.env.GIT_ASKPASS, 'git still owns the helper');
+    assert.ok(gitCall.argv.some((entry) => entry.includes('credential.helper')));
+    assert.ok(outcome.payload.files.some((file) => file.path === 'README.md'));
+    await assertRemoved(calls[0]?.cwd as string);
+  } finally {
+    await rm(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test('kill escalation fires SIGTERM then SIGKILL against the process group', async () => {
+  const groupKills: Array<{ pid: number; signal: string }> = [];
+  const directKills: string[] = [];
+  const fired = await terminateCloneChild(
+    { pid: 4242, kill: (signal: NodeJS.Signals): boolean => { directKills.push(signal); return true; } },
+    {
+      groupKill: (pid, signal) => { groupKills.push({ pid, signal }); },
+      sleep: async () => {},
+      exited: () => false,
+    },
+  );
+  assert.deepEqual(fired, ['SIGTERM', 'SIGKILL']);
+  assert.deepEqual(groupKills, [
+    { pid: -4242, signal: 'SIGTERM' },
+    { pid: -4242, signal: 'SIGKILL' },
+  ]);
+  assert.deepEqual(directKills, []);
+});
+
+test('kill escalation stops at SIGTERM when the child exits, falls back on ESRCH', async () => {
+  let slept = 0;
+  const directKills: string[] = [];
+  const fired = await terminateCloneChild(
+    { pid: 4243, kill: (signal: NodeJS.Signals): boolean => { directKills.push(signal); return true; } },
+    {
+      groupKill: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
+      sleep: async () => { slept += 1; },
+      exited: () => slept > 0,
+    },
+  );
+  assert.deepEqual(fired, ['SIGTERM']);
+  assert.deepEqual(directKills, ['SIGTERM']);
+});
+
+test('token with control/newline characters rejects before any spawn', async () => {
+  for (const token of ['abc\ndef', 'abc\rdef', 'abc\u0000def', 'abc\u001fdef', 'abc\u007fdef']) {
+    let calls = 0;
+    const boom: GithubCloneRunner = async () => {
+      calls += 1;
+      return { stdout: '', stderr: '', code: 0 };
+    };
+    await assert.rejects(cloneGithubRepo({ owner: 'o', repo: 'r' }, { token, runProcess: boom }), (error: unknown) => {
+      assert.ok(error instanceof SocialError && error.code === 'invalid_request');
+      return true;
+    });
+    assert.equal(calls, 0, `token ${JSON.stringify(token)} must never spawn`);
+  }
+});
+
+test('caller abort wins over ceiling when it arrives while the child lingers', async () => {
+  const controller = new AbortController();
+  const runner: GithubCloneRunner = async (command, _argv, options) => {
+    if (command === 'gh') throw enoent();
+    await writeFile(join(options.cwd, 'big.bin'), Buffer.alloc(64));
+    await new Promise((resolve) => setTimeout(resolve, 700)); // linger past the 250ms ceiling poll
+    throw new Error('Aborted');
+  };
+  const pending = cloneGithubRepo(
+    { owner: 'o', repo: 'r' },
+    { runProcess: runner, policy: { maxRepoBytes: 8 } },
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(), 350); // after the ceiling trips, before the child settles
+  await assert.rejects(pending, (error: unknown) => {
+    assert.ok(error instanceof Error && error.message === 'Aborted', `caller abort must win, got ${String(error)}`);
+    return true;
+  });
+});
+
+test('double-absent binaries throw upstream_error flagged ghAbsent', async () => {
+  const bothMissing: GithubCloneRunner = async () => { throw enoent(); };
+  await assert.rejects(cloneGithubRepo({ owner: 'o', repo: 'r' }, { runProcess: bothMissing }), (error: unknown) => {
+    assert.ok(error instanceof SocialError && error.code === 'upstream_error');
+    assert.match(error.message, /no gh or git binary/);
+    assert.deepEqual((error as Error).cause, { ghAbsent: true });
+    return true;
+  });
 });
 
 test('auth failure detection is code-gated', () => {

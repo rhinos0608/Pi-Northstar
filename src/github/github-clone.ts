@@ -32,7 +32,7 @@ import { buildNativeChildEnvironment } from '../process/native-child-env.js';
 import { SocialError } from '../social/social-contract.js';
 import {
   classifyGithubCloneEntry,
-  githubCloneGhAbsentWarning,
+  GITHUB_CLONE_GH_ABSENT_USING_GIT_NOTICE,
   isGithubCloneSymlinkEscape,
   resolveGithubClonePolicy,
   validateGithubCloneEntryPath,
@@ -57,8 +57,23 @@ const CLONE_OWNER_CHARSET = /^[A-Za-z0-9._-]+$/;
 function cloneError(
   code: 'invalid_request' | 'authentication_required' | 'upstream_error' | 'malformed_upstream',
   message: string,
+  options?: { cause?: unknown },
 ): SocialError {
-  return new SocialError(code, message, { backend: GITHUB_CLONE_BACKEND });
+  return new SocialError(code, message, {
+    backend: GITHUB_CLONE_BACKEND,
+    ...(options?.cause !== undefined ? { cause: options.cause } : {}),
+  });
+}
+
+/** Control/newline bytes that would break credential-helper protocol lines. */
+const CLONE_TOKEN_FORBIDDEN_CHARS = /[\x00-\x1f\x7f]/;
+
+/** Fail closed before any spawn: the token is embedded in shell-quoted helper
+ * lines, so control characters would break protocol framing or inject lines. */
+function validateCloneToken(token: string | undefined): void {
+  if (token !== undefined && CLONE_TOKEN_FORBIDDEN_CHARS.test(token)) {
+    throw cloneError('invalid_request', 'GitHub clone token contains forbidden control characters');
+  }
 }
 
 function validateCloneSlugPart(field: string, value: string, max: number): void {
@@ -249,7 +264,63 @@ export function buildGithubGhCloneArgv(input: {
   return { command: 'gh', argv };
 }
 
-// ── Default runner (shell:false, timeout, abort) ──
+// ── Kill escalation (abort → SIGTERM → SIGKILL, own process group) ──
+
+/** Grace after SIGTERM before escalating to SIGKILL. */
+export const CLONE_KILL_TERM_GRACE_MS = 1000;
+
+export interface CloneKillTarget {
+  pid?: number | undefined;
+  kill(signal: NodeJS.Signals): boolean;
+}
+
+export interface CloneKillOptions {
+  groupKill?: (pid: number, signal: NodeJS.Signals) => void;
+  directKill?: (target: CloneKillTarget, signal: NodeJS.Signals) => boolean;
+  sleep?: (ms: number) => Promise<void>;
+  exited?: () => boolean;
+  termGraceMs?: number;
+}
+
+/**
+ * Escalate abort → SIGTERM → SIGKILL. Kills target the whole process group
+ * (negative pid) so orphaned git-remote-https grandchildren stop too; falls
+ * back to a direct kill when group-kill is unavailable (win32, ESRCH).
+ * Returns the signals fired in order. Never throws: a gone child is success.
+ */
+export async function terminateCloneChild(
+  target: CloneKillTarget,
+  options: CloneKillOptions = {},
+): Promise<readonly NodeJS.Signals[]> {
+  const groupKill = options.groupKill ?? ((pid, signal) => process.kill(pid, signal));
+  const directKill = options.directKill ?? ((child, signal) => child.kill(signal));
+  const sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const exited = options.exited ?? (() => false);
+  const grace = options.termGraceMs ?? CLONE_KILL_TERM_GRACE_MS;
+  const fired: NodeJS.Signals[] = [];
+  const fire = (signal: NodeJS.Signals): void => {
+    fired.push(signal);
+    if (target.pid !== undefined && process.platform !== 'win32') {
+      try {
+        groupKill(-target.pid, signal);
+        return;
+      } catch {
+        // Group gone or denied: fall through to a direct kill.
+      }
+    }
+    try {
+      directKill(target, signal);
+    } catch {
+      // Child already gone.
+    }
+  };
+  fire('SIGTERM');
+  await sleep(grace);
+  if (!exited()) fire('SIGKILL');
+  return fired;
+}
+
+// ── Default runner (shell:false, detached group, timeout, abort) ──
 
 export function defaultGithubCloneRunner(
   command: string,
@@ -261,11 +332,35 @@ export function defaultGithubCloneRunner(
       shell: false,
       env: options.env,
       cwd: options.cwd,
-      timeout: options.timeoutMs,
-      signal: options.signal,
+      // Own process group: ceiling/abort escalation kills
+      // git-remote-https grandchildren, not just the direct child.
+      detached: process.platform !== 'win32',
     });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let exited = false;
+    const timer = setTimeout(
+      () => killAndReject(new Error(`clone timed out after ${options.timeoutMs}ms`)),
+      options.timeoutMs,
+    );
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
+    const settleReject = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const killAndReject = (error: Error): void => {
+      if (settled) return;
+      void terminateCloneChild(child, { exited: () => exited }).finally(() => settleReject(error));
+    };
+    const onAbort = (): void => killAndReject(new Error('Aborted'));
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
     });
@@ -273,9 +368,14 @@ export function defaultGithubCloneRunner(
       stderr += chunk.toString('utf8');
     });
     child.on('error', (error: Error) => {
-      reject(error);
+      exited = true;
+      settleReject(error);
     });
     child.on('close', (code: number | null, signal: string | null) => {
+      if (settled) return;
+      settled = true;
+      exited = true;
+      cleanup();
       if (options.signal?.aborted) {
         reject(new Error('Aborted'));
         return;
@@ -330,6 +430,26 @@ function childEnvForClone(
   helper: string,
 ): Record<string, string> {
   return { ...cloneEnvBase(parentEnv), GIT_ASKPASS: helper };
+}
+
+/** Isolated env for the `gh` attempt: HOME and GH_CONFIG_DIR point at an
+ * empty dir inside the clone root, so ambient ~/.config/gh/hosts.yml
+ * credentials can never authenticate it; no GIT_ASKPASS and no credential
+ * helper in argv (git owns the helper). Token env vars never reach any
+ * child via the native allowlist; deleted explicitly here as defense. */
+function childEnvForGh(
+  parentEnv: Record<string, string | undefined>,
+  emptyConfigDir: string,
+): Record<string, string> {
+  const env: Record<string, string> = {
+    ...cloneEnvBase(parentEnv),
+    HOME: emptyConfigDir,
+    GH_CONFIG_DIR: emptyConfigDir,
+  };
+  delete env.GITHUB_TOKEN;
+  delete env.GH_TOKEN;
+  delete env.GIT_ASKPASS;
+  return env;
 }
 
 // ── Filesystem scan under ceilings ──
@@ -503,7 +623,14 @@ function cloneCeilingError(policy: GithubClonePolicy): SocialError {
 /**
  * Run one clone child under a live repo-size ceiling. Polls the clone root
  * (including .git) on a bounded interval and aborts the child as soon as
- * the ceiling is exceeded; the post-clone scan stays as final safeguard.
+ * the ceiling is exceeded; the abort escalates SIGTERM → SIGKILL against
+ * the child's process group (see terminateCloneChild).
+ * Residual overshoot window: up to one poll interval plus the directory-walk
+ * time can elapse before the abort lands, plus the SIGTERM grace — a clone
+ * can exceed the ceiling briefly. The post-clone scan stays as final
+ * safeguard, so an overshooting clone still rejects before serving.
+ * Caller abort wins if it arrived first: the caller's signal state is
+ * checked before converting to a ceiling error (deterministic precedence).
  */
 async function runCloneChild(
   run: GithubCloneRunner,
@@ -537,9 +664,11 @@ async function runCloneChild(
   }, CLONE_SIZE_POLL_MS);
   try {
     const result = await run(command, argv, { ...options, signal: controller.signal });
+    if (options.signal?.aborted) throw new Error('Aborted');
     if (exceeded) throw cloneCeilingError(policy);
     return result;
   } catch (error) {
+    if (options.signal?.aborted) throw error;
     if (exceeded) throw cloneCeilingError(policy);
     throw error;
   } finally {
@@ -584,6 +713,7 @@ export async function cloneGithubRepo(
   const policy = resolveGithubClonePolicy(deps.policy);
   const parentEnv = deps.parentEnv ?? process.env;
   const token = resolveCloneToken(deps);
+  validateCloneToken(token);
   const run = deps.runProcess ?? defaultGithubCloneRunner;
   const signal = execution?.signal;
   if (signal?.aborted) throw new Error('Aborted');
@@ -594,19 +724,26 @@ export async function cloneGithubRepo(
   try {
     const workdir = join(root, 'work');
     const hooksDir = join(root, 'no-hooks');
+    const ghHome = join(root, 'gh-home');
     await mkdir(hooksDir, { recursive: true, mode: 0o700 });
+    await mkdir(ghHome, { recursive: true, mode: 0o700 });
     const helper = await writeCredentialHelper(root, token);
     const env = childEnvForClone(parentEnv, helper);
-    const ghArgv = buildGithubGhCloneArgv({ owner: input.owner, repo: input.repo, ...(input.ref !== undefined ? { ref } : {}), destDir: workdir, credentialHelper: helper, emptyHooksDir: hooksDir });
+    // gh attempt is ambient-identity-free: empty HOME/GH_CONFIG_DIR inside
+    // the clone root (never ~/.config/gh/hosts.yml), no credential helper,
+    // no GIT_ASKPASS — it can only succeed anonymously or fail. Only git
+    // owns the credential helper.
+    const ghEnv = childEnvForGh(parentEnv, ghHome);
+    const ghArgv = buildGithubGhCloneArgv({ owner: input.owner, repo: input.repo, ...(input.ref !== undefined ? { ref } : {}), destDir: workdir, emptyHooksDir: hooksDir });
 
     let ghAbsent = false;
     let cloned = false;
     try {
-      // gh runs on the token-stripped child env: it never carries our token,
-      // so its auth-pattern failure must not arm no-anonymous-retry. Fall
-      // back to git, which owns the credential helper.
+      // gh runs isolated (empty HOME/GH_CONFIG_DIR, no helper): it never
+      // carries our token, so its auth-pattern failure must not arm
+      // no-anonymous-retry. Fall back to git, which owns the helper.
       const ghResult = sanitizeCloneResult(
-        await runCloneChild(run, ghArgv.command, ghArgv.argv, { env, cwd: root, timeoutMs: policy.cloneTimeoutMs, ...(signal !== undefined ? { signal } : {}) }, root, policy),
+        await runCloneChild(run, ghArgv.command, ghArgv.argv, { env: ghEnv, cwd: root, timeoutMs: policy.cloneTimeoutMs, ...(signal !== undefined ? { signal } : {}) }, root, policy),
         token,
       );
       if (ghResult.code === 0) {
@@ -617,8 +754,10 @@ export async function cloneGithubRepo(
     } catch (error) {
       if (signal?.aborted) throw error;
       if (isMissingBinary(error)) {
+        // Defer the notice: the REST-only warning belongs to the
+        // both-absent/fallback path; on git success only the using-git
+        // notice applies (informational, never partial).
         ghAbsent = true;
-        warnings.push(githubCloneGhAbsentWarning());
       } else {
         warnings.push('gh clone unavailable, falling back to git');
       }
@@ -641,7 +780,14 @@ export async function cloneGithubRepo(
         );
       } catch (error) {
         if (signal?.aborted) throw error;
-        if (isMissingBinary(error)) throw cloneError('upstream_error', 'GitHub clone upstream_error: no git binary available');
+        if (isMissingBinary(error)) {
+          if (ghAbsent) {
+            throw cloneError('upstream_error', 'GitHub clone upstream_error: no gh or git binary available', {
+              cause: { ghAbsent: true },
+            });
+          }
+          throw cloneError('upstream_error', 'GitHub clone upstream_error: no git binary available');
+        }
         throw cloneError('upstream_error', 'GitHub clone upstream_error: clone process failed');
       }
       if (gitResult.code !== 0) {
@@ -652,6 +798,7 @@ export async function cloneGithubRepo(
         }
         throw cloneError('upstream_error', `GitHub clone upstream_error: clone failed with code ${gitResult.code}`);
       }
+      if (ghAbsent) warnings.push(GITHUB_CLONE_GH_ABSENT_USING_GIT_NOTICE);
     }
 
     let scanned;
@@ -722,7 +869,9 @@ export function normalizeGithubClonePayload(
       } as GithubEntityV1,
     ],
     pagination: { supported: false, limit: request.limit, returned: 1, hasMore: false },
-    partial: payload.warnings.length > 0,
+    // The gh-absent using-git notice is informational (clone served fully),
+    // so it never marks the page partial; real degradations still do.
+    partial: payload.warnings.some((warning) => warning !== GITHUB_CLONE_GH_ABSENT_USING_GIT_NOTICE),
     warnings: payload.warnings,
   });
 }

@@ -18,7 +18,8 @@ import { mayTransferPrivateGithubToVision, PRIVATE_GITHUB_VISION_TRANSFER_ENV_VA
 import { buildNorthstarResult, type NorthstarEntityV1 } from '../result-contract.js';
 import { northstarTextResult } from '../core/tool-output.js';
 import { SocialError } from '../social/social-contract.js';
-import { createGithubCloneWorker, GITHUB_CLONE_BACKEND } from './github-clone.js';
+import { createGithubCloneWorker, GITHUB_CLONE_BACKEND, type GithubCloneRunner } from './github-clone.js';
+import { GITHUB_CLONE_GH_ABSENT_WARNING } from './github-clone-policy.js';
 import {
   decodeGithubCursor,
   encodeGithubCursor,
@@ -43,6 +44,8 @@ const MULTI_FILE_MAX = 10;
 export interface GithubDomainOptions {
   env?: Record<string, string | undefined>;
   signal?: AbortSignal;
+  /** Test seam: overrides the clone child spawn. Production omits it. */
+  cloneRunner?: GithubCloneRunner | undefined;
 }
 
 function githubError(
@@ -586,12 +589,24 @@ export function resolveGithubBackendChain(action: GithubAction, available: reado
  * it. Throws when the executor is unavailable or fails: the caller falls back
  * to REST per the defined fallback policy. Abort always propagates.
  */
+/** True only for the double-absent path: gh AND git missing (cause flag
+ * set by the clone backend). Scopes GITHUB_CLONE_GH_ABSENT_WARNING. */
+function isCloneDoubleAbsent(error: unknown): boolean {
+  if (!(error instanceof SocialError) || error.code !== 'upstream_error') return false;
+  const cause = (error as unknown as { cause?: unknown }).cause;
+  return typeof cause === 'object' && cause !== null && (cause as { ghAbsent?: unknown }).ghAbsent === true;
+}
+
 async function serveGithubCloneBackend(
   request: GithubRequest,
   env: Record<string, string | undefined>,
   signal?: AbortSignal,
+  runProcess?: GithubCloneRunner | undefined,
 ): Promise<{ page: GithubPageV1; degraded: boolean }> {
-  const worker = createGithubCloneWorker({ parentEnv: env });
+  const worker = createGithubCloneWorker({
+    parentEnv: env,
+    ...(runProcess !== undefined ? { runProcess } : {}),
+  });
   const plans = await worker.plans(request, { ...(signal !== undefined ? { signal } : {}) });
   const plan = plans.find((entry) => entry.backend === GITHUB_CLONE_BACKEND);
   if (plan === undefined) throw githubError('upstream_error', 'github-clone backend unavailable, using REST fallback');
@@ -1374,13 +1389,20 @@ export async function callGithubTool(
   let result: { page: GithubPageV1; degraded: boolean } | undefined;
   if (backendChain[0] === GITHUB_CLONE_BACKEND) {
     try {
-      result = await serveGithubCloneBackend(request, env, signal);
+      result = await serveGithubCloneBackend(request, env, signal, options.cloneRunner);
       servingBackend = GITHUB_CLONE_BACKEND;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw error;
       if (signal?.aborted) throw error;
+      // Fallback boundary: invalid_request (bad slug/token) and
+      // authentication_required (token-carrying git auth failure) surface
+      // directly; REST fallback only for upstream_error/malformed_upstream.
+      if (error instanceof SocialError && (error.code === 'invalid_request' || error.code === 'authentication_required')) {
+        throw error;
+      }
       const code = error instanceof SocialError ? error.code : 'upstream_error';
       backendWarnings.push(`github-clone execution failed (${code}), using REST fallback`);
+      if (isCloneDoubleAbsent(error)) backendWarnings.push(GITHUB_CLONE_GH_ABSENT_WARNING);
     }
   }
   if (result === undefined) {

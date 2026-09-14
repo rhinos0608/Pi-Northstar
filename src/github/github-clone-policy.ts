@@ -25,8 +25,14 @@ export const GITHUB_CLONE_MAX_FILE_BYTES = 1024 * 1024;
 /** Tree entries carried into the normalized page. */
 export const GITHUB_CLONE_MAX_TREE_ENTRIES = 200;
 
-/** Warning surfaced when `gh` is absent: clone degrades to REST-only. */
+/** Warning scoped to the both-absent/fallback path: `gh` AND `git` are
+ * missing, so the clone backend is unavailable and the domain serves REST.
+ * Never used when `git` carries the clone (see USING_GIT notice below). */
 export const GITHUB_CLONE_GH_ABSENT_WARNING = 'gh absent, clone unavailable, results degrade to REST-only';
+
+/** Informational notice when `gh` is absent but `git` carries the clone.
+ * Informational only: never marks the page partial, never claims REST-only. */
+export const GITHUB_CLONE_GH_ABSENT_USING_GIT_NOTICE = 'gh absent, using git for clone';
 
 export interface GithubClonePolicy {
   maxRepoBytes: number;
