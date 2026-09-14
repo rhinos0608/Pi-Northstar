@@ -209,8 +209,10 @@ test('README tool examples validate against registered schemas (no drift)', () =
   assert.equal(Value.Check(github, { request: { action: 'releases', repository: 'owner/repo' } }), true);
   assert.equal(Value.Check(github, { action: 'releases', repository: 'owner/repo' }), false);
   // fetch read-query examples route via the 5-branch union (no mode/source).
+  // Single url+query enters the canonical fetch dispatcher (singular ranking
+  // branch), never the removed agentic_browse native symbol.
   const readQuery = buildFetchRoute({ url: 'https://example.com', query: 'pricing tiers' });
-  assert.equal(readQuery.tool, 'agentic_browse');
+  assert.equal(readQuery.tool, 'fetch');
   const multiQuery = buildFetchRoute({ urls: ['https://example.com'], query: 'How does React concurrent rendering work?' });
   assert.equal(multiQuery.tool, 'fetch');
   assert.throws(() => buildFetchRoute({ mode: 'crawl', query: 'pricing tiers' } as never));

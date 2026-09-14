@@ -2,18 +2,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildFetchRoute } from '../../src/web/web-fetch-route.js';
 
-test('single-url branch routes to agentic_browse read-query path', () => {
+test('single-url branch routes to fetch read-query path', () => {
   const route = buildFetchRoute({ url: 'https://example.com/page' });
-  assert.equal(route.tool, 'agentic_browse');
+  assert.equal(route.tool, 'fetch');
   assert.equal(route.args.url, 'https://example.com/page');
-  assert.equal(route.args.action, 'read');
-  assert.equal(route.args.maxChars, 30000);
+  assert.ok(!('action' in route.args));
   assert.equal(route.timeout, 120_000);
 });
 
 test('single-url branch carries optional query/topK/maxChars', () => {
   const route = buildFetchRoute({ url: 'https://example.com/page', query: 'pricing', topK: 5, maxChars: 1000 });
-  assert.equal(route.tool, 'agentic_browse');
+  assert.equal(route.tool, 'fetch');
   assert.equal(route.args.query, 'pricing');
   assert.equal(route.args.topK, 5);
   assert.equal(route.args.maxChars, 1000);

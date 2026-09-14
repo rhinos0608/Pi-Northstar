@@ -125,6 +125,36 @@ test('native-fetch: agenticBrowse read issues responseId and wordCount', async (
   assert.ok(typeof details?.wordCount === 'number');
 });
 
+test('native-fetch: singular url+query ranks chunks and caches retrieve', async () => {
+  const longHtml =
+    '<html><head><title>Query Page</title></head><body><article><p>' +
+    'NativeFetch query ranking body words pricing details repeated for chunk length. '.repeat(8) +
+    '</p></article></body></html>';
+  const fetched = await callNativeTool('fetch', { url: 'https://example.com/nf-query', query: 'pricing', topK: 3 }, {
+    env: {},
+    lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+    fetchPageText: async () => longHtml,
+  } as unknown as Parameters<typeof callNativeTool>[2]);
+  const text = JSON.stringify(fetched);
+  assert.match(text, /## https:\/\/example\.com\/nf-query/);
+  assert.match(text, /pricing/);
+  const responseId = responseIdOf(fetched);
+  const out = await callNativeTool('fetch', { action: 'retrieve', responseId }, { env: {} });
+  assert.ok(JSON.stringify(out).includes('pricing'));
+});
+
+test('native-fetch: singular whitespace query keeps plain read path', async () => {
+  const out = await callNativeTool('fetch', { url: 'https://example.com/nf-ws', query: '   ' }, seamOptions());
+  const details = (out as { details?: { url?: unknown } }).details;
+  assert.equal(details?.url, 'https://example.com/nf-ws');
+  assert.match(JSON.stringify(out), /NativeFetch body words/);
+});
+
+test('native-fetch: singular query crawl failure falls back to plain read', async () => {
+  const out = await callNativeTool('fetch', { url: 'https://example.com/nf-fb', query: 'pricing', topK: 99999 }, seamOptions());
+  assert.match(JSON.stringify(out), /NativeFetch body words/);
+});
+
 test('native-fetch: pdf SSRF redirect to private target fails closed to reader fallback', async () => {
   const savedFetch = globalThis.fetch;
   let secondFetch = false;

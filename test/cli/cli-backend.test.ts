@@ -177,3 +177,10 @@ test('sentinel: new provider keys never leak to the python child env', () => {
     assert.equal(pythonEnv[key], undefined, `python child env must not carry ${key}`);
   }
 });
+
+test('buildCliEnvironment forwards DIFFBOT_TOKEN to the graph child for DQL; web_search scope unchanged', () => {
+  const scoped = buildCliEnvironment({ DIFFBOT_TOKEN: SENTINEL }, 'graph');
+  assert.equal(scoped.DIFFBOT_TOKEN, SENTINEL);
+  const unrelated = buildCliEnvironment({ DIFFBOT_TOKEN: SENTINEL }, 'web_search');
+  assert.equal(unrelated.DIFFBOT_TOKEN, SENTINEL, 'web_search keeps its existing DIFFBOT_TOKEN scope');
+});

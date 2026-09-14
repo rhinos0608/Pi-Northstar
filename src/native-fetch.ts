@@ -491,9 +491,37 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
     const specialized = await dispatchSpecializedUrl(args.url, options);
     if (specialized) return specialized;
   }
-  // Singular fetch with a query lands on agenticBrowse: resolveWebActionForTool
-  // always resolved fetch to read, so no crawl branch remains here. Multi-URL
-  // query ranking lives in the urls branch above (semanticCrawl per URL).
+  // Singular fetch with a query ranks page chunks via the same chunk-ranking
+  // crawl as the urls branch above (one URL, same engine). Query acts as a
+  // ranking-hint only: crawl failure falls back to the plain read, never
+  // throws. Empty/whitespace query keeps the plain read path.
+  if (typeof args.url === 'string' && typeof args.query === 'string' && args.query.trim().length > 0) {
+    const single = args.url;
+    const singleQuery = args.query;
+    try {
+      const chunked = await semanticCrawl({
+        source: { type: 'url', url: single },
+        query: singleQuery,
+        ...(typeof args.topK === 'number' ? { topK: args.topK } : {}),
+        ...(typeof args.maxPages === 'number' ? { maxPages: args.maxPages } : {}),
+        ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}),
+      }, options);
+      const body = resultToSingleText(chunked);
+      const text = `## ${single}\n${body}`;
+      return withFetchResponseId(
+        textResult(text, { url: single }),
+        cacheFetchForRetrieve({
+          query: singleQuery.trim(),
+          title: single,
+          url: single,
+          snippet: snippetOf(body),
+          content: body,
+        }),
+      );
+    } catch {
+      return agenticBrowse(args, options);
+    }
+  }
   return agenticBrowse(args, options);
 }
 

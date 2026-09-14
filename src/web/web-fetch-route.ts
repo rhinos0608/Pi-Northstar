@@ -68,11 +68,12 @@ function buildSourceCheckFetchRoute(params: FetchSourceCheckParams): FetchRoute 
 
 function buildReadQueryFetchRoute(params: { url: string; query?: string; topK?: number; maxChars?: number }): FetchRoute {
   return {
-    tool: 'agentic_browse',
+    tool: 'fetch',
     args: {
-      ...buildBrowseArgs({ url: params.url.trim(), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }),
+      url: params.url.trim(),
       ...(params.query !== undefined ? { query: params.query } : {}),
       ...(params.topK !== undefined ? { topK: params.topK } : {}),
+      ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}),
     },
     timeout: 120_000,
   };

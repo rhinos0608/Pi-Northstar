@@ -48,15 +48,14 @@ test('buildFetchRoute empty params throw union error', () => {
   assert.throws(() => buildFetchRoute({} as never), /requires one of/);
 });
 
-test('buildFetchRoute single url routes to agentic_browse read-query path', () => {
+test('buildFetchRoute single url routes to fetch read-query path', () => {
   const route = buildFetchRoute({ url: 'https://example.com/page' });
-  assert.equal(route.tool, 'agentic_browse');
+  assert.equal(route.tool, 'fetch');
   assert.equal(route.args.url, 'https://example.com/page');
-  assert.equal(route.args.action, 'read');
-  assert.equal(route.args.maxChars, 30000);
+  assert.ok(!('action' in route.args));
   assert.equal(route.timeout, 120_000);
   const ranked = buildFetchRoute({ url: 'https://example.com/page', query: 'pricing', topK: 5, maxChars: 5000 });
-  assert.equal(ranked.tool, 'agentic_browse');
+  assert.equal(ranked.tool, 'fetch');
   assert.equal(ranked.args.query, 'pricing');
   assert.equal(ranked.args.topK, 5);
   assert.equal(ranked.args.maxChars, 5000);
@@ -204,10 +203,9 @@ test('buildFetchRoute query-only and unknown fields throw', () => {
 
 test('buildFetchRoute single read carries defaults', () => {
   const route = buildFetchRoute({ url: 'https://example.com/page' });
-  assert.equal(route.tool, 'agentic_browse');
+  assert.equal(route.tool, 'fetch');
   assert.equal(route.args.url, 'https://example.com/page');
-  assert.equal(route.args.action, 'read');
-  assert.equal(route.args.maxChars, 30000);
+  assert.ok(!('action' in route.args));
   assert.equal(route.timeout, 120_000);
 });
 

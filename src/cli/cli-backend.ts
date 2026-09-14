@@ -432,7 +432,7 @@ const CLI_TOOL_CREDENTIALS: Record<string, readonly string[]> = {
   // SPARQL endpoint/token stay out of unrelated children. The graph tool
   // child is the related target: forward env-only operator config so
   // process-env GRAPH_SPARQL_* survives the default CLI boundary.
-  graph: ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN'],
+  graph: ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN', 'DIFFBOT_TOKEN'],
   reach_status: REACH_CREDENTIALS,
   reach_setup: REACH_CREDENTIALS,
   social: REACH_CREDENTIALS,
