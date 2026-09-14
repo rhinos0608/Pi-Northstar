@@ -391,6 +391,9 @@ export function resolveChromeExtensionId(env: Record<string, string | undefined>
 }
 
 let _chromeBridge: ChromeBridgeServer | null = null;
+/** In-flight start shared by concurrent ensure callers: assigned before the
+ * first await so a second caller joins instead of binding a duplicate server. */
+let _chromeBridgeStart: Promise<ChromeBridgeServer> | null = null;
 
 /**
  * Lazily instantiate + start the bridge server. Import-time side effects stay
@@ -406,32 +409,61 @@ export async function ensureChromeBridgeServer(
     throw new Error('user-chrome unavailable: set PI_SEARCH_CHROME_EXTENSION_ID to the companion extension id, then reconnect the companion');
   }
   if (_chromeBridge !== null) return _chromeBridge;
-  const server = new ChromeBridgeServer({
-    extensionId,
-    ...(options?.port !== undefined ? { port: options.port } : {}),
-  });
+  if (_chromeBridgeStart !== null) return _chromeBridgeStart;
+  const pending = (async (): Promise<ChromeBridgeServer> => {
+    const server = new ChromeBridgeServer({
+      extensionId,
+      ...(options?.port !== undefined ? { port: options.port } : {}),
+    });
+    try {
+      await server.start();
+    } catch (error) {
+      throw new Error(
+        `user-chrome bridge unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300),
+      );
+    }
+    // Publish once: only the joined start assigns the owner.
+    _chromeBridge = server;
+    // Publish the session token process-locally where the in-process adapter
+    // (default token resolver) can stamp it on every command. One-shot CLI
+    // children receive it explicitly via the buildCliEnvironment allowlist at
+    // spawn time. Only when actually bound: a shared-mode instance holds a
+    // different token than the bridge that owns the port, so publishing it
+    // would lock the owner out. In-memory only; rotation on bridge restart.
+    // Never assigned to global process.env.
+    if (!server.isShared) {
+      setProcessLocalBridgeToken(server.bridgeToken);
+    }
+    return server;
+  })();
+  _chromeBridgeStart = pending;
   try {
-    await server.start();
-  } catch (error) {
-    throw new Error(
-      `user-chrome bridge unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300),
-    );
+    return await pending;
+  } finally {
+    // Clear only our own start so a failure allows retry and a success keeps
+    // the owner in _chromeBridge for the fast path above.
+    if (_chromeBridgeStart === pending) _chromeBridgeStart = null;
   }
-  _chromeBridge = server;
-  // Publish the session token process-locally where the in-process adapter
-  // (default token resolver) can stamp it on every command. One-shot CLI
-  // children receive it explicitly via the buildCliEnvironment allowlist at
-  // spawn time. Only when actually bound: a shared-mode instance holds a
-  // different token than the bridge that owns the port, so publishing it
-  // would lock the owner out. In-memory only; rotation on bridge restart.
-  // Never assigned to global process.env.
-  if (!server.isShared) {
-    setProcessLocalBridgeToken(server.bridgeToken);
-  }
-  return server;
 }
 
 export async function stopChromeBridgeServer(): Promise<void> {
+  // A stop racing a joined start waits out the single in-flight start, then
+  // stops its owner so no duplicate server is left bound.
+  const pending = _chromeBridgeStart;
+  if (pending !== null) {
+    let server: ChromeBridgeServer | null = null;
+    try {
+      server = await pending;
+    } catch {
+      // Start failed; nothing bound, fall through to the null check.
+    }
+    if (_chromeBridgeStart === pending) _chromeBridgeStart = null;
+    if (server !== null && _chromeBridge === server) {
+      _chromeBridge = null;
+      setProcessLocalBridgeToken(undefined);
+      await server.stop();
+    }
+  }
   if (_chromeBridge === null) return;
   const server = _chromeBridge;
   _chromeBridge = null;
