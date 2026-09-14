@@ -78,6 +78,16 @@ async function fetchFollowingRedirects(url: string, headersOrSignal: Record<stri
   }
 }
 
+/** True for credential-forwarding redirect statuses. Plan E3 redirect policy
+ * primitive: credentialed GitHub API callers reject these instead of following
+ * them, so a redirect target can never receive the bearer token. 304 Not
+ * Modified is intentionally excluded: it is a cache revalidation response,
+ * not a credential-forwarding redirect (and is unreachable without
+ * conditional headers). 306 is unused. */
+export function isRedirectStatus(status: number): boolean {
+  return Number.isInteger(status) && (status === 300 || status === 301 || status === 302 || status === 303 || status === 305 || status === 307 || status === 308);
+}
+
 /** Credential-class headers stripped on cross-origin redirect hops
  * (case-insensitive). Same-origin hops keep all headers. */
 const CREDENTIAL_HEADER_NAMES = new Set([

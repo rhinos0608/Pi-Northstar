@@ -112,7 +112,7 @@ function githubError(
 // ── Normalized entities (fail-closed) ──
 // Sparse rows: only fields present upstream are set. Never synthesize metrics,
 // dates, or identifiers. backend_text-shaped payloads are rejected as
-// unknown-shape. Per-entity text excerpts cap at 8000 chars.
+// unknown-shape. Per-entity text excerpts cap at 8000 bytes (UTF-8).
 
 export interface GithubRepoV1 {
   version: 1;
@@ -335,8 +335,8 @@ function checkBoundedText(entity: Record<string, unknown>, field: string, issues
   if (value === undefined) return;
   if (typeof value !== 'string') {
     issues.push(`${field} must be a string`);
-  } else if (value.length > GITHUB_ENTITY_CONTENT_MAX) {
-    issues.push(`${field} exceeds maximum length of ${GITHUB_ENTITY_CONTENT_MAX}`);
+  } else if (Buffer.byteLength(value, 'utf8') > GITHUB_ENTITY_CONTENT_MAX) {
+    issues.push(`${field} exceeds maximum of ${GITHUB_ENTITY_CONTENT_MAX} bytes`);
   }
 }
 
@@ -556,7 +556,7 @@ const GITHUB_TEXT_FIELDS: readonly string[] = ['readme', 'content', 'body', 'mes
 function githubEntityTextLength(entity: GithubEntityV1): number {
   const row = entity as unknown as Record<string, unknown>;
   return GITHUB_TEXT_FIELDS.reduce(
-    (sum, field) => sum + (typeof row[field] === 'string' ? (row[field] as string).length : 0),
+    (sum, field) => sum + (typeof row[field] === 'string' ? Buffer.byteLength(row[field] as string, 'utf8') : 0),
     0,
   );
 }
@@ -600,7 +600,7 @@ export function validateGithubPage(value: unknown): { ok: boolean; issues: strin
       }
       const total = entities.reduce((sum, entity) => sum + githubEntityTextLength(entity), 0);
       if (total > GITHUB_PAGE_CONTENT_MAX) {
-        issues.push(`page content exceeds maximum of ${GITHUB_PAGE_CONTENT_MAX} chars`);
+        issues.push(`page content exceeds maximum of ${GITHUB_PAGE_CONTENT_MAX} bytes`);
       }
     }
   }
@@ -825,11 +825,15 @@ export interface GithubWorker {
   normalize(request: GithubRequest, plan: GithubBackendPlan, payload: unknown): GithubPageV1;
 }
 
-/** Single REST v3 backend for every canonical action. */
+/** Per-action backend preference (Plan E3 domain routing). Repo/tree are
+ * clone-first ('github-clone' with 'github-api' REST fallback); blob/file
+ * stay REST-first. The 'github-clone' executor is owned by github-clone.ts
+ * (W-E1) behind the GithubBackendPlan seam; the domain filters it by
+ * availability and serves REST until it registers. */
 export const GITHUB_BACKEND_PREFERENCE: Readonly<Record<GithubAction, readonly string[]>> = {
-  repo: ['github-api'],
-  file: ['github-api'],
-  tree: ['github-api'],
+  repo: ['github-clone', 'github-api'],
+  file: ['github-api', 'github-clone'],
+  tree: ['github-clone', 'github-api'],
   search: ['github-api'],
   trending: ['github-api'],
   issues: ['github-api'],

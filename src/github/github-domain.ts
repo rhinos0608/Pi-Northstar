@@ -12,19 +12,23 @@
 // Trending scrape failures degrade to an empty page with a warning.
 
 import type { BackendCallResult } from '../backend.js';
-import { fetchInit, safeResponseText } from '../core/http.js';
+import { fetchInit, isRedirectStatus, safeResponseText } from '../core/http.js';
+import { AssetBudgetLedger } from '../assets/budget-ledger.js';
+import { mayTransferPrivateGithubToVision, PRIVATE_GITHUB_VISION_TRANSFER_ENV_VAR } from '../media-vision/transfer-policy.js';
 import { buildNorthstarResult, type NorthstarEntityV1 } from '../result-contract.js';
 import { northstarTextResult } from '../core/tool-output.js';
 import { SocialError } from '../social/social-contract.js';
 import {
   decodeGithubCursor,
   encodeGithubCursor,
+  GITHUB_BACKEND_PREFERENCE,
   GITHUB_ENTITY_CONTENT_MAX,
   githubCursorFingerprint,
   githubPaginationSupported,
   validateGithubPage,
   validateGithubPath,
   validateGithubRequest,
+  type GithubAction,
   type GithubEntityV1,
   type GithubPageV1,
   type GithubRequest,
@@ -79,8 +83,24 @@ function optionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function capped(text: string): string {
-  return text.length > GITHUB_ENTITY_CONTENT_MAX ? text.slice(0, GITHUB_ENTITY_CONTENT_MAX) : text;
+// Plan E4 truncation-to-reject: upstream text over the per-entity byte cap
+// rejects instead of silently slicing. UTF-8 byte accounting (multibyte
+// text rejects earlier than its char count suggests). The message names the
+// field and cap only — never the content, URL, or token.
+function requireBoundedText(text: string, field: string): string {
+  if (Buffer.byteLength(text, 'utf8') > GITHUB_ENTITY_CONTENT_MAX) rejectOversizeGithubContent(field);
+  return text;
+}
+
+/** Oversize rejection naming field + cap only — never content, URL, or token. */
+function rejectOversizeGithubContent(field: string): never {
+  throw githubError('upstream_error', `GitHub ${field} exceeds maximum of ${GITHUB_ENTITY_CONTENT_MAX} bytes`);
+}
+
+/** Decoded-byte estimate from base64 length, before allocating the buffer. */
+function base64EstimatedBytes(stripped: string): number {
+  const padding = stripped.endsWith('==') ? 2 : stripped.endsWith('=') ? 1 : 0;
+  return Math.floor((stripped.length * 3) / 4) - padding;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -171,6 +191,11 @@ function throwForRateLimited(headers: Headers): never {
 }
 
 function throwForGithubStatus(status: number, headers: Headers): never {
+  // Plan E3 redirect reject: githubFetch uses manual redirects, so a 3xx
+  // here means upstream tried to reroute us — never follow with credentials.
+  if (isRedirectStatus(status)) {
+    throw githubError('upstream_error', 'GitHub redirect rejected: credentials are never forwarded off the fixed host');
+  }
   if (status === 401) throw githubError('authentication_required', 'GitHub authentication_required: invalid or missing token');
   if (status === 403 || status === 429) throwForRateLimited(headers);
   if (status === 404) throw githubError('not_found', 'GitHub not_found: resource does not exist');
@@ -189,7 +214,10 @@ async function githubFetch(url: string, env: Record<string, string | undefined>,
   const headers = githubAuthHeaders(env);
   let response: Response;
   try {
-    response = await fetch(url, fetchInit(headers, signal));
+    // Manual redirect handling (Plan E3): authenticated API responses must
+    // never be followed — a redirect target would otherwise receive the
+    // bearer token. Rejected below with a redacted label, never the URL.
+    response = await fetch(url, fetchInit(headers, signal, undefined, 'manual'));
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') throw error;
     throw githubError('upstream_error', 'GitHub request failed before any response was received');
@@ -280,7 +308,7 @@ function normalizeRepo(row: Record<string, unknown>, readme?: string): GithubEnt
   if (name !== undefined) entity.name = name;
   if (fullName.length > 0) entity.full_name = fullName;
   const description = stringField(row, 'description');
-  if (description !== undefined) entity.description = capped(description);
+  if (description !== undefined) entity.description = requireBoundedText(description, 'repo description');
   const stars = numberField(row, 'stargazers_count');
   if (stars !== undefined) entity.stars = stars;
   const forks = numberField(row, 'forks_count') ?? numberField(row, 'forks');
@@ -289,7 +317,7 @@ function normalizeRepo(row: Record<string, unknown>, readme?: string): GithubEnt
   if (language !== undefined) entity.language = language;
   const branch = stringField(row, 'default_branch');
   if (branch !== undefined) entity.default_branch = branch;
-  if (readme !== undefined) entity.readme = capped(readme);
+  if (readme !== undefined) entity.readme = requireBoundedText(readme, 'repo readme');
   return entity;
 }
 
@@ -301,17 +329,36 @@ interface FileContentInput {
   ref?: string | undefined;
 }
 
+/** Shared base64 text decoder for GitHub payloads (file content + repo readme).
+ * Validates charset, applies the pre-decode byte gate before Buffer alloc,
+ * re-checks post-decode length, and applies the NUL binary gate.
+ * Returns undefined for invalid/binary payloads (caller keeps metadata only);
+ * throws oversize (caller decides: file rejects, optional readme degrades). */
+function decodeBase64GithubText(raw: string, field: string): string | undefined {
+  const stripped = raw.replace(/\s/g, '');
+  if (!/^[A-Za-z0-9+/=]*$/.test(stripped) || stripped.length === 0) return undefined;
+  // Pre-decode byte gate (Plan E3): estimate decoded bytes from the
+  // base64 length and reject before allocating the decoded buffer.
+  if (base64EstimatedBytes(stripped) > GITHUB_ENTITY_CONTENT_MAX) rejectOversizeGithubContent(field);
+  const bytes = Buffer.from(stripped, 'base64');
+  if (bytes.length > GITHUB_ENTITY_CONTENT_MAX) rejectOversizeGithubContent(field);
+  // Binary gate: a NUL byte means a binary payload — metadata only,
+  // never decoded text.
+  if (bytes.includes(0)) return undefined;
+  return requireBoundedText(bytes.toString('utf8'), field);
+}
+
 function decodeFilePayload(row: Record<string, unknown>): { content: string; encoding?: string } | undefined {
   const content = stringField(row, 'content');
   if (content === undefined) return undefined;
   const encoding = stringField(row, 'encoding');
   if (encoding === 'base64') {
     // Binary or undecodable payloads omit content and keep metadata.
-    const stripped = content.replace(/\s/g, '');
-    if (!/^[A-Za-z0-9+/=]*$/.test(stripped) || stripped.length === 0) return undefined;
-    return { content: capped(Buffer.from(stripped, 'base64').toString('utf8')), encoding: 'utf8' };
+    const decoded = decodeBase64GithubText(content, 'file content');
+    if (decoded === undefined) return undefined;
+    return { content: decoded, encoding: 'utf8' };
   }
-  return { content: capped(content), ...(encoding !== undefined ? { encoding } : {}) };
+  return { content: requireBoundedText(content, 'file content'), ...(encoding !== undefined ? { encoding } : {}) };
 }
 
 function normalizeFileContent(input: FileContentInput): GithubEntityV1 {
@@ -351,7 +398,7 @@ function normalizeIssue(row: Record<string, unknown>, owner: string, repo: strin
   const url = stringField(row, 'html_url');
   if (url !== undefined) entity.url = url;
   const body = stringField(row, 'body');
-  if (body !== undefined) entity.body = capped(body);
+  if (body !== undefined) entity.body = requireBoundedText(body, 'issue body');
   const labels = labelNames(row.labels);
   if (labels !== undefined) entity.labels = labels;
   const created = stringField(row, 'created_at');
@@ -381,7 +428,7 @@ function normalizeRelease(row: Record<string, unknown>, owner: string, repo: str
   const url = stringField(row, 'html_url');
   if (url !== undefined) entity.url = url;
   const body = stringField(row, 'body');
-  if (body !== undefined) entity.body = capped(body);
+  if (body !== undefined) entity.body = requireBoundedText(body, 'release body');
   return entity;
 }
 
@@ -396,7 +443,7 @@ function normalizeCommit(row: Record<string, unknown>, owner: string, repo: stri
   };
   const inner = isRecord(row.commit) ? row.commit : undefined;
   const message = inner !== undefined ? stringField(inner, 'message') : undefined;
-  if (message !== undefined) entity.message = capped(message);
+  if (message !== undefined) entity.message = requireBoundedText(message, 'commit message');
   const innerAuthor = inner !== undefined && isRecord(inner.author) ? stringField(inner.author, 'name') : undefined;
   const topAuthor = loginOf(row.author);
   if (topAuthor !== undefined) entity.author = topAuthor;
@@ -506,6 +553,62 @@ function normalizeCodeItem(row: Record<string, unknown>): GithubEntityV1 {
   return entity;
 }
 
+// ── Backend routing + cross-plan gates (Plan E3/E4) ──
+// Backend preference per action lives in GITHUB_BACKEND_PREFERENCE
+// (github-contract.ts): repo/tree clone-first with REST fallback, blob/file
+// REST-first. The 'github-clone' executor is owned by github-clone.ts (W-E1)
+// behind the GithubBackendPlan seam; until it registers, the domain filters
+// it as unavailable and serves REST.
+
+/** Clone-executor availability. W-E1 registers the executor on landing. */
+export function isGithubCloneBackendAvailable(): boolean {
+  return false;
+}
+
+/**
+ * Ordered backend chain for an action, filtered by availability.
+ * `available` is injectable so tests can mock the W-E1 seam without
+ * importing the clone module. Unknown names are dropped, never executed.
+ */
+export function resolveGithubBackendChain(action: GithubAction, available: readonly string[] = [BACKEND]): string[] {
+  const preference = GITHUB_BACKEND_PREFERENCE[action] ?? [BACKEND];
+  const rank = new Map(preference.map((backend, index) => [backend, index]));
+  return available
+    .filter((backend) => rank.has(backend))
+    .sort((a, b) => rank.get(a)! - rank.get(b)!);
+}
+
+/**
+ * Cross-plan gate (E4): a private-capable clone acquisition must not flow
+ * to cloud vision without the Plan D operator opt-in
+ * (PI_VISION_PRIVATE_GITHUB_TRANSFER=1). Throws authentication_required
+ * naming the env var — never a secret, URL, or body.
+ */
+export function assertPrivateGithubVisionTransfer(env: Record<string, string | undefined>): void {
+  if (!mayTransferPrivateGithubToVision(env as NodeJS.ProcessEnv)) {
+    throw githubError(
+      'authentication_required',
+      `GitHub private transfer denied: set ${PRIVATE_GITHUB_VISION_TRANSFER_ENV_VAR}=1 to allow private GitHub content in cloud vision`,
+    );
+  }
+}
+
+/**
+ * Cross-plan gate (E4): clone acquisition reserves against the Plan B
+ * per-fetch aggregate ledger (512MiB default). Exhaustion maps to
+ * upstream_error without echoing request material; the BudgetLedgerError
+ * rides as cause for operator diagnosis.
+ */
+export function reserveGithubAcquisitionBudget(ledger: AssetBudgetLedger, bytes: number): void {
+  try {
+    ledger.reserve(bytes);
+  } catch (error) {
+    throw githubError('upstream_error', 'GitHub aggregate budget exceeded: acquisition would exceed the 512MiB fetch budget', {
+      cause: error,
+    });
+  }
+}
+
 // ── Action handlers ──
 
 async function handleRepo(request: GithubRequest, args: Record<string, unknown>, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
@@ -520,7 +623,12 @@ async function handleRepo(request: GithubRequest, args: Record<string, unknown>,
       if (isRecord(raw.data)) {
         const content = stringField(raw.data, 'content');
         if (content !== undefined && stringField(raw.data, 'encoding') === 'base64') {
-          readme = Buffer.from(content.replace(/\s/g, ''), 'base64').toString('utf8').slice(0, GITHUB_ENTITY_CONTENT_MAX);
+          // Shared base64 gate (Plan E3): pre-decode estimate, charset
+          // validation, NUL binary gate. Oversize rejects inside and
+          // degrades to absent below: optional enrichment omits rather
+          // than truncates. Invalid/binary decodes to undefined (absent).
+          const decoded = decodeBase64GithubText(content, 'repo readme');
+          if (decoded !== undefined) readme = decoded;
         }
       }
     } catch (error) {
@@ -808,7 +916,7 @@ async function handlePulls(request: GithubRequest, args: Record<string, unknown>
         path,
       };
       const patch = stringField(item, 'patch');
-      if (patch !== undefined) entity.content = capped(patch);
+      if (patch !== undefined) entity.content = requireBoundedText(patch, 'pull patch');
       return [entity];
     }).slice(0, request.limit);
     return singleEntityResult(request, entities);
@@ -912,7 +1020,9 @@ async function handleTrending(request: GithubRequest, signal?: AbortSignal): Pro
   const since = request.since ?? 'daily';
   try {
     const headers: Record<string, string> = { 'User-Agent': USER_AGENT };
-    const response = await fetch(`https://github.com/trending?since=${encodeURIComponent(since)}`, fetchInit(headers, signal));
+    const response = await fetch(`https://github.com/trending?since=${encodeURIComponent(since)}`, fetchInit(headers, signal, undefined, 'follow'));
+    // Follow-intentional: unauthenticated scrape, no bearer/cookie rides, so
+    // redirect-following is safe here (unlike credentialed githubFetch).
     if (!response.ok) throw new Error(`trending status ${response.status}`);
     const html = await safeResponseText(response, BACKEND);
     const entities = [...html.matchAll(/<h2[^>]*>\s*<a[^>]*href="\/([^"]+)"[^>]*>/g)]
@@ -1232,6 +1342,19 @@ export async function callGithubTool(
   });
 
   const signal = options.signal;
+  // Plan E3 routing: resolve the ordered backend chain and serve the first
+  // available entry. The clone executor has not registered (W-E1 owns
+  // github-clone.ts), so this always selects REST today; repo/tree will
+  // prefer clone once isGithubCloneBackendAvailable() flips. Chain
+  // resolution runs now so preference ordering + the REST-fallback warning
+  // are covered by tests; executor dispatch lands with W-E1 (transfer + // ledger gates wire at the clone-acquisition call site there).
+  const availableBackends = isGithubCloneBackendAvailable() ? ['github-clone', BACKEND] : [BACKEND];
+  const backendChain = resolveGithubBackendChain(request.action, availableBackends);
+  const backendWarnings: string[] = [];
+  if (backendChain[0] !== BACKEND) {
+    // Clone selected but no executor behind the seam: REST fallback.
+    backendWarnings.push('github-clone backend unavailable, using REST fallback');
+  }
   let result: { page: GithubPageV1; degraded: boolean };
   switch (request.action) {
     case 'repo': result = await handleRepo(request, args, env, signal); break;
@@ -1249,7 +1372,7 @@ export async function callGithubTool(
   }
 
   const { page, degraded } = result;
-  const allWarnings = [...validationWarnings, ...page.warnings];
+  const allWarnings = [...validationWarnings, ...backendWarnings, ...page.warnings];
   const notes = [...allWarnings];
   if (page.partial) notes.push('partial: some upstream rows were dropped or truncated');
   if (degraded) notes.push('degraded: github-api is a limited fallback backend');

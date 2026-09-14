@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   GITHUB_ACTIONS,
+  GITHUB_BACKEND_PREFERENCE,
   GITHUB_ENTITY_CONTENT_MAX,
   GITHUB_PAGE_CONTENT_MAX,
   decodeGithubCursor,
@@ -441,6 +442,15 @@ test('orderGithubPlans prefers complete, full, cursor, authenticated', () => {
       [true, 'cursor', 'env_var'],
     ],
   );
+});
+
+test('Plan E3 routing: repo/tree clone-first with REST fallback, file REST-first', () => {
+  assert.deepEqual([...GITHUB_BACKEND_PREFERENCE.repo], ['github-clone', 'github-api']);
+  assert.deepEqual([...GITHUB_BACKEND_PREFERENCE.tree], ['github-clone', 'github-api']);
+  assert.deepEqual([...GITHUB_BACKEND_PREFERENCE.file], ['github-api', 'github-clone']);
+  for (const action of GITHUB_ACTIONS) {
+    assert.ok(GITHUB_BACKEND_PREFERENCE[action].includes('github-api'), `${action} keeps REST in chain`);
+  }
 });
 
 test('github-request-contract owns request validation; facade re-exports identical refs', () => {
