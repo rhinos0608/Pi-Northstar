@@ -124,6 +124,51 @@ test('buildFetchRoute no-query honors maxChars override', () => {
   assert.equal(route.args.maxChars, 5000);
 });
 
+test('buildFetchRoute read urls routes multi-read with per-URL isolation', () => {
+  const route = buildFetchRoute({ mode: 'read', urls: ['https://example.com/a', 'https://example.com/b'] });
+  assert.equal(route.tool, 'fetch');
+  assert.deepEqual(route.args.urls, ['https://example.com/a', 'https://example.com/b']);
+});
+
+test('buildFetchRoute read rejects url+urls together', () => {
+  assert.throws(
+    () => buildFetchRoute({ mode: 'read', url: 'https://example.com/a', urls: ['https://example.com/b'] }),
+    /either url or urls/,
+  );
+});
+
+test('buildFetchRoute crawl source urls routes multi-crawl', () => {
+  const route = buildFetchRoute({
+    mode: 'crawl',
+    source: { type: 'url', urls: ['https://example.com/a', 'https://example.com/b'] },
+    query: 'docs',
+  });
+  assert.equal(route.tool, 'fetch');
+  assert.deepEqual(route.args.urls, ['https://example.com/a', 'https://example.com/b']);
+  assert.equal(route.args.query, 'docs');
+});
+
+test('buildFetchRoute crawl rejects source url+urls and multi followLinks', () => {
+  assert.throws(
+    () =>
+      buildFetchRoute({
+        mode: 'crawl',
+        source: { type: 'url', url: 'https://example.com/a', urls: ['https://example.com/b'] },
+        query: 'docs',
+      }),
+    /either url or urls/,
+  );
+  assert.throws(
+    () =>
+      buildFetchRoute({
+        mode: 'crawl',
+        source: { type: 'url', urls: ['https://example.com/a'], followLinks: true },
+        query: 'docs',
+      }),
+    /followLinks needs a single source url/,
+  );
+});
+
 test('buildFetchRoute crawl_search routes to semantic_crawl with defaults', () => {
   const route = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'test' }, query: 'test query' });
   assert.equal(route.tool, 'semantic_crawl');
@@ -279,7 +324,7 @@ test('buildFetchRoute unknown source type throws', () => {
 test('buildFetchRoute rejects unknown mode strings', () => {
   assert.throws(
     () => buildFetchRoute({ mode: 'delete', url: 'https://example.com' } as never),
-    /mode must be one of: read, crawl, batch_read, batch_crawl, sitemap, retrieve, source_check/,
+    /mode must be one of: read, crawl, sitemap, retrieve, source_check/,
   );
   assert.throws(() => buildFetchRoute({ mode: 42 } as never), /mode must be one of/);
 });
@@ -1041,11 +1086,12 @@ test('guidance: web_search single-branch fields and research-only docs', async (
 test('guidance: fetch states discriminated branches', async () => {
   const defs = await captureAllTools();
   const description = defs.fetch?.description ?? '';
-  assert.ok(/8 branches/i.test(description), 'fetch description must state the 8-branch surface');
-  assert.ok(/batch_read/i.test(description), 'fetch description must name batch_read');
-  assert.ok(/batch_crawl/i.test(description), 'fetch description must name batch_crawl');
-  assert.ok(/readable text per URL/i.test(description), 'batch_read must say full readable text per URL');
-  assert.ok(/ranked chunks per URL/i.test(description), 'batch_crawl must say ranked chunks per URL');
+  assert.ok(/5 modes/i.test(description), 'fetch description must state the 5-mode surface');
+  assert.ok(!/batch_read/i.test(description), 'fetch description must not name removed batch_read');
+  assert.ok(!/batch_crawl/i.test(description), 'fetch description must not name removed batch_crawl');
+  assert.ok(/urls\[1\.\.8\]/i.test(description), 'fetch description must note multi-url read/crawl');
+  assert.ok(/per-URL isolation/i.test(description), 'read must say full readable text per URL with isolation');
+  assert.ok(/ranked chunks/i.test(description), 'crawl must say ranked chunks');
   const params = defs.fetch!.parameters as { type?: string; properties?: Record<string, unknown> };
   assert.equal(params.type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
   const keys = Object.keys(branchProperties(params as any));

@@ -30,33 +30,38 @@ export function buildServerParameters(env: SearchMcpEnvironment): StdioServerPar
 const MAX_STDERR_BYTES = 4096;
 const MAX_TOOL_ERROR_TEXT_CHARS = 2000;
 
-/** Env keys whose values must never echo verbatim in thrown errors. */
-const SECRET_ENV_KEYS = new Set([
-  'GITHUB_TOKEN',
-  'GH_TOKEN',
-  'EXA_API_KEY',
-  'BRAVE_API_KEY',
-  'TAVILY_API_KEY',
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'GRAPH_SPARQL_TOKEN',
-  'DIFFBOT_TOKEN',
-  'FIRECRAWL_API_KEY',
-  'JINA_API_KEY',
+/** SEARCH_MCP_* keys that are non-secret config actually read by this client. Every SEARCH_MCP_* key forwards into child env, so all other SEARCH_MCP_* values are secret-capable. */
+const BENIGN_SEARCH_MCP_KEYS = new Set([
+  'SEARCH_MCP_COMMAND',
+  'SEARCH_MCP_ARGS_JSON',
+  'SEARCH_MCP_CWD',
+  'SEARCH_MCP_FORWARD_ENV_JSON',
 ]);
 
-function isSecretKey(key: string): boolean {
-  if (SECRET_ENV_KEYS.has(key)) return true;
-  return /(TOKEN|API_KEY|SECRET|PASSWORD)/.test(key);
+/** Env keys whose values are obviously benign and safe to echo. Everything else is secret-capable. */
+const BENIGN_ENV_KEYS = new Set(['PATH', 'HOME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP']);
+
+function isBenignKey(key: string): boolean {
+  const normalized = key.trim().toUpperCase();
+  if (BENIGN_ENV_KEYS.has(normalized)) return true;
+  if (normalized.startsWith('SEARCH_MCP_')) return BENIGN_SEARCH_MCP_KEYS.has(normalized);
+  return false;
 }
 
-/** Exact-value secrets forwarded to the MCP server process. */
+/** Exact-value secrets forwarded to the MCP server process.
+ * Sensitive-by-default: every non-empty forwarded value is secret-capable
+ * except obviously-benign keys (PATH/HOME/SHELL/TMPDIR/TMP/TEMP plus known-benign SEARCH_MCP_* config).
+ * Key matching is case-insensitive with trim. */
 export function secretValuesFromEnv(env: Record<string, string> | undefined): string[] {
   if (!env) return [];
   const values: string[] = [];
   for (const [key, value] of Object.entries(env)) {
     if (typeof value !== 'string' || value.length === 0) continue;
-    if (isSecretKey(key)) values.push(value);
+    if (value.trim().length === 0) continue;
+    if (isBenignKey(key)) continue;
+    values.push(value);
+    const trimmed = value.trim();
+    if (trimmed !== value) values.push(trimmed);
   }
   return values;
 }
@@ -177,22 +182,37 @@ function appendBounded(current: string, chunk: string): string {
   return combined.length > MAX_STDERR_BYTES ? combined.slice(-MAX_STDERR_BYTES) : combined;
 }
 
+function redactCause(cause: unknown, secrets: string[]): unknown {
+  if (cause instanceof Error) {
+    const redacted = new Error(redactSecrets(cause.message, secrets));
+    if (cause.cause !== undefined) {
+      (redacted as { cause?: unknown }).cause = redactCause(cause.cause, secrets);
+    }
+    return redacted;
+  }
+  if (typeof cause === 'string') return redactSecrets(cause, secrets);
+  return undefined;
+}
+
 export function withStderr(error: unknown, stderrTail: string, secrets: string[] = []): Error {
   const detail = redactSecrets(stderrTail.trim(), secrets);
-  if (!detail) {
-    if (error instanceof SearchMcpToolError) return error;
-    return error instanceof Error ? error : new Error(String(error));
-  }
+  // ALWAYS redact base message + cause chain first; never return raw error carrying secrets.
   const message = redactSecrets(error instanceof Error ? error.message : String(error), secrets);
+  const rawCause = error instanceof Error ? error.cause : undefined;
+  const safeCause = rawCause === undefined ? undefined : redactCause(rawCause, secrets);
+  const causeOptions = safeCause === undefined ? undefined : { cause: safeCause };
+  if (!detail) {
+    if (error instanceof SearchMcpToolError) {
+      return new SearchMcpToolError(message, causeOptions);
+    }
+    const redacted = new Error(message, causeOptions);
+    return redacted;
+  }
   const combinedMessage = `${message} (server stderr: ${detail})`;
   if (error instanceof SearchMcpToolError) {
-    const combined = new SearchMcpToolError(combinedMessage);
-    if (error.cause !== undefined) (combined as { cause?: unknown }).cause = error.cause;
-    return combined;
+    return new SearchMcpToolError(combinedMessage, causeOptions);
   }
-  const combined = new Error(combinedMessage);
-  if (error instanceof Error && error.cause !== undefined) (combined as { cause?: unknown }).cause = error.cause;
-  return combined;
+  return new Error(combinedMessage, causeOptions);
 }
 
 function toolErrorMessage(toolName: string, result: unknown, secrets: string[]): string {

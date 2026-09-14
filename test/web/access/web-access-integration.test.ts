@@ -15,13 +15,13 @@ test('buildFetchRoute registers source_check union', () => {
 });
 
 test('buildFetchRoute registers urls array', () => {
-  const route = buildFetchRoute({ mode: 'batch_read', urls: ['https://example.com/a', 'https://example.com/b'] });
+  const route = buildFetchRoute({ mode: 'read', urls: ['https://example.com/a', 'https://example.com/b'] });
   assert.equal(route.tool, 'fetch');
   assert.deepEqual((route.args as { urls: string[] }).urls, ['https://example.com/a', 'https://example.com/b']);
 });
 
 test('buildFetchRoute urls array preserves query passage selector', async () => {
-  const route = buildFetchRoute({ mode: 'batch_crawl', urls: ['https://example.com/a'], query: 'passage' });
+  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', urls: ['https://example.com/a'] }, query: 'passage' });
   assert.equal(route.tool, 'fetch');
   assert.equal((route.args as { query: string }).query, 'passage');
   // Contract accepts urls+query on the fetch tool (old route threw 'url is required').
@@ -39,10 +39,15 @@ test('web_search caches fused hits for retrieve', async () => {
   assert.ok(JSON.stringify(out).includes('alpha snippet'), 'cached corpus must serve stored hits');
 });
 
+test('removed batch_read/batch_crawl modes reject', () => {
+  assert.throws(() => buildFetchRoute({ mode: 'batch_read', urls: ['https://example.com/a'] } as never), /mode must be one of/);
+  assert.throws(() => buildFetchRoute({ mode: 'batch_crawl', urls: ['https://example.com/a'], query: 'q' } as never), /mode must be one of/);
+});
+
 test('buildFetchRoute rejects unknown action; contract rejects mixed selectors', async () => {
   assert.throws(() => buildFetchRoute({ action: 'read', responseId: 'r' } as never), /fetch requires explicit mode/);
   const { parseWebAccessFetchRequest } = await import('../../../src/web/access/web-access-contract.js');
-  assert.throws(() => parseWebAccessFetchRequest({ url: 'https://example.com', urls: ['https://example.com'] }), /batch accepts only/);
+  assert.throws(() => parseWebAccessFetchRequest({ url: 'https://example.com', urls: ['https://example.com'] }), /urls accepts only/);
 });
 
 test('fetch retrieve on empty cache throws contract-guided error, no network', async () => {

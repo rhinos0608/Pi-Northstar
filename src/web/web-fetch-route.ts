@@ -2,13 +2,17 @@ import { DEFAULT_WEB_READ_MAX_CHARS } from './web-contract.js';
 
 export interface FetchReadParams {
   mode: 'read';
-  url: string;
+  /** Single URL. Exactly one of url/urls is required. */
+  url?: string;
+  /** Multiple URLs (1..8): full readable text per URL in input order. */
+  urls?: string[];
   maxChars?: number;
 }
 
 export interface FetchCrawlUrlParams {
   mode: 'crawl';
-  source: { type: 'url'; url: string; followLinks?: boolean };
+  /** Single url or multi urls[1..8]; exactly one required. followLinks needs single url. */
+  source: { type: 'url'; url?: string; urls?: string[]; followLinks?: boolean };
   query: string;
   topK?: number;
   maxPages?: number;
@@ -24,20 +28,6 @@ export interface FetchCrawlSearchParams {
   maxChars?: number;
 }
 
-export interface FetchBatchReadParams {
-  mode: 'batch_read';
-  urls: string[];
-  maxChars?: number;
-}
-
-export interface FetchBatchCrawlParams {
-  mode: 'batch_crawl';
-  urls: string[];
-  query: string;
-  topK?: number;
-  maxPages?: number;
-  maxChars?: number;
-}
 
 export interface FetchSitemapParams {
   mode: 'sitemap';
@@ -67,8 +57,6 @@ export type FetchRouteParams =
   | FetchReadParams
   | FetchCrawlUrlParams
   | FetchCrawlSearchParams
-  | FetchBatchReadParams
-  | FetchBatchCrawlParams
   | FetchSitemapParams
   | FetchRetrieveParams
   | FetchSourceCheckParams;
@@ -90,7 +78,7 @@ function buildSourceCheckFetchRoute(params: FetchSourceCheckParams): FetchRoute 
   return { tool: 'fetch', args: { action: 'source_check', responseId: params.responseId, claims: params.claims, ...(params.sourceIds !== undefined ? { sourceIds: params.sourceIds } : {}) }, timeout: 60_000 };
 }
 
-function buildReadFetchRoute(params: FetchReadParams): FetchRoute {
+function buildReadFetchRoute(params: { url: string; maxChars?: number }): FetchRoute {
   return {
     tool: 'agentic_browse',
     args: buildBrowseArgs({ url: params.url.trim(), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }),
@@ -98,7 +86,13 @@ function buildReadFetchRoute(params: FetchReadParams): FetchRoute {
   };
 }
 
-function buildCrawlUrlFetchRoute(params: FetchCrawlUrlParams): FetchRoute {
+function buildCrawlUrlFetchRoute(params: {
+  source: { type: 'url'; url: string; followLinks?: boolean };
+  query: string;
+  topK?: number;
+  maxPages?: number;
+  maxChars?: number;
+}): FetchRoute {
   const followLinks = params.source.followLinks === true;
   return {
     tool: 'semantic_crawl',
@@ -130,11 +124,11 @@ function buildCrawlSearchFetchRoute(params: FetchCrawlSearchParams): FetchRoute 
   };
 }
 
-function buildBatchReadFetchRoute(params: FetchBatchReadParams): FetchRoute {
+function buildMultiReadFetchRoute(params: { urls: string[]; maxChars?: number }): FetchRoute {
   return { tool: 'fetch', args: { urls: params.urls, ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }, timeout: 120_000 };
 }
 
-function buildBatchCrawlFetchRoute(params: FetchBatchCrawlParams): FetchRoute {
+function buildMultiCrawlFetchRoute(params: { urls: string[]; query: string; topK?: number; maxPages?: number; maxChars?: number }): FetchRoute {
   return { tool: 'fetch', args: { urls: params.urls, query: params.query, ...(params.topK !== undefined ? { topK: params.topK } : {}), ...(params.maxPages !== undefined ? { maxPages: params.maxPages } : {}), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }, timeout: 120_000 };
 }
 
@@ -157,20 +151,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-const FETCH_MODES = [
-  'read',
-  'crawl',
-  'batch_read',
-  'batch_crawl',
-  'sitemap',
-  'retrieve',
-  'source_check',
-] as const;
+const FETCH_MODES = ['read', 'crawl', 'sitemap', 'retrieve', 'source_check'] as const;
 
-const FETCH_MODE_ERROR =
-  'mode must be one of: read, crawl, batch_read, batch_crawl, sitemap, retrieve, source_check';
-const FETCH_EXPLICIT_MODE_ERROR =
-  'fetch requires explicit mode: read, crawl, batch_read, batch_crawl, sitemap, retrieve, or source_check';
+const FETCH_MODE_ERROR = 'mode must be one of: read, crawl, sitemap, retrieve, source_check';
+const FETCH_EXPLICIT_MODE_ERROR = 'fetch requires explicit mode: read, crawl, sitemap, retrieve, or source_check';
 const FETCH_CRAWL_SOURCE_ERROR = 'crawl source.type must be one of: url, search';
 
 function requireNonEmptyString(record: Record<string, unknown>, key: string, message: string): string {
@@ -189,6 +173,15 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed === '' ? undefined : trimmed;
+}
+
+function hasNonEmptyString(record: Record<string, unknown>, key: string): boolean {
+  const value: unknown = record[key];
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function hasUrls(record: Record<string, unknown>): boolean {
+  return record['urls'] !== undefined;
 }
 
 function requireUrls(record: Record<string, unknown>, mode: string): string[] {
@@ -235,9 +228,14 @@ export function buildFetchRoute(params: FetchRouteParams): FetchRoute {
   }
   switch (mode) {
     case 'read': {
-      const url = requireNonEmptyString(record, 'url', 'read requires url');
       const maxChars = optionalNumber(record, 'maxChars');
-      return buildReadFetchRoute({ mode: 'read', url, ...(maxChars !== undefined ? { maxChars } : {}) });
+      if (hasUrls(record)) {
+        if (hasNonEmptyString(record, 'url')) throw new Error('read accepts either url or urls[1..8], not both');
+        const urls = requireUrls(record, 'read');
+        return buildMultiReadFetchRoute({ urls, ...(maxChars !== undefined ? { maxChars } : {}) });
+      }
+      const url = requireNonEmptyString(record, 'url', 'read requires url or urls[1..8]');
+      return buildReadFetchRoute({ url, ...(maxChars !== undefined ? { maxChars } : {}) });
     }
     case 'crawl': {
       const query = requireNonEmptyString(record, 'query', 'crawl requires query');
@@ -245,13 +243,26 @@ export function buildFetchRoute(params: FetchRouteParams): FetchRoute {
       if (!isRecord(source)) throw new Error(FETCH_CRAWL_SOURCE_ERROR);
       const sourceType: unknown = source['type'];
       if (sourceType === 'url') {
-        const url = requireNonEmptyString(source, 'url', 'crawl source url requires url');
-        const followLinks = source['followLinks'] === true ? true : undefined;
         const topK = optionalNumber(record, 'topK');
         const maxPages = optionalNumber(record, 'maxPages');
         const maxChars = optionalNumber(record, 'maxChars');
+        if (hasUrls(source)) {
+          if (hasNonEmptyString(source, 'url'))
+            throw new Error('crawl source accepts either url or urls[1..8], not both');
+          if (source['followLinks'] !== undefined)
+            throw new Error('crawl followLinks needs a single source url');
+          const urls = requireUrls(source, 'crawl');
+          return buildMultiCrawlFetchRoute({
+            urls,
+            query,
+            ...(topK !== undefined ? { topK } : {}),
+            ...(maxPages !== undefined ? { maxPages } : {}),
+            ...(maxChars !== undefined ? { maxChars } : {}),
+          });
+        }
+        const url = requireNonEmptyString(source, 'url', 'crawl source url requires url or urls[1..8]');
+        const followLinks = source['followLinks'] === true ? true : undefined;
         return buildCrawlUrlFetchRoute({
-          mode: 'crawl',
           source: { type: 'url', url, ...(followLinks !== undefined ? { followLinks } : {}) },
           query,
           ...(topK !== undefined ? { topK } : {}),
@@ -274,26 +285,6 @@ export function buildFetchRoute(params: FetchRouteParams): FetchRoute {
         });
       }
       throw new Error(FETCH_CRAWL_SOURCE_ERROR);
-    }
-    case 'batch_read': {
-      const urls = requireUrls(record, 'batch_read');
-      const maxChars = optionalNumber(record, 'maxChars');
-      return buildBatchReadFetchRoute({ mode: 'batch_read', urls, ...(maxChars !== undefined ? { maxChars } : {}) });
-    }
-    case 'batch_crawl': {
-      const urls = requireUrls(record, 'batch_crawl');
-      const query = requireNonEmptyString(record, 'query', 'batch_crawl requires query');
-      const topK = optionalNumber(record, 'topK');
-      const maxPages = optionalNumber(record, 'maxPages');
-      const maxChars = optionalNumber(record, 'maxChars');
-      return buildBatchCrawlFetchRoute({
-        mode: 'batch_crawl',
-        urls,
-        query,
-        ...(topK !== undefined ? { topK } : {}),
-        ...(maxPages !== undefined ? { maxPages } : {}),
-        ...(maxChars !== undefined ? { maxChars } : {}),
-      });
     }
     case 'sitemap': {
       const url = requireNonEmptyString(record, 'url', 'sitemap requires url');

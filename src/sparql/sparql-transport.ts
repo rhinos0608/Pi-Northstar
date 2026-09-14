@@ -64,12 +64,32 @@ export function safeEndpointLabel(url: URL): string {
   return `${url.origin}${url.pathname}`;
 }
 
-/** Sanitize a raw endpoint string for error echo: origin+path when parseable, else cut at ?/#. */
+/** Collect non-empty endpoint query-param values so operator secrets in
+ *  ?api_key=... never echo into model-facing errors (wire dispatch unaffected). */
+function endpointQuerySecrets(url: URL): string[] {
+  const out: string[] = [];
+  url.searchParams.forEach((value) => {
+    if (value.length > 0) out.push(value);
+  });
+  return out;
+}
+
+function redactWithSecrets(message: string, token: string | undefined, secrets: readonly string[]): string {
+  let out = redactSparqlError(message, token);
+  for (const secret of secrets) {
+    if (secret.length > 0) out = out.split(secret).join('[REDACTED]');
+  }
+  return out;
+}
+
+/** Sanitize a raw endpoint string for error echo: origin+path when parseable;
+ *  on parse failure a fixed label only. Endpoint value is operator config,
+ *  never needed in model-facing errors, so never echo raw text. */
 export function safeRawEndpointLabel(raw: string): string {
   try {
     return safeEndpointLabel(new URL(raw.trim()));
   } catch {
-    return raw.split(/[?#]/)[0]!;
+    return 'invalid endpoint';
   }
 }
 
@@ -77,9 +97,10 @@ function fail(
   code: SparqlTransportErrorCode,
   message: string,
   token: string | undefined,
-  extra?: { retryable?: boolean; status?: number | undefined; cause?: unknown },
+  extra?: { retryable?: boolean; status?: number | undefined },
+  secrets: readonly string[] = [],
 ): never {
-  throw new SparqlTransportError(code, redactSparqlError(message, token), { ...extra });
+  throw new SparqlTransportError(code, redactWithSecrets(message, token, secrets), { ...extra });
 }
 
 /**
@@ -114,6 +135,7 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
 
   const target = `${url!.origin}${url!.pathname}${url!.search}`;
   const label = safeEndpointLabel(url!);
+  const querySecrets = endpointQuerySecrets(url!);
   const headers: Record<string, string> = {
     Accept: 'application/sparql-results+json',
     'Content-Type': 'application/x-www-form-urlencoded',
@@ -137,14 +159,13 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
     if (error instanceof SparqlTransportError) throw error;
     fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${error instanceof Error ? error.message : String(error)}`, token, {
       retryable: true,
-      cause: error,
-    });
+    }, querySecrets);
   }
 
   if (response!.status >= 300 && response!.status < 400) {
     fail('transport_invalid_response', `Redirect rejected for ${label}: credentials are never forwarded off the endpoint`, token, {
       status: response!.status,
-    });
+    }, querySecrets);
   }
 
   let raw: string;
@@ -154,26 +175,19 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
     if (error instanceof SparqlTransportError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (/too large|exceeded size/i.test(message)) {
-      fail('response_too_large', `SPARQL response too large for ${label}`, token, { status: response!.status });
+      fail('response_too_large', `SPARQL response too large for ${label}`, token, { status: response!.status }, querySecrets);
     }
-    fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${message}`, token, { status: response!.status });
+    fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${message}`, token, { status: response!.status }, querySecrets);
   }
 
   if (!response!.ok) {
-    let detail = '';
-    if (raw!.length > 0) {
-      try {
-        const parsedError: unknown = JSON.parse(raw!);
-        detail = `: ${typeof parsedError === 'string' ? parsedError : JSON.stringify(parsedError)}`;
-      } catch {
-        detail = `: ${raw}`;
-      }
-    }
+    // Model-facing error is status + safe origin+path label only: upstream
+    // bodies can echo endpoint query values/tokens, so never append raw body.
     const status = response!.status;
-    fail('transport_invalid_response', `SPARQL API error (HTTP ${status}) for ${label}${detail}`, token, {
+    fail('transport_invalid_response', `SPARQL API error (HTTP ${status}) for ${label}`, token, {
       status,
       retryable: status >= 500,
-    });
+    }, querySecrets);
   }
 
   let parsed: unknown;
@@ -181,7 +195,7 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
     parsed = JSON.parse(raw!);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${message}`, token, { status: response!.status });
+    fail('transport_invalid_response', `SPARQL transport failure for ${label}: ${message}`, token, { status: response!.status }, querySecrets);
   }
 
   return parsed as T;

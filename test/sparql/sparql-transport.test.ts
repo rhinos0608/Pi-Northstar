@@ -215,6 +215,93 @@ test('invalid endpoint echo strips query string', async () => {
   );
 });
 
+test('malformed endpoint with credentials never echoes secret (parse-failure canary)', async () => {
+  const credential = 'TOPSECRET_MALFORMED_CANARY_9x4';
+  const neverFetch: FetchFn = async () => {
+    throw new Error('fetch must not dispatch on invalid endpoint');
+  };
+  await assert.rejects(
+    sparqlPost({ endpoint: `https://user:${credential}@[`, query: 'SELECT * WHERE { ?s ?p ?o }', fetchFn: neverFetch }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes(credential), 'credential leaked in malformed-endpoint error');
+      assert.ok(!err.message.includes('user:'), 'userinfo leaked in malformed-endpoint error');
+      return true;
+    },
+  );
+});
+
+test('upstream error body never echoes endpoint query secret (body-echo canary)', async () => {
+  const bodySecret = 'SENTINEL_BODY_ECHO_k9q4m7x2';
+  const endpoint = `https://sparql.example.org/sparql?api_key=${bodySecret}`;
+  const fetchFn: FetchFn = async () =>
+    new Response(`{"error":"invalid key ${bodySecret}"}`, {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    });
+  await assert.rejects(
+    sparqlPost({ endpoint, query: 'SELECT * WHERE { ?s ?p ?o }', fetchFn }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { status?: number }).status, 400);
+      assert.ok(!err.message.includes(bodySecret), 'endpoint query secret echoed via upstream body');
+      assert.ok(err.message.includes('https://sparql.example.org/sparql'), 'error must still identify origin+path');
+      return true;
+    },
+  );
+});
+
+test('parse-failure endpoint never echoes raw text: bracket credential canary', async () => {
+  const neverFetch: FetchFn = async () => {
+    throw new Error('fetch must not dispatch on invalid endpoint');
+  };
+  await assert.rejects(
+    sparqlPost({ endpoint: 'https://user:TOPSECRET[', query: 'SELECT * WHERE { ?s ?p ?o }', fetchFn: neverFetch }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes('TOPSECRET'), 'credential leaked in malformed-endpoint error');
+      assert.ok(!err.message.includes('user:'), 'userinfo leaked in malformed-endpoint error');
+      assert.ok(err.message.includes('invalid endpoint'), 'parse failure must use fixed label');
+      return true;
+    },
+  );
+});
+
+test('parse-failure endpoint with query secret never echoes it', async () => {
+  const querySecret = 'SENTINEL_PARSE_FAIL_q7w3n9p2';
+  const neverFetch: FetchFn = async () => {
+    throw new Error('fetch must not dispatch on invalid endpoint');
+  };
+  await assert.rejects(
+    sparqlPost({ endpoint: `https://[?api_key=${querySecret}`, query: 'SELECT * WHERE { ?s ?p ?o }', fetchFn: neverFetch }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes(querySecret), 'query secret leaked in parse-failure error');
+      assert.ok(!err.message.includes('api_key'), 'query key leaked in parse-failure error');
+      assert.ok(err.message.includes('invalid endpoint'), 'parse failure must use fixed label');
+      return true;
+    },
+  );
+});
+
+test('parse-failure long userinfo never echoes prefix (truncate-before-strip canary)', async () => {
+  const credential = 'LONGUSERINFO_SENTINEL_k4m8x1z6';
+  const neverFetch: FetchFn = async () => {
+    throw new Error('fetch must not dispatch on invalid endpoint');
+  };
+  const endpoint = `https://user:${credential}${'x'.repeat(120)}@[invalid`;
+  await assert.rejects(
+    sparqlPost({ endpoint, query: 'SELECT * WHERE { ?s ?p ?o }', fetchFn: neverFetch }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!err.message.includes(credential), 'long-userinfo credential leaked in parse-failure error');
+      assert.ok(!err.message.includes('user:'), 'userinfo prefix leaked in parse-failure error');
+      assert.ok(err.message.includes('invalid endpoint'), 'parse failure must use fixed label');
+      return true;
+    },
+  );
+});
+
 test('caller abort signal surfaces retryable transport error', async () => {
   const fetchFn: FetchFn = async (_url, init) => {
     return new Promise<Response>((_resolve, reject) => {

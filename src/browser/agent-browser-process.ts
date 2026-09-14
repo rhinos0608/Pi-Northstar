@@ -250,8 +250,9 @@ const VERIFY_VERSION_TIMEOUT_MS = 10_000;
 
 // .cmd/.bat targets route via cmd.exe /d /s /c with pre-quoted argv inside
 // spawnCliCommand (shared with src/cli-command.ts) — direct spawn with
-// shell:false would fail EINVAL on Windows. `%` passes through the transport
-// literally (see quoteCmdArg): no doubling.
+// shell:false would fail EINVAL on Windows. `%` never passes literally:
+// quoteCmdArg splits each `%` as `"%"` — inserted quotes poison cmd %NAME%
+// match while CommandLineToArgvW strips toggles, restoring original spelling.
 // A resolved `.js`/`.cjs`/`.mjs` entry is not a CreateProcess image either:
 // on win32 it runs as [process.execPath, entry, ...args] (shell:false cannot
 // execute script files — direct spawn fails with EFTYPE); POSIX keeps the

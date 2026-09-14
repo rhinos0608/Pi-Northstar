@@ -570,10 +570,10 @@ export function validateWebAccessProviderResponse(value: unknown): { ok: boolean
   return { ok: issues.length === 0, issues };
 }
 
-// ── Fetch discriminated union (FINAL): 8 branches ──
+// ── Fetch discriminated union (FINAL): read, crawl, multi-url, sitemap, retrieve, source_check ──
 // read: url + maxChars?. crawl: source {type:url url followLinks?} |
 // {type:search searchQuery} + query + topK?/maxPages?/maxChars?.
-// batch_read: urls[1..8] + maxChars? (readable-only). batch_crawl:
+// multi-url read: urls[1..8] + maxChars? (readable-only). multi-url crawl:
 // urls[1..8] + query + topK?/maxPages?/maxChars?. sitemap: url +
 // siteMap:true + query?/maxPages?. retrieve: responseId + sourceIds?/
 // offset?/limit?/findText? (findText wins). source_check: responseId +
@@ -607,11 +607,11 @@ export interface WebAccessFetchCrawlSearchRequest {
   maxPages?: number | undefined;
   maxChars?: number | undefined;
 }
-export interface WebAccessFetchBatchReadRequest {
+export interface WebAccessFetchMultiReadRequest {
   urls: string[];
   maxChars?: number | undefined;
 }
-export interface WebAccessFetchBatchCrawlRequest {
+export interface WebAccessFetchMultiCrawlRequest {
   urls: string[];
   query: string;
   topK?: number | undefined;
@@ -645,8 +645,8 @@ export type WebAccessFetchRequest =
   | WebAccessFetchReadRequest
   | WebAccessFetchCrawlUrlRequest
   | WebAccessFetchCrawlSearchRequest
-  | WebAccessFetchBatchReadRequest
-  | WebAccessFetchBatchCrawlRequest
+  | WebAccessFetchMultiReadRequest
+  | WebAccessFetchMultiCrawlRequest
   | WebAccessFetchSitemapRequest
   | WebAccessFetchRetrieveRequest
   | WebAccessFetchSourceCheckRequest;
@@ -755,16 +755,16 @@ function parseReadFetch(raw: Record<string, unknown>): WebAccessFetchReadRequest
   return { url };
 }
 
-function parseBatchFetch(raw: Record<string, unknown>): WebAccessFetchBatchReadRequest | WebAccessFetchBatchCrawlRequest {
+function parseUrlsFetch(raw: Record<string, unknown>): WebAccessFetchMultiReadRequest | WebAccessFetchMultiCrawlRequest {
   if (!Array.isArray(raw.urls)) throw new WebAccessContractError('urls must be an array of strings');
   if (raw.urls.length < 1 || raw.urls.length > WEB_ACCESS_MAX_FETCH_URLS) {
     throw new WebAccessContractError(`urls must contain 1-${WEB_ACCESS_MAX_FETCH_URLS} entries`);
   }
   const urls = raw.urls.map(cleanUrl) as string[];
-  rejectPresentFields(raw, ['source', 'url', 'searchQuery', 'followLinks', 'siteMap', 'sitemap', 'action', 'responseId', 'sourceIds', 'claims', 'offset', 'limit', 'findText'], 'batch accepts only urls/query/topK/maxPages/maxChars');
+  rejectPresentFields(raw, ['source', 'url', 'searchQuery', 'followLinks', 'siteMap', 'sitemap', 'action', 'responseId', 'sourceIds', 'claims', 'offset', 'limit', 'findText'], 'urls accepts only urls/query/topK/maxPages/maxChars');
   if (raw.query === undefined) {
     if (raw.topK !== undefined || raw.maxPages !== undefined) {
-      throw new WebAccessContractError('batch_read accepts only urls/maxChars (query selects batch_crawl)');
+      throw new WebAccessContractError('multi-url read accepts only urls/maxChars (query selects multi-url crawl)');
     }
     if (raw.maxChars !== undefined) {
       if (!Number.isInteger(raw.maxChars) || (raw.maxChars as number) < 1 || (raw.maxChars as number) > WEB_ACCESS_FETCH_MAX_CHARS_MAX) {
@@ -826,16 +826,16 @@ function rejectPresentFields(raw: Record<string, unknown>, fields: readonly stri
   }
 }
 
-function parseNormalFetch(raw: Record<string, unknown>): WebAccessFetchReadRequest | WebAccessFetchCrawlUrlRequest | WebAccessFetchCrawlSearchRequest | WebAccessFetchBatchReadRequest | WebAccessFetchBatchCrawlRequest | WebAccessFetchSitemapRequest {
+function parseNormalFetch(raw: Record<string, unknown>): WebAccessFetchReadRequest | WebAccessFetchCrawlUrlRequest | WebAccessFetchCrawlSearchRequest | WebAccessFetchMultiReadRequest | WebAccessFetchMultiCrawlRequest | WebAccessFetchSitemapRequest {
   if (raw.action !== undefined) {
     throw new WebAccessContractError('action must be omitted for a normal fetch');
   }
   if (raw.source !== undefined) return parseCrawlFetch(raw);
-  if (raw.urls !== undefined) return parseBatchFetch(raw);
+  if (raw.urls !== undefined) return parseUrlsFetch(raw);
   if (raw.siteMap !== undefined) return parseSitemapFetch(raw);
   if (raw.url !== undefined) {
     if (raw.query !== undefined || raw.searchQuery !== undefined || raw.followLinks !== undefined || raw.sitemap !== undefined || raw.topK !== undefined || raw.maxPages !== undefined) {
-      throw new WebAccessContractError('read accepts only url/maxChars; crawl requires source, batch requires urls, sitemap requires siteMap:true');
+      throw new WebAccessContractError('read accepts only url/maxChars; crawl requires source, multi-url reads use urls, sitemap requires siteMap:true');
     }
     if (raw.responseId !== undefined || raw.sourceIds !== undefined || raw.claims !== undefined || raw.offset !== undefined || raw.limit !== undefined || raw.findText !== undefined) {
       throw new WebAccessContractError('responseId/sourceIds/claims/offset/limit/findText require action retrieve or source_check');

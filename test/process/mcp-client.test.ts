@@ -213,3 +213,172 @@ test('callTool passes through successful results without throwing', async () => 
   });
   assert.deepEqual(await client.callTool('search', {}), ok);
 });
+
+test('withStderr redacts base error message when stderr is empty', () => {
+  const secret = 'SENTINEL_EMPTY_STDERR_abc123xyz';
+  const err = withStderr(new Error(`transport ${secret} boom`), '', [secret]);
+  assert.ok(!err.message.includes(secret), 'empty-stderr path must not echo secret');
+  assert.ok(err.message.includes('[redacted]'));
+});
+
+test('withStderr redacts non-Error thrown value when stderr is empty', () => {
+  const secret = 'SENTINEL_STRING_THROW_abc123xyz';
+  const err = withStderr(`string failure ${secret}`, '   ', [secret]);
+  assert.ok(!err.message.includes(secret));
+  assert.ok(err.message.includes('[redacted]'));
+});
+
+test('secretValuesFromEnv is sensitive-by-default: lowercase + CREDENTIAL + custom keys', () => {
+  const lower = 'SENTINEL_LOWER_TOKEN_abc123xyz';
+  const cred = 'SENTINEL_CRED_abc123xyz';
+  const custom = 'SENTINEL_CUSTOM_abc123xyz';
+  const secrets = secretValuesFromEnv({
+    my_token: lower,
+    CREDENTIAL: cred,
+    CUSTOM_ALLOWED: custom,
+    PATH: '/usr/bin',
+    HOME: '/root',
+    SEARCH_MCP_COMMAND: 'search-mcp',
+  });
+  assert.ok(secrets.includes(lower), 'lowercase my_token must be secret-capable');
+  assert.ok(secrets.includes(cred), 'CREDENTIAL must be secret-capable');
+  assert.ok(secrets.includes(custom), 'custom forwarded key must be secret-capable');
+  assert.ok(!secrets.includes('/usr/bin'), 'PATH stays benign');
+  assert.ok(!secrets.includes('/root'), 'HOME stays benign');
+  assert.ok(!secrets.includes('search-mcp'), 'SEARCH_MCP_* stays benign');
+});
+
+test('callTool redacts lowercase forwarded secret from stderr', async () => {
+  const secret = 'SENTINEL_LOWER_FWD_abc123xyz';
+  const params = buildServerParameters({
+    SEARCH_MCP_FORWARD_ENV_JSON: '["my_token"]',
+    my_token: secret,
+  });
+  assert.equal(params.env?.my_token, secret);
+  const client = new SearchMcpClient(params) as unknown as {
+    stderrTail: string;
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  client.stderrTail = `server log leaked ${secret} end`;
+  client.connect = async () => ({
+    callTool: async () => {
+      throw new Error('transport boom');
+    },
+  });
+  await assert.rejects(client.callTool('search', {}), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.ok(!error.message.includes(secret), 'lowercase forwarded secret must not echo');
+    assert.ok(error.message.includes('[redacted]'));
+    return true;
+  });
+});
+
+test('callTool redacts CREDENTIAL-style forwarded secret from stderr', async () => {
+  const secret = 'SENTINEL_CRED_FWD_abc123xyz';
+  const params = buildServerParameters({
+    SEARCH_MCP_FORWARD_ENV_JSON: '["MY_CREDENTIAL"]',
+    MY_CREDENTIAL: secret,
+  });
+  const client = new SearchMcpClient(params) as unknown as {
+    stderrTail: string;
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  client.stderrTail = `denied ${secret}`;
+  client.connect = async () => ({
+    callTool: async () => {
+      throw new Error('transport boom');
+    },
+  });
+  await assert.rejects(client.callTool('search', {}), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.ok(!error.message.includes(secret), 'CREDENTIAL secret must not echo');
+    return true;
+  });
+});
+
+test('withStderr redacts secret carried on Error cause', () => {
+  const secret = 'SENTINEL_CAUSE_abc123xyz';
+  const inner = new Error(`inner ${secret} detail`);
+  const outer = new Error('outer boom', { cause: inner });
+  const err = withStderr(outer, '', [secret]);
+  assert.ok(!err.message.includes(secret));
+  const causeText = err.cause instanceof Error ? err.cause.message : String(err.cause ?? '');
+  assert.ok(!causeText.includes(secret), 'cause must be redacted or dropped');
+  assert.ok(!JSON.stringify(err).includes(secret));
+});
+
+test('withStderr redacts string cause carrying secret', () => {
+  const secret = 'SENTINEL_STR_CAUSE_abc123xyz';
+  const outer = new Error('outer boom', { cause: `raw ${secret}` });
+  const err = withStderr(outer, `tail ${secret}`, [secret]);
+  assert.ok(!err.message.includes(secret));
+  assert.ok(!String((err as { cause?: unknown }).cause ?? '').includes(secret));
+});
+
+test('callTool redacts unknown SEARCH_MCP_* secret from stderr canary', async () => {
+  const canary = 'SENTINEL_CANARY_SEARCH_MCP_TOKEN_abc123xyz';
+  const custom = 'SENTINEL_CANARY_CUSTOM_SECRET_abc123xyz';
+  const params = buildServerParameters({
+    SEARCH_MCP_TOKEN: canary,
+    SEARCH_MCP_FORWARD_ENV_JSON: '["MY_CUSTOM_SECRET"]',
+    MY_CUSTOM_SECRET: custom,
+  });
+  assert.equal(params.env?.SEARCH_MCP_TOKEN, canary);
+  const secrets = secretValuesFromEnv(params.env as Record<string, string>);
+  assert.ok(secrets.includes(canary), 'unknown SEARCH_MCP_* must be secret-capable');
+  assert.ok(secrets.includes(custom), 'custom SECRET-ish key must be secret-capable');
+  assert.ok(!secrets.includes('search-mcp'));
+  const client = new SearchMcpClient(params) as unknown as {
+    stderrTail: string;
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  client.stderrTail = `server log leaked ${canary} and ${custom} end`;
+  client.connect = async () => ({
+    callTool: async () => {
+      throw new Error('transport boom');
+    },
+  });
+  await assert.rejects(client.callTool('search', {}), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.ok(!error.message.includes(canary), 'thrown message must not echo SEARCH_MCP_TOKEN canary');
+    assert.ok(!error.message.includes(custom), 'thrown message must not echo custom secret canary');
+    assert.ok(error.message.includes('[redacted]'));
+    return true;
+  });
+});
+
+test('secretValuesFromEnv keeps known-benign SEARCH_MCP_* config benign', () => {
+  const secrets = secretValuesFromEnv({
+    SEARCH_MCP_COMMAND: 'search-mcp',
+    SEARCH_MCP_ARGS_JSON: '["dist/index.js"]',
+    SEARCH_MCP_CWD: '/tmp/search-mcp',
+    SEARCH_MCP_FORWARD_ENV_JSON: '["CUSTOM_ALLOWED"]',
+  });
+  assert.deepEqual(secrets, []);
+});
+test('callTool redacts custom forwarded secret inside isError:true content', async () => {
+  const secret = 'SENTINEL_CUSTOM_ISERROR_abc123xyz';
+  const params = buildServerParameters({
+    SEARCH_MCP_FORWARD_ENV_JSON: '["my_token"]',
+    my_token: secret,
+  });
+  const client = new SearchMcpClient(params) as unknown as {
+    connect: () => Promise<{ callTool: () => Promise<unknown> }>;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
+  client.connect = async () => ({
+    callTool: async () => ({
+      content: [{ type: 'text', text: `denied ${secret}` }],
+      isError: true,
+    }),
+  });
+  await assert.rejects(client.callTool('search', {}), (error: unknown) => {
+    assert.ok(error instanceof SearchMcpToolError);
+    assert.ok(!(error as Error).message.includes(secret), 'isError content must be redacted');
+    assert.ok((error as Error).message.includes('[redacted]'));
+    return true;
+  });
+});

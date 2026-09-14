@@ -142,6 +142,17 @@ function abortLedgerError(): Error {
   return Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
 }
 
+/** Cap on coalesced leader handoffs; exhaustion fails closed, never false-suppressed. */
+export const COALESCE_FOLLOW_MAX = 16;
+
+/** Coalesced follow loop exhausted its handoff cap without settling. */
+export class LedgerCoalesceError extends Error {
+  constructor(message = 'Search coalescing did not settle: too many leader handoffs') {
+    super(message);
+    this.name = 'LedgerCoalesceError';
+  }
+}
+
 /** Type guard for a transient leader result shared over the coalesced promise. */
 function isAgentToolResult(value: unknown): value is AgentToolResult<unknown> {
   return (
@@ -228,7 +239,7 @@ export function createWebSearchExecute(
       // re-begin would misreport such late followers as suppressed though no
       // success was ever recorded. Loop until a terminal state with a cap.
       let pending: Promise<unknown> = begun.promise;
-      for (let attempt = 0; attempt < 16; attempt += 1) {
+      for (let attempt = 0; attempt < COALESCE_FOLLOW_MAX; attempt += 1) {
         try {
           const shared = await pending;
           if (isAgentToolResult(shared)) return shared;
@@ -254,7 +265,7 @@ export function createWebSearchExecute(
       }
       if (signal?.aborted) throw abortLedgerError();
       // Livelock cap hit: fail closed without inventing a false suppression.
-      throw new Error('Search coalescing did not settle: too many leader handoffs');
+      throw new LedgerCoalesceError();
     }
     return runLedgeredSearch({ client, env, ledger, key: begun.key, params: current, signal });
   };
@@ -339,14 +350,12 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch runs one of 8 branches. read {url}: full readable text of one URL. crawl {source, query}: ranked chunks via source {type:url url followLinks?} or {type:search searchQuery}; followLinks crawls same-domain pages (maxDepth 3). batch_read {urls[1..8]}: full readable text per URL in input order with per-URL isolation (no query, no crawl). batch_crawl {urls[1..8], query}: ranked chunks per URL. sitemap {url, siteMap:true}: discovered same-origin URLs (optional query ranks, maxPages caps). retrieve {action:retrieve, responseId}: cached corpus slice only, no network. source_check {action:source_check, responseId, claims[1..20]}: cached claim verification only, no network. maxChars <= 50000; topK <= 20; maxPages <= 25. Out-of-range rejected, never clamped.',
-    promptSnippet: 'Fetch URL content — compose with web_search first for URLs. read needs url only; crawl needs source ({type:url url} or {type:search searchQuery}) plus query for semantic chunks; use source followLinks for same-domain crawls. urls[1..8] without query is batch_read (full text per URL); with query it is batch_crawl (ranked chunks per URL). sitemap needs url + siteMap:true. action retrieve/source_check serve the cached responseId corpus (no network).',
+    description: 'Fetch runs one of 5 modes. read {url or urls[1..8]}: full readable text; one url reads a single page, urls reads each URL in input order with per-URL isolation. crawl {source, query}: ranked chunks; source is {type:url url|urls[1..8] followLinks?} or {type:search searchQuery}; followLinks (single url only) crawls same-domain pages (maxDepth 3). sitemap {url, siteMap:true}: discovered same-origin URLs (optional query ranks, maxPages caps). retrieve {action:retrieve, responseId}: cached corpus slice only, no network. source_check {action:source_check, responseId, claims[1..20]}: cached claim verification only, no network. maxChars <= 50000; topK <= 20; maxPages <= 25. Out-of-range rejected, never clamped.',
+    promptSnippet: 'Fetch URL content — compose with web_search first for URLs. read takes url for one page or urls[1..8] for full text per URL; crawl takes source ({type:url url or urls[1..8]} or {type:search searchQuery}) plus query for semantic chunks; use source followLinks for single-url same-domain crawls. sitemap needs url + siteMap:true. action retrieve/source_check serve the cached responseId corpus (no network).',
     parameters: Type.Object({
       request: Type.Union([
-        Type.Object({ mode: Type.Literal('read'), url: Type.String(), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
-        Type.Object({ mode: Type.Literal('crawl'), source: Type.Union([Type.Object({ type: Type.Literal('url'), url: Type.String(), followLinks: Type.Optional(Type.Boolean()) }), Type.Object({ type: Type.Literal('search'), searchQuery: Type.String() })]), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
-        Type.Object({ mode: Type.Literal('batch_read'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
-        Type.Object({ mode: Type.Literal('batch_crawl'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
+        Type.Object({ mode: Type.Literal('read'), url: Type.Optional(Type.String()), urls: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 8 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
+        Type.Object({ mode: Type.Literal('crawl'), source: Type.Union([Type.Object({ type: Type.Literal('url'), url: Type.Optional(Type.String()), urls: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 8 })), followLinks: Type.Optional(Type.Boolean()) }), Type.Object({ type: Type.Literal('search'), searchQuery: Type.String() })]), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
         Type.Object({ mode: Type.Literal('sitemap'), url: Type.String(), siteMap: Type.Literal(true), query: Type.Optional(Type.String()), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })) }),
         Type.Object({ mode: Type.Literal('retrieve'), responseId: Type.String(), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), offset: Type.Optional(Type.Number({ minimum: 0 })), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })), findText: Type.Optional(Type.String()) }),
         Type.Object({ mode: Type.Literal('source_check'), responseId: Type.String(), claims: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }),

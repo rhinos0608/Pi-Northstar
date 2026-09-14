@@ -104,23 +104,23 @@ test('recency/yearFrom intersect uses later bound; undated passes', () => {
   assert.equal(passesWebAccessFreshness(new Date((day ?? 0) - 1000).toISOString(), day), false);
 });
 
-test('fetch discriminates read/batch/crawl/sitemap; no format', () => {
+test('fetch discriminates read/multi-url/crawl/sitemap; no format', () => {
   assert.throws(() => parseWebAccessFetchRequest({ url: 'https://a.example/', format: 'markdown' }), /format/);
   const single = parseWebAccessFetchRequest({ url: 'https://a.example/' });
   assert.ok('url' in single && single.url === 'https://a.example/');
   assert.throws(() => parseWebAccessFetchRequest({ url: 'https://a.example/', query: 'p' }), /read accepts only/);
   const multi = parseWebAccessFetchRequest({ urls: ['https://a.example/', 'https://b.example/'] });
   assert.ok('urls' in multi && (multi.urls ?? []).length === 2);
-  const batchCrawl = parseWebAccessFetchRequest({ urls: ['https://a.example/'], query: 'p', topK: 4 });
-  assert.ok('query' in batchCrawl && batchCrawl.query === 'p');
+  const multiCrawl = parseWebAccessFetchRequest({ urls: ['https://a.example/'], query: 'p', topK: 4 });
+  assert.ok('query' in multiCrawl && multiCrawl.query === 'p');
   assert.throws(() => parseWebAccessFetchRequest({}), WebAccessContractError);
   assert.throws(
     () => parseWebAccessFetchRequest({ url: 'https://a.example/', urls: ['https://b.example/'] }),
-    /batch accepts only/,
+    /urls accepts only/,
   );
   assert.throws(
     () => parseWebAccessFetchRequest({ urls: ['https://a.example/'], query: 'p', followLinks: true }),
-    /batch accepts only/,
+    /urls accepts only/,
   );
   assert.throws(() => parseWebAccessFetchRequest({ urls: [] }), /urls must contain/);
   const search = parseWebAccessFetchRequest({ source: { type: 'search', searchQuery: 'q' }, query: 'passage' });
@@ -222,10 +222,10 @@ test('validation order is deterministic: first error wins', () => {
     () => parseWebAccessFetchRequest({ url: 'https://a.example/', urls: ['https://b.example/'], action: 'retrieve', responseId: 'r1' }),
     /retrieve accepts only/,
   );
-  // Batch fetch with no action: urls-branch allowlist error fires first.
+  // Multi-url fetch with no action: urls-branch allowlist error fires first.
   assert.throws(
     () => parseWebAccessFetchRequest({ url: 'https://a.example/', urls: ['https://b.example/'] }),
-    /batch accepts only/,
+    /urls accepts only/,
   );
   // Action-bearing requests route to retrieve: cached-field rejection
   // surfaces as the retrieve allowlist error, not the normal-fetch error.
