@@ -117,12 +117,33 @@ export class EmbeddingClient {
     return { 'Content-Type': 'application/json', ...this.buildAuthHeaders() };
   }
 
+  /** Refresh the Authorization header per attempt so a token minted by a
+   *  restart during backoff is picked up instead of 401ing on a stale
+   *  header. Non-auth headers pass through untouched. */
+  private withFreshAuth(options: RequestInit): RequestInit {
+    const fresh = this.buildAuthHeaders();
+    const headers = options.headers;
+    if (headers instanceof Headers) {
+      const next = new Headers(headers);
+      if (fresh.Authorization !== undefined) next.set('Authorization', fresh.Authorization);
+      else next.delete('Authorization');
+      return { ...options, headers: next };
+    }
+    const base: Record<string, string> = Array.isArray(headers)
+      ? Object.fromEntries(headers as Array<[string, string]>)
+      : { ...((headers as Record<string, string> | undefined) ?? {}) };
+    for (const key of Object.keys(base)) {
+      if (key.toLowerCase() === 'authorization') delete base[key];
+    }
+    return { ...options, headers: { ...base, ...fresh } };
+  }
+
   private async request<T>(url: string, options: RequestInit): Promise<T> {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
-        return await this.doFetch<T>(url, options);
+        return await this.doFetch<T>(url, this.withFreshAuth(options));
       } catch (error) {
         lastError = error;
         if (attempt < this.maxRetries && isRetryable(error)) {

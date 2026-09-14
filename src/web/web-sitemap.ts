@@ -202,6 +202,7 @@ async function rankSitemapUrls(
     const embeddingClient = new EmbeddingClient({
       baseUrl: acquired.baseUrl,
       ...(acquired.apiToken !== undefined ? { apiToken: acquired.apiToken } : {}),
+      ...(acquired.apiTokenProvider !== undefined ? { apiTokenProvider: acquired.apiTokenProvider } : {}),
       ...(signal !== undefined ? { signal } : {}),
     });
     // External sidecars are caller-managed — verify reachability; the local

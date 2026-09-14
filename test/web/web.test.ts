@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { test } from 'node:test';
 import { callNativeTool } from '../../src/native-tools.js';
-import { fetchReadablePage, fuseWebSearchRankings } from '../../src/web/web.js';
+import { fetchReadablePage, fuseWebSearchRankings, webSearch } from '../../src/web/web.js';
+import { buildSearchRoute } from '../../src/web/web-search-route.js';
+import { __setAgentJobCreator } from '../../src/web/agent/agent-job-seam.js';
 
 function invalidRequestCode(err: unknown): string | undefined {
   return (err as { code?: string })?.code;
@@ -1475,4 +1477,64 @@ test('brave 401 beside a healthy provider fuses hits and still records degradati
     assert.equal(details.fusion.failures.length, 1);
     assert.equal(details.fusion.failures[0]?.backend, 'brave');
   });
+});
+
+// ── agent admission: unsupported search constraints reject, never drop ──
+
+test('agent route rejects unsupported search constraints before validation', async () => {
+  const cases: Array<Record<string, unknown>> = [
+    { query: 'q', mode: 'agent', limit: 5 },
+    { query: 'q', mode: 'agent', category: 'news' },
+    { query: 'q', mode: 'agent', yearFrom: 2020 },
+    { query: 'q', mode: 'agent', recency: 'week' },
+    { query: 'q', mode: 'agent', domains: ['example.com'] },
+  ];
+  for (const params of cases) {
+    assert.throws(
+      () => buildSearchRoute(params),
+      /mode "agent" rejects search constraint "(limit|category|yearFrom|recency|domains)"/,
+      `${JSON.stringify(params)} must reject, never silently drop`,
+    );
+  }
+});
+
+test('agent route still admits a bare query to the job seam', async () => {
+  __setAgentJobCreator(() => ({ jobId: 'job-admission-1' }));
+  try {
+    const route = buildSearchRoute({ query: 'deep topic', mode: 'agent' });
+    assert.equal(route.tool, 'agent_job');
+    assert.deepEqual(route.args, { jobId: 'job-admission-1' });
+  } finally {
+    __setAgentJobCreator(undefined);
+  }
+});
+
+test('webSearch agent mode rejects unsupported search constraints before any provider call', async () => {
+  const cases: Array<Record<string, unknown>> = [
+    { query: 'q', mode: 'agent', limit: 5 },
+    { query: 'q', mode: 'agent', category: 'news' },
+    { query: 'q', mode: 'agent', yearFrom: 2020 },
+    { query: 'q', mode: 'agent', recency: 'week' },
+    { query: 'q', mode: 'agent', domains: ['example.com'] },
+  ];
+  for (const args of cases) {
+    let calls = 0;
+    await withFetch(async () => {
+      calls++;
+      return new Response('{}', { status: 200 });
+    }, async () => {
+      await assert.rejects(
+        () => webSearch(args, { env: {} }),
+        /mode "agent" rejects search constraint "(limit|category|yearFrom|recency|domains)"/,
+        `${JSON.stringify(args)} must reject, never silently drop`,
+      );
+    });
+    assert.equal(calls, 0, `${JSON.stringify(args)} must not reach any provider`);
+  }
+});
+
+test('webSearch agent mode with a bare query still reaches the report provider', async () => {
+  // Empty env: no report provider configured, so admission passes and the
+  // provider resolution throws — proving the bare-query path is untouched.
+  await assert.rejects(() => webSearch({ query: 'q', mode: 'agent' }, { env: {} }), /No report-capable/);
 });

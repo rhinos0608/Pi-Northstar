@@ -200,11 +200,16 @@ export function buildSearchRoute(params: SearchRouteParams | Record<string, unkn
   // paths. No inline report generation here: the job runs the opaque
   // Tavily leg synchronously inside job execution; poll serves the snapshot.
   if (normalized.mode === 'agent') {
-    // Admission before registration: the canonical validator runs over the
-    // raw input, so invalid queries/limits/filters reject before a job
-    // exists. Only the validated query enters the job — the runtime takes a
-    // bare query string, so remaining filters cannot be honored end-to-end
-    // and the seam rejects them fail-closed instead of dropping silently.
+    // Admission before registration: the job runtime takes a bare query
+    // string, so search constraints cannot be honored end-to-end. Reject
+    // them here (static reason, no value echo) before validation defaults
+    // them and drops them silently. Mirrors UNSUPPORTED_JOB_FIELDS in
+    // agent-job-seam.ts, which stays as defense-in-depth behind this check.
+    for (const field of ['limit', 'category', 'yearFrom', 'recency', 'domains'] as const) {
+      if (normalized[field] !== undefined) {
+        throw new Error(`mode "agent" rejects search constraint "${field}": unsupported by the agent runtime`);
+      }
+    }
     const { request } = validateWebRequest({ ...contractInput, mode: 'agent' });
     const single = request.queries[0]!;
     const pointer = createAgentJob({ query: single });

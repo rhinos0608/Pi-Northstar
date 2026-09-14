@@ -176,6 +176,51 @@ test('local acquire returns a provider that tracks the live manager token', asyn
   }
 });
 
+test('call-site spread (snapshot + provider) sends the fresh token after a restart', async () => {
+  const { EmbeddingClient } = await import('../../src/sidecar/embedding-client.js');
+  const acquired = await acquireEmbeddingSidecar({});
+  try {
+    const manager = __peekSharedSidecarForTests();
+    assert.ok(manager);
+    const stale = acquired.apiToken;
+    assert.match(stale ?? '', /^[0-9a-f]{64}$/);
+    // Restart the singleton: a fresh token is minted, the snapshot is stale.
+    const stopping = manager.stop();
+    await new Promise((r) => setImmediate(r));
+    currentChild?.emit('exit', 0, 'SIGTERM');
+    await stopping;
+    await manager.ensureRunning();
+    const fresh = manager.getAuthToken();
+    assert.ok(fresh);
+    assert.notEqual(fresh, stale);
+    assert.equal(acquired.apiTokenProvider!(), fresh);
+    // Same construction the web.ts / web-sitemap.ts call sites use.
+    const seen: Array<string | undefined> = [];
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: { headers?: Record<string, string> }) => {
+      seen.push(init?.headers?.Authorization);
+      return new Response(JSON.stringify({
+        data: [{ embedding: [0.1], index: 0, object: 'embedding' }],
+        model: 'test-model',
+        object: 'list',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    try {
+      const client = new EmbeddingClient({
+        baseUrl: acquired.baseUrl,
+        ...(acquired.apiToken !== undefined ? { apiToken: acquired.apiToken } : {}),
+        ...(acquired.apiTokenProvider !== undefined ? { apiTokenProvider: acquired.apiTokenProvider } : {}),
+      });
+      await client.embed('post-restart query');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+    assert.deepEqual(seen, [`Bearer ${fresh}`]);
+  } finally {
+    acquired.release();
+  }
+});
+
 test('external path returns undefined apiToken (env fallback unchanged)', async () => {
   const acquired = await acquireEmbeddingSidecar({ EMBEDDING_SIDECAR_BASE_URL: 'http://external:9000/' });
   assert.equal(acquired.external, true);

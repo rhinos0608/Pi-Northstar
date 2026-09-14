@@ -522,6 +522,17 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   if (typeof args.maxChars === 'number') searchInput.maxChars = args.maxChars;
   if (args.knowledge !== undefined) searchInput.knowledge = args.knowledge;
   if (args.mode !== undefined) (searchInput as { mode?: unknown }).mode = args.mode;
+  // Agent admission: the report runtime takes a bare query string, so search
+  // constraints cannot be honored end-to-end. Reject fail-closed here (static
+  // reason) instead of validating defaults and dropping them silently.
+  // Mirrors the agent-branch admission in web-search-route.ts.
+  if ((searchInput as { mode?: unknown }).mode === 'agent') {
+    for (const field of ['limit', 'category', 'yearFrom', 'recency', 'domains'] as const) {
+      if (searchInput[field] !== undefined) {
+        throw new Error(`mode "agent" rejects search constraint "${field}": unsupported by the agent runtime`);
+      }
+    }
+  }
   const { request } = validateWebRequest(searchInput);
   const query = request.query ?? request.queries[0]!;
   const limit = request.limit;
@@ -977,7 +988,7 @@ export async function semanticCrawl(args: Record<string, unknown>, options: WebT
   if (embeddingEnabled) {
     try {
       acquired = await acquireEmbeddingSidecar(embeddingEnv);
-      embeddingClient = new EmbeddingClient({ baseUrl: acquired.baseUrl, ...(acquired.apiToken !== undefined ? { apiToken: acquired.apiToken } : {}) });
+      embeddingClient = new EmbeddingClient({ baseUrl: acquired.baseUrl, ...(acquired.apiToken !== undefined ? { apiToken: acquired.apiToken } : {}), ...(acquired.apiTokenProvider !== undefined ? { apiTokenProvider: acquired.apiTokenProvider } : {}) });
       // External sidecars are caller-managed — verify reachability; the
       // local singleton is already health-poll verified by ensureRunning.
       if (acquired.external) await embeddingClient.health();

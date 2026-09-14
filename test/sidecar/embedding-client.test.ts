@@ -319,6 +319,35 @@ test('empty text is handled gracefully', async () => {
 // Non-retryable error (4xx) -> throws immediately
 // ---------------------------------------------------------------------------
 
+test('retry rebuilds the Authorization header per attempt (restart during backoff)', async () => {
+  const seen: Array<string | undefined> = [];
+  let current = 'token-v1';
+  let callCount = 0;
+
+  handler = (req, res) => {
+    seen.push(req.headers.authorization as string | undefined);
+    callCount++;
+    if (callCount === 1) {
+      // Simulate a sidecar restart minting a fresh token during backoff.
+      current = 'token-v2';
+      jsonResponse(res, { error: 'overloaded' }, 503);
+      return;
+    }
+    jsonResponse(res, {
+      data: [{ embedding: [0.5], index: 0, object: 'embedding' }],
+      model: 'test-model',
+      object: 'list',
+    });
+  };
+
+  const client = new EmbeddingClient({ baseUrl, apiToken: 'stale-snapshot', apiTokenProvider: () => current, maxRetries: 2 });
+  const result = await client.embed('retry me');
+
+  assert.equal(callCount, 2);
+  assert.deepEqual(seen, ['Bearer token-v1', 'Bearer token-v2']);
+  assert(result instanceof Float32Array);
+});
+
 test('4xx error throws EmbeddingUnavailableError without retry', async () => {
   let callCount = 0;
 
