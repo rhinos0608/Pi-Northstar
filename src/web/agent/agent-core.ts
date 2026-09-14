@@ -6,6 +6,7 @@
 import { BM25Index } from '../../search/bm25.js';
 import { rrfMerge } from '../../search/fusion.js';
 import {
+  AGENT_CLAIM_MAX_BYTES,
   AGENT_LOCAL_MAX_SOURCES,
   AGENT_MAX_FETCH_ROUNDS,
   AGENT_MAX_SOURCES,
@@ -13,6 +14,7 @@ import {
   type AgentResultV1,
   type AgentSourceV1,
 } from './agent-contract.js';
+import { truncateUtf8Bytes } from './agent-report-route.js';
 
 export interface AgentSearchHit {
   title: string;
@@ -35,13 +37,16 @@ export interface AgentCoreDeps {
   }>;
 }
 
-/** Strip provider/model/secret provenance before composition. */
+/** Strip provider/model/secret provenance before composition. Substring stems
+ *  catch key variants (providers, modelName, providerId, authToken, apiKeys,
+ *  backendName, tokens, x-provider); composed keys (title/url/text/query/
+ *  sources/claims) carry none of these stems and survive. */
 export function redactProvenance<T>(value: T): T {
   if (Array.isArray(value)) return value.map(redactProvenance) as unknown as T;
   if (typeof value === 'object' && value !== null) {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      if (/^(provider|model|token|secret|apiKey|api_key|auth|backend)$/i.test(key)) continue;
+      if (/(provider|model|token|secret|api[_-]?key|auth|backend)/i.test(key)) continue;
       out[key] = redactProvenance(entry);
     }
     return out as T;
@@ -139,13 +144,17 @@ export async function runAgentCore(query: string, deps: AgentCoreDeps): Promise<
     for (const candidate of structuredClaims) {
       if (claims.length >= citedIds.length * 4) break;
       if (typeof candidate?.text !== 'string' || candidate.text.trim() === '') continue;
+      // Claim ceiling enforced at composition: overlong report claims clip to
+      // the byte budget instead of shipping validator-rejected output.
+      const clipped = truncateUtf8Bytes(candidate.text, AGENT_CLAIM_MAX_BYTES);
+      if (clipped.trim() === '') continue;
       if (!Array.isArray(candidate.sourceIds) || candidate.sourceIds.length === 0) continue;
       if (!candidate.sourceIds.every((id) => typeof id === 'string' && validIds.has(id))) continue;
-      claims.push({ text: candidate.text, sourceIds: [...candidate.sourceIds] });
+      claims.push({ text: clipped, sourceIds: [...candidate.sourceIds] });
     }
     if (claims.length === 0) {
       for (const passage of ordered.slice(0, citedIds.length)) {
-        const first = splitClaims(passage.text)[0] ?? passage.title;
+        const first = truncateUtf8Bytes(splitClaims(passage.text)[0] ?? passage.title, AGENT_CLAIM_MAX_BYTES);
         const id = sources.find((source) => source.url === passage.url)?.id;
         if (id !== undefined) claims.push({ text: first, sourceIds: [id] });
       }

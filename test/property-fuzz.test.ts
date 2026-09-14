@@ -21,6 +21,12 @@ import {
   parseChromeProfileOperation,
 } from '../src/chrome/chrome-profile-contract.js';
 import { runSetupInstall } from '../src/setup/installer.js';
+import {
+  AGENT_CLAIM_MAX_BYTES,
+  AGENT_WARNING_MAX_BYTES,
+  validateAgentResult,
+} from '../src/web/agent/agent-contract.js';
+import { redactProvenance } from '../src/web/agent/agent-core.js';
 import { validateReply, validateRequest } from '../src/runtime/runtime-rpc-protocol.js';
 import {
   ChromeBridgeServer,
@@ -312,6 +318,54 @@ describe('property: runtime RPC envelopes fail closed under mutation', () => {
         error: { code: `custom_${str(4)}`, message: 'safe-looking text' },
       };
       assert.equal(validateReply(forged, 'req-abc').ok, false);
+    }
+  });
+});
+
+describe('property: agent result contract fail closed under mutation', () => {
+  const seed = (): Record<string, unknown> => ({
+    version: 1,
+    query: 'q',
+    reportText: 'Findings here.',
+    claims: [{ text: 'Findings here.', sourceIds: ['src-0'] }],
+    sources: [{ id: 'src-0', url: 'https://example.com/a', title: 'A', sourceKind: 'extracted' }],
+    warnings: [],
+  });
+  const firstSource = (v: Record<string, unknown>): Record<string, unknown> =>
+    (v['sources'] as Array<Record<string, unknown>>)[0]!;
+  const firstClaim = (v: Record<string, unknown>): Record<string, unknown> =>
+    (v['claims'] as Array<Record<string, unknown>>)[0]!;
+  const MUTANTS: Array<(value: Record<string, unknown>) => void> = [
+    (v) => { firstSource(v)['locator'] = {}; },
+    (v) => { firstSource(v)['sourceKind'] = 'derived'; },
+    (v) => {
+      firstSource(v)['sourceKind'] = 'derived';
+      firstSource(v)['locator'] = { page: 1 };
+      firstSource(v)['warnings'] = [];
+    },
+    (v) => { firstSource(v)['smuggled'] = 1; },
+    (v) => { firstClaim(v)['text'] = 'x'.repeat(AGENT_CLAIM_MAX_BYTES + 1); },
+    (v) => { v['warnings'] = ['x'.repeat(AGENT_WARNING_MAX_BYTES + 1)]; },
+  ];
+  it('seeded agent mutations always rejected; seed always accepted', () => {
+    assert.equal(validateAgentResult(seed()).ok, true);
+    for (let i = 0; i < 120; i++) {
+      const mutated = JSON.parse(JSON.stringify(seed())) as Record<string, unknown>;
+      MUTANTS[i % MUTANTS.length]!(mutated);
+      assert.equal(validateAgentResult(mutated).ok, false, `agent mutant ${i % MUTANTS.length} passed`);
+    }
+  });
+  it('redaction never drops composed keys across random suffix variants', () => {
+    const stems = ['provider', 'model', 'token', 'secret', 'apiKey', 'auth', 'backend'];
+    for (let i = 0; i < 120; i++) {
+      const stem = stems[i % stems.length]!;
+      const record: Record<string, unknown> = {
+        title: 'T', url: 'https://example.com', text: 'b', query: 'q', sources: [], claims: [],
+        [`${stem}${str(3)}`]: 'strip-me',
+        [`x-${stem}`]: 'strip-me',
+      };
+      const out = redactProvenance(record);
+      assert.deepEqual(Object.keys(out).sort(), ['claims', 'query', 'sources', 'text', 'title', 'url']);
     }
   });
 });

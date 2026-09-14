@@ -2,7 +2,7 @@
 // routes mode:'agent' here; the jobs registry owns the runtime. No
 // agent_jobs_unavailable throw ships on the green gate.
 
-import { createAgentJobEntry } from './agent-jobs.js';
+import { createAgentJobEntry, UNSUPPORTED_AGENT_JOB_FIELDS } from './agent-jobs.js';
 
 export interface AgentJobPointer {
   jobId: string;
@@ -38,7 +38,7 @@ export function __setAgentJobCreator(next: ((params: CreateAgentJobParams) => Ag
 }
 
 /** Search-constraint fields the job runtime cannot honor: fail closed. */
-const UNSUPPORTED_JOB_FIELDS = ['limit', 'category', 'yearFrom', 'recency', 'domains'] as const;
+const UNSUPPORTED_JOB_FIELDS = UNSUPPORTED_AGENT_JOB_FIELDS;
 
 export function createAgentJob(params: CreateAgentJobParams): AgentJobPointer {
   const query = params.query.trim();

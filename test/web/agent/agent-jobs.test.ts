@@ -270,6 +270,111 @@ test('leaf job executes exactly one backend search; prompt reuses same hits', as
   }
 });
 
+test('direct entry rejects unsupported search constraints with no job registered', () => {
+  __resetAgentJobs();
+  try {
+    for (const extra of [
+      { limit: 5 },
+      { category: 'news' },
+      { yearFrom: 2020 },
+      { recency: 'week' },
+      { domains: ['example.com'] },
+    ]) {
+      assert.throws(
+        () => createAgentJobEntry({ query: 'q', ...extra } as unknown as { query: string }),
+        /unsupported by the job runtime/,
+      );
+    }
+    assert.equal(hasUnexpiredJob(), false, 'rejected admissions register no job');
+  } finally {
+    __resetAgentJobs();
+  }
+});
+
+test('early search throw with negotiated leaf resets transport to standalone', async () => {
+  __resetAgentJobs();
+  setAgentJobRunner({
+    search: async () => { throw new Error('backend exploded'); },
+    fetchText: async () => 'unused',
+  });
+  const prior = process.env.PI_NORTHSTAR_LEAF_MODEL;
+  process.env.PI_NORTHSTAR_LEAF_MODEL = 'testprov/test-model-xyz';
+  setLeafRuntimeProvider({
+    refreshReady: async () => true,
+    runLeaf: async () => ({ text: 'must not run' }),
+  });
+  __setAgentJobClock(() => 9_200_000, () => 'early-throw-job');
+  try {
+    const job = createAgentJobEntry({ query: 'doomed leaf topic' });
+    const done = await executeAgentJob(job.jobId);
+    assert.equal(done.status, 'failed');
+    assert.equal(done.result, undefined);
+    assert.equal(done.rpc.transport, 'standalone');
+    assert.ok(done.rpc.reason.includes('before the report leg produced'));
+  } finally {
+    if (prior === undefined) delete process.env.PI_NORTHSTAR_LEAF_MODEL;
+    else process.env.PI_NORTHSTAR_LEAF_MODEL = prior;
+    setLeafRuntimeProvider(undefined);
+    __setAgentJobClock(undefined);
+    setAgentJobRunner(undefined);
+    __resetAgentJobs();
+  }
+});
+
+test('TTL prune drops the in-flight drive handle', async () => {
+  __resetAgentJobs();
+  mockRunner();
+  let at = 1_000_000;
+  __setAgentJobClock(() => at, () => 'prune-drive-job');
+  try {
+    const job = createAgentJobEntry({ query: 'prune drive topic' });
+    await executeAgentJob(job.jobId);
+    at += AGENT_JOB_TTL_MS + 1;
+    assert.equal(hasUnexpiredJob(), false);
+    await assert.rejects(executeAgentJob(job.jobId), /unknown agent job/);
+  } finally {
+    __setAgentJobClock(undefined);
+    setAgentJobRunner(undefined);
+    __resetAgentJobs();
+  }
+});
+
+test('shutdown mid-flight aborts the captured leaf ref to fallback', async () => {
+  __resetAgentJobs();
+  mockRunner();
+  let leafCalls = 0;
+  setLeafRuntimeProvider({
+    refreshReady: async () => {
+      // Seam clears between negotiation capture and report-leg use.
+      setLeafRuntimeProvider(undefined);
+      return true;
+    },
+    runLeaf: async () => {
+      leafCalls += 1;
+      return { text: 'must not run' };
+    },
+  });
+  const prior = process.env.PI_NORTHSTAR_LEAF_MODEL;
+  process.env.PI_NORTHSTAR_LEAF_MODEL = 'testprov/test-model-xyz';
+  __setAgentJobClock(() => 9_300_000, () => 'shutdown-flight-job');
+  try {
+    const job = createAgentJobEntry({ query: 'shutdown flight topic' });
+    const done = await executeAgentJob(job.jobId);
+    assert.equal(done.status, 'ready');
+    assert.equal(leafCalls, 0, 'cleared provider must not be driven');
+    assert.equal(done.rpc.transport, 'standalone');
+    assert.ok(done.rpc.reason.includes('provider_shutdown'));
+    assert.ok(done.result!.warnings.some((warning) => warning.includes('provider_shutdown')));
+  } finally {
+    if (prior === undefined) delete process.env.PI_NORTHSTAR_LEAF_MODEL;
+    else process.env.PI_NORTHSTAR_LEAF_MODEL = prior;
+    setLeafRuntimeProvider(undefined);
+    __setAgentJobClock(undefined);
+    setAgentJobRunner(undefined);
+    __resetAgentJobs();
+  }
+});
+
 test('empty query rejects at creation', () => {
   __resetAgentJobs();
   try {
@@ -362,7 +467,7 @@ test('agent route validates before creating a job', () => {
   __setAgentJobCreator(() => { creations += 1; return { jobId: 'route-job-1' }; });
   try {
     assert.throws(() => buildSearchRoute({ query: '   ', mode: 'agent' }), /non-empty|invalid_request/);
-    assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', limit: 10_000 }), /1, 20/);
+    assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', limit: 10_000 }), /mode "agent" rejects search constraint "limit"/);
     assert.equal(creations, 0, 'invalid requests register no job');
     assert.equal(hasUnexpiredJob(), false);
     const route = buildSearchRoute({ query: 'valid topic', mode: 'agent' });

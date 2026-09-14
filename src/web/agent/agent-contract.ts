@@ -11,6 +11,10 @@ export const AGENT_MAX_SOURCES = 20;
 export const AGENT_LOCAL_MAX_SOURCES = 30;
 /** Max fetch rounds on the local leg. */
 export const AGENT_MAX_FETCH_ROUNDS = 8;
+/** Claim text ceiling: UTF-8 bytes, not chars (same convention as reportText). */
+export const AGENT_CLAIM_MAX_BYTES = 5_000;
+/** Warning string ceiling: UTF-8 bytes, not chars (same convention as reportText). */
+export const AGENT_WARNING_MAX_BYTES = 2_000;
 /** Job lifetime: mirrors the web-access store TTL (1h). */
 export const AGENT_JOB_TTL_MS = 3_600_000;
 
@@ -77,6 +81,58 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
+/** Source entry fields the validator recognizes; anything else rejects (never silently passed). */
+const ALLOWED_SOURCE_FIELDS = new Set(['id', 'url', 'title', 'sourceKind', 'locator', 'warnings']);
+
+/** Locator fields the validator recognizes; anything else rejects. */
+const ALLOWED_LOCATOR_FIELDS = new Set(['page', 'timestamp', 'location']);
+
+/** Derived locator check: non-empty object, known fields only, bounded values. */
+function checkAgentLocator(locator: unknown, index: number): string[] {
+  const prefix = `sources[${index}].locator`;
+  if (typeof locator !== 'object' || locator === null || Array.isArray(locator)) {
+    return [`${prefix} is required for derived sources`];
+  }
+  const record = locator as Record<string, unknown>;
+  const out: string[] = [];
+  for (const key of Object.keys(record)) {
+    if (!ALLOWED_LOCATOR_FIELDS.has(key)) out.push(`${prefix} has unknown field "${key}"`);
+  }
+  const present = [...ALLOWED_LOCATOR_FIELDS].filter((key) => record[key] !== undefined);
+  if (present.length === 0) {
+    out.push(`${prefix} must carry at least one of page, timestamp, location`);
+    return out;
+  }
+  const page = record['page'];
+  if (page !== undefined && (typeof page !== 'number' || !Number.isInteger(page) || page < 0)) {
+    out.push(`${prefix}.page must be a non-negative integer`);
+  }
+  for (const field of ['timestamp', 'location'] as const) {
+    const entry = record[field];
+    if (entry !== undefined && (typeof entry !== 'string' || entry.trim() === '')) {
+      out.push(`${prefix}.${field} must be a non-empty string`);
+    }
+  }
+  return out;
+}
+
+/** Warnings check: non-empty array, non-empty strings within the byte budget. */
+function checkAgentWarnings(warnings: unknown, index: number, scope: string): string[] {
+  const prefix = `sources[${index}].warnings`;
+  if (!Array.isArray(warnings) || warnings.length === 0) {
+    return [`${prefix} must be an array of strings for ${scope} (non-empty)`];
+  }
+  const out: string[] = [];
+  for (const [position, warning] of warnings.entries()) {
+    if (typeof warning !== 'string' || warning.trim() === '') {
+      out.push(`${prefix}[${position}] must be a non-empty string`);
+    } else if (Buffer.byteLength(warning, 'utf8') > AGENT_WARNING_MAX_BYTES) {
+      out.push(`${prefix}[${position}] exceeds maximum of ${AGENT_WARNING_MAX_BYTES} bytes (UTF-8)`);
+    }
+  }
+  return out;
+}
+
 /** Citation + document + budget contract check. Fail-closed: issues listed. */
 export function validateAgentResult(value: unknown): { ok: boolean; issues: string[] } {
   const issues: string[] = [];
@@ -113,12 +169,16 @@ export function validateAgentResult(value: unknown): { ok: boolean; issues: stri
       if (entry['sourceKind'] !== 'extracted' && entry['sourceKind'] !== 'derived') {
         issues.push(`sources[${index}].sourceKind must be extracted or derived`);
       } else if (entry['sourceKind'] === 'derived') {
-        if (typeof entry['locator'] !== 'object' || entry['locator'] === null || Array.isArray(entry['locator'])) {
-          issues.push(`sources[${index}].locator is required for derived sources`);
-        }
-        if (!Array.isArray(entry['warnings']) || (entry['warnings'] as unknown[]).some((w) => typeof w !== 'string')) {
-          issues.push(`sources[${index}].warnings must be an array of strings for derived sources`);
-        }
+        issues.push(...checkAgentLocator(entry['locator'], index));
+        issues.push(...checkAgentWarnings(entry['warnings'], index, 'derived sources'));
+      } else {
+        // Extracted sources keep locator/warnings optional, but present values
+        // validate under the same rules instead of passing silently.
+        if (entry['locator'] !== undefined) issues.push(...checkAgentLocator(entry['locator'], index));
+        if (entry['warnings'] !== undefined) issues.push(...checkAgentWarnings(entry['warnings'], index, 'extracted sources'));
+      }
+      for (const key of Object.keys(entry)) {
+        if (!ALLOWED_SOURCE_FIELDS.has(key)) issues.push(`sources[${index}] has unknown field "${key}"`);
       }
     }
     const claims = result['claims'];
@@ -133,6 +193,8 @@ export function validateAgentResult(value: unknown): { ok: boolean; issues: stri
         const entry = claim as Record<string, unknown>;
         if (typeof entry['text'] !== 'string' || (entry['text'] as string).trim() === '') {
           issues.push(`claims[${index}].text is required`);
+        } else if (Buffer.byteLength(entry['text'] as string, 'utf8') > AGENT_CLAIM_MAX_BYTES) {
+          issues.push(`claims[${index}].text exceeds maximum of ${AGENT_CLAIM_MAX_BYTES} bytes (UTF-8)`);
         }
         if (!Array.isArray(entry['sourceIds']) || (entry['sourceIds'] as unknown[]).length === 0) {
           issues.push(`claims[${index}] must cite at least one sourceId`);
@@ -146,6 +208,12 @@ export function validateAgentResult(value: unknown): { ok: boolean; issues: stri
   }
   if (!Array.isArray(result['warnings']) || (result['warnings'] as unknown[]).some((w) => typeof w !== 'string')) {
     issues.push('warnings must be an array of strings');
+  } else {
+    for (const [position, warning] of (result['warnings'] as string[]).entries()) {
+      if (Buffer.byteLength(warning, 'utf8') > AGENT_WARNING_MAX_BYTES) {
+        issues.push(`warnings[${position}] exceeds maximum of ${AGENT_WARNING_MAX_BYTES} bytes (UTF-8)`);
+      }
+    }
   }
   return { ok: issues.length === 0, issues };
 }

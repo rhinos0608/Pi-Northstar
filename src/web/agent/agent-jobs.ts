@@ -61,6 +61,10 @@ export const LEAF_MODEL_ENV_VAR = 'PI_NORTHSTAR_LEAF_MODEL';
 /** Per-request leaf timeout: 60s bounded by the protocol maximum. */
 export const LEAF_REPORT_TIMEOUT_MS = Math.min(60_000, RUNTIME_RPC_BOUNDS.maxTimeoutMs);
 
+/** Search-constraint fields the job runtime cannot honor: fail closed on every
+ *  entry path (seam validator and direct createAgentJobEntry calls alike). */
+export const UNSUPPORTED_AGENT_JOB_FIELDS = ['limit', 'category', 'yearFrom', 'recency', 'domains'] as const;
+
 /** Test/embedding seam: inject the search/fetch legs. Unset restores lazy defaults. */
 export function setAgentJobRunner(runner: AgentJobRunnerDeps | undefined): void {
   store.runner = runner;
@@ -84,7 +88,12 @@ function expired(job: AgentJobV1, at: number): boolean {
 
 function prune(at: number = store.now()): void {
   for (const [jobId, job] of store.jobs) {
-    if (expired(job, at)) store.jobs.delete(jobId);
+    if (expired(job, at)) {
+      store.jobs.delete(jobId);
+      // TTL expiry drops the drive handle too: a later executeAgentJob call
+      // must observe unknown/expired, never a stale settled drive.
+      inFlight.delete(jobId);
+    }
   }
 }
 
@@ -111,6 +120,15 @@ async function defaultRunner(): Promise<AgentJobRunnerDeps> {
 export function createAgentJobEntry(input: CreateAgentJobInput): AgentJobV1 {
   const query = input.query.trim();
   if (query === '') throw new Error('agent job requires a non-empty query');
+  // Fail-closed admission on the direct entry path: the runtime takes a bare
+  // query string, so search constraints cannot be honored — reject with a
+  // static reason before prune/registration instead of dropping silently.
+  const record = input as CreateAgentJobInput & Record<string, unknown>;
+  for (const field of UNSUPPORTED_AGENT_JOB_FIELDS) {
+    if (record[field] !== undefined) {
+      throw new Error(`agent job rejects search constraint "${field}": unsupported by the job runtime`);
+    }
+  }
   prune();
   const at = store.now();
   const job: AgentJobV1 = {
@@ -212,6 +230,10 @@ async function leafReportWithFallback(
   provider: LeafRuntimeProvider,
 ): Promise<{ text: string; sources: Array<{ url: string; title: string }>; warnings: string[] }> {
   try {
+    // Shutdown-mid-flight guard: the captured provider ref goes stale when
+    // shutdownLeafRuntime clears the seam after negotiation. Re-check at use
+    // time and abort to the opaque leg instead of driving a dead client.
+    if (getLeafRuntimeProvider() === undefined) throw { code: 'provider_shutdown' };
     const out = await provider.runLeaf(prompt, { timeoutMs: LEAF_REPORT_TIMEOUT_MS });
     if (typeof out?.text !== 'string' || out.text.trim() === '') {
       throw { code: 'provider_error' };
@@ -252,11 +274,29 @@ async function leafReportWithFallback(
 export async function executeAgentJob(jobId: string): Promise<AgentJobV1> {
   const running = inFlight.get(jobId);
   if (running !== undefined) return running;
-  const drive = driveAgentJob(jobId).finally(() => {
+  const drive = driveWithTimeout(jobId).finally(() => {
     if (inFlight.get(jobId) === drive) inFlight.delete(jobId);
   });
   inFlight.set(jobId, drive);
   return drive;
+}
+
+/**
+ * Bounded drive: a hung drive fails closed at the job TTL instead of holding
+ * the in-flight slot forever. The timeout only rejects the race — the slow
+ * drive still settles through the normal catch and records failed.
+ */
+function driveWithTimeout(jobId: string): Promise<AgentJobV1> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('agent job drive timed out')), AGENT_JOB_TTL_MS);
+    const unref = (timer as unknown as { unref?: () => void }).unref;
+    if (typeof unref === 'function') unref.call(timer);
+  });
+  const run = driveAgentJob(jobId).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+  return Promise.race([run, timeout]);
 }
 
 /** Single-drive job execution. Never called directly when shared. */
@@ -285,6 +325,17 @@ async function driveAgentJob(jobId: string): Promise<AgentJobV1> {
     job.status = 'ready';
   } catch {
     job.status = 'failed';
+    if (job.result === undefined) {
+      // Early throw (search leg) with a negotiated leaf transport: no report
+      // leg ever produced, so the snapshot resets to standalone with a static
+      // reason instead of naming a transport that produced nothing.
+      job.rpc = {
+        attempted: job.rpc.attempted,
+        negotiated: job.rpc.negotiated,
+        transport: 'standalone',
+        reason: 'job failed before the report leg produced; transport reset to standalone',
+      };
+    }
     // Stable generic code only: snapshots are model-visible, so dependency
     // messages never land in job.error. No protected diagnostics surface
     // exists — details stay out entirely rather than inventing one.
@@ -327,6 +378,13 @@ export interface AgentJobSnapshot {
  * state. Foreign/missing owner on an owned job resolves exactly like a miss
  * (no existence signal, never another owner's bytes). Carries transport +
  * safe reason only — never provider or model identity.
+ *
+ * NOTE: on running jobs `rpc.transport` names the NEGOTIATED leg, not a
+ * produced report — negotiation records 'leaf-runtime' before the report leg
+ * runs, and only leafReportWithFallback flips it to the actual producer.
+ * `negotiated` stays out of the snapshot by design (the byte-stable contract
+ * carries transport + reason only); read the reason for accuracy, never the
+ * transport alone.
  */
 export function getAgentJobSnapshot(jobId: string, owner?: string): string {
   prune();

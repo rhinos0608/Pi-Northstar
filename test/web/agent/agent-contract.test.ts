@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  AGENT_CLAIM_MAX_BYTES,
   AGENT_JOB_TTL_MS,
   AGENT_LOCAL_MAX_SOURCES,
   AGENT_MAX_FETCH_ROUNDS,
   AGENT_MAX_SOURCES,
   AGENT_REPORT_MAX_BYTES,
+  AGENT_WARNING_MAX_BYTES,
   canonicalJson,
   validateAgentResult,
 } from '../../../src/web/agent/agent-contract.js';
@@ -66,6 +68,67 @@ test('document contract: sources carry sourceKind; budgets reject', () => {
   const big = validateAgentResult(validResult({ reportText: 'é'.repeat(50_001) }));
   assert.equal(big.ok, false);
   assert.ok(big.issues.some((issue) => /bytes \(UTF-8\)/.test(issue)));
+});
+
+test('derived locator rejects empty, unknown, and unbounded fields', () => {
+  const derived = (locator: unknown) => validateAgentResult(validResult({
+    sources: [{ id: 'src-0', url: 'https://example.com/a', title: 'A', sourceKind: 'derived', locator, warnings: ['t'] }],
+  }));
+  const empty = derived({});
+  assert.equal(empty.ok, false);
+  assert.ok(empty.issues.some((issue) => /at least one of page, timestamp, location/.test(issue)));
+  const unknown = derived({ page: 1, chapter: 3 });
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.issues.some((issue) => /unknown field "chapter"/.test(issue)));
+  for (const bad of [{ page: -1 }, { page: 1.5 }, { page: '2' }, { timestamp: '' }, { location: '   ' }]) {
+    const rejected = derived(bad);
+    assert.equal(rejected.ok, false, JSON.stringify(bad));
+  }
+  for (const good of [{ page: 0 }, { page: 2 }, { timestamp: '00:01:00' }, { location: 'sec 3' }]) {
+    const accepted = derived(good);
+    assert.equal(accepted.ok, true, JSON.stringify(accepted.issues));
+  }
+});
+
+test('derived warnings must be non-empty and byte-bounded', () => {
+  const derived = (warnings: unknown) => validateAgentResult(validResult({
+    sources: [{ id: 'src-0', url: 'https://example.com/a', title: 'A', sourceKind: 'derived', locator: { page: 1 }, warnings }],
+  }));
+  const empty = derived([]);
+  assert.equal(empty.ok, false);
+  assert.ok(empty.issues.some((issue) => /warnings must be an array of strings for derived sources/.test(issue)));
+  const blank = derived(['  ']);
+  assert.equal(blank.ok, false);
+  const big = derived(['x'.repeat(AGENT_WARNING_MAX_BYTES + 1)]);
+  assert.equal(big.ok, false);
+  assert.ok(big.issues.some((issue) => /bytes \(UTF-8\)/.test(issue)));
+});
+
+test('extracted sources validate present locator/warnings and reject unknown fields', () => {
+  const extracted = (extra: Record<string, unknown>) => validateAgentResult(validResult({
+    sources: [{ id: 'src-0', url: 'https://example.com/a', title: 'A', sourceKind: 'extracted', ...extra }],
+  }));
+  assert.equal(extracted({}).ok, true);
+  assert.equal(extracted({ locator: { page: 1 }, warnings: ['t'] }).ok, true);
+  assert.equal(extracted({ locator: {} }).ok, false, 'present-but-empty locator validates, not passes');
+  assert.equal(extracted({ warnings: [] }).ok, false, 'present-but-empty warnings validate, not pass');
+  const unknown = extracted({ backend: 'tavily' });
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.issues.some((issue) => /unknown field "backend"/.test(issue)));
+});
+
+test('claim text and top-level warnings enforce UTF-8 byte ceilings', () => {
+  const bigClaim = validateAgentResult(validResult({
+    claims: [{ text: 'é'.repeat(AGENT_CLAIM_MAX_BYTES), sourceIds: ['src-0'] }],
+  }));
+  assert.equal(bigClaim.ok, false);
+  assert.ok(bigClaim.issues.some((issue) => /claims\[0\]\.text exceeds maximum/.test(issue)));
+  const bigWarning = validateAgentResult(validResult({
+    warnings: ['x'.repeat(AGENT_WARNING_MAX_BYTES + 1)],
+  }));
+  assert.equal(bigWarning.ok, false);
+  assert.ok(bigWarning.issues.some((issue) => /warnings\[0\] exceeds maximum/.test(issue)));
+  assert.equal(validResult.name, 'validResult');
 });
 
 test('duplicate source ids reject instead of merging silently', () => {
