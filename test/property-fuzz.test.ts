@@ -21,6 +21,7 @@ import {
   parseChromeProfileOperation,
 } from '../src/chrome/chrome-profile-contract.js';
 import { runSetupInstall } from '../src/setup/installer.js';
+import { validateReply, validateRequest } from '../src/runtime/runtime-rpc-protocol.js';
 import {
   ChromeBridgeServer,
   parseBridgeInstanceClaim,
@@ -259,6 +260,59 @@ describe('property: bridge protocol transitions', () => {
     }
     // Family stored lowercase; heartbeat on unknown false
     assert.equal(server.heartbeat('no-such-instance'), false);
+  });
+});
+
+describe('property: runtime RPC envelopes fail closed under mutation', () => {
+  const negotiate = { version: 1, requestId: 'req-abc', method: 'negotiate', params: { modelId: 'prov/model' } };
+  const okReply = { version: 1, requestId: 'req-abc', method: 'negotiate', success: true, data: { compatible: true } };
+  const MUTANTS: Array<(value: Record<string, unknown>) => void> = [
+    (v) => { delete v['version']; },
+    (v) => { v['version'] = 2; },
+    (v) => { v['requestId'] = ''; },
+    (v) => { v['requestId'] = 'x'.repeat(129); },
+    (v) => { v['requestId'] = 'bad id!'; },
+    (v) => { v['method'] = 'eval'; },
+    (v) => { v['extra'] = 1; },
+    (v) => { v['params'] = { modelId: 'prov/model', injected: true }; },
+    (v) => { v['params'] = { modelId: 'no-slash' }; },
+    (v) => { v['params'] = { modelId: 'prov/model:high' }; },
+  ];
+  const REPLY_MUTANTS: Array<(value: Record<string, unknown>) => void> = [
+    (v) => { delete v['version']; },
+    (v) => { v['version'] = 9; },
+    (v) => { v['requestId'] = 'other-id'; },
+    (v) => { v['method'] = 'start'; },
+    (v) => { v['method'] = 'evil'; },
+    (v) => { v['success'] = 'yes'; },
+    (v) => { delete v['data']; },
+    (v) => { v['smuggled'] = { code: 'x' }; },
+  ];
+  it('seeded request mutations always rejected', () => {
+    assert.equal(validateRequest(negotiate).ok, true);
+    for (let i = 0; i < 120; i++) {
+      const mutated = JSON.parse(JSON.stringify(negotiate)) as Record<string, unknown>;
+      MUTANTS[i % MUTANTS.length]!(mutated);
+      assert.equal(validateRequest(mutated).ok, false, `request mutant ${i % MUTANTS.length} passed`);
+    }
+  });
+  it('seeded reply mutations always rejected', () => {
+    assert.equal(validateReply(okReply, 'req-abc', 'negotiate').ok, true);
+    for (let i = 0; i < 120; i++) {
+      const mutated = JSON.parse(JSON.stringify(okReply)) as Record<string, unknown>;
+      REPLY_MUTANTS[i % REPLY_MUTANTS.length]!(mutated);
+      assert.equal(validateReply(mutated, 'req-abc', 'negotiate').ok, false, `reply mutant ${i % REPLY_MUTANTS.length} passed`);
+    }
+    // Unknown error codes never validate, whatever the message claims.
+    for (let i = 0; i < 20; i++) {
+      const forged = {
+        version: 1,
+        requestId: 'req-abc',
+        success: false,
+        error: { code: `custom_${str(4)}`, message: 'safe-looking text' },
+      };
+      assert.equal(validateReply(forged, 'req-abc').ok, false);
+    }
   });
 });
 

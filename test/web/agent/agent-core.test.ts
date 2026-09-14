@@ -51,3 +51,39 @@ test('redactProvenance strips provider/model/secret keys deeply', () => {
   const out = redactProvenance({ a: 1, provider: 'x', nested: { model: 'y', keep: true }, token: 's', list: [{ auth: 1, ok: 2 }] });
   assert.deepEqual(out, { a: 1, nested: { keep: true }, list: [{ ok: 2 }] });
 });
+
+test('structured report claims ship verbatim; report sentences never round-robin', async () => {
+  const result = await runAgentCore('pricing tiers', {
+    search: async () => [...hits],
+    fetchText: async (url: string) => `Body text about pricing tiers for ${url}. Pricing details follow.`,
+    report: async () => ({
+      text: 'Unmapped sentence one. Unmapped sentence two.',
+      sources: [{ url: 'https://example.com/alpha', title: 'Alpha' }],
+      claims: [{ text: 'Structured finding.', sourceIds: ['src-0'] }],
+    }),
+  });
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.deepEqual(result.claims, [{ text: 'Structured finding.', sourceIds: ['src-0'] }]);
+  for (const claim of result.claims) {
+    assert.ok(!claim.text.includes('Unmapped'));
+  }
+});
+
+test('unverifiable structured claims drop to passage-derived claims', async () => {
+  const result = await runAgentCore('pricing tiers', {
+    search: async () => [...hits],
+    fetchText: async (url: string) => `Body text about pricing tiers for ${url}. Pricing details follow.`,
+    report: async () => ({
+      text: 'Unmapped sentence one. Unmapped sentence two.',
+      sources: [{ url: 'https://example.com/alpha', title: 'Alpha' }],
+      claims: [{ text: 'Dangling claim.', sourceIds: ['nope'] }],
+    }),
+  });
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.ok(result.claims.length > 0);
+  for (const claim of result.claims) {
+    assert.ok(!claim.text.includes('Unmapped'));
+    assert.ok(!claim.text.includes('Dangling'));
+    for (const id of claim.sourceIds) assert.ok(result.sources.some((source) => source.id === id));
+  }
+});

@@ -8,13 +8,11 @@ export interface AgentJobPointer {
   jobId: string;
 }
 
+// The job runtime takes a bare query string (AgentJobRunnerDeps.search
+// accepts query only): search constraints cannot be honored end-to-end, so
+// they are rejected fail-closed at admission rather than dropped silently.
 export interface CreateAgentJobParams {
   query: string;
-  limit?: number;
-  category?: string;
-  yearFrom?: number;
-  recency?: string;
-  domains?: string[];
   owner?: string;
 }
 
@@ -39,9 +37,18 @@ export function __setAgentJobCreator(next: ((params: CreateAgentJobParams) => Ag
     });
 }
 
+/** Search-constraint fields the job runtime cannot honor: fail closed. */
+const UNSUPPORTED_JOB_FIELDS = ['limit', 'category', 'yearFrom', 'recency', 'domains'] as const;
+
 export function createAgentJob(params: CreateAgentJobParams): AgentJobPointer {
   const query = params.query.trim();
   if (query === '') throw new Error('agent job requires a non-empty query');
+  const record = params as CreateAgentJobParams & Record<string, unknown>;
+  for (const field of UNSUPPORTED_JOB_FIELDS) {
+    if (record[field] !== undefined) {
+      throw new Error(`agent job rejects search constraint "${field}": unsupported by the job runtime`);
+    }
+  }
   const pointer = creator(params);
   if (typeof pointer.jobId !== 'string' || pointer.jobId === '') {
     throw new Error('agent job creator returned an invalid job pointer');

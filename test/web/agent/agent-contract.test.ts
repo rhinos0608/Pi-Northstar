@@ -67,3 +67,34 @@ test('document contract: sources carry sourceKind; budgets reject', () => {
   assert.equal(big.ok, false);
   assert.ok(big.issues.some((issue) => /bytes \(UTF-8\)/.test(issue)));
 });
+
+test('duplicate source ids reject instead of merging silently', () => {
+  const duped = validateAgentResult(validResult({
+    sources: [
+      { id: 'src-0', url: 'https://example.com/a', title: 'A', sourceKind: 'extracted' },
+      { id: 'src-0', url: 'https://example.com/b', title: 'B', sourceKind: 'extracted' },
+    ],
+  }));
+  assert.equal(duped.ok, false);
+  assert.ok(duped.issues.some((issue) => /duplicate/.test(issue)));
+});
+
+test('derived sources require locator + warnings; extracted keeps them optional', () => {
+  const bare = validateAgentResult(validResult({
+    sources: [{ id: 'src-0', url: 'https://example.com/a', title: 'A', sourceKind: 'derived' }],
+  }));
+  assert.equal(bare.ok, false);
+  assert.ok(bare.issues.some((issue) => /locator is required for derived/.test(issue)));
+  assert.ok(bare.issues.some((issue) => /warnings must be an array of strings for derived/.test(issue)));
+  const full = validateAgentResult(validResult({
+    sources: [{
+      id: 'src-0',
+      url: 'https://example.com/a',
+      title: 'A',
+      sourceKind: 'derived',
+      locator: { page: 2 },
+      warnings: ['truncated'],
+    }],
+  }));
+  assert.equal(full.ok, true, JSON.stringify(full.issues));
+});

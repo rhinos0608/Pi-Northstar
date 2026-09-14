@@ -28,6 +28,8 @@ export interface AgentSourceV1 {
   /** Document contract: derived docs carry sourceKind + locator + warnings. */
   sourceKind: 'extracted' | 'derived';
   locator?: { page?: number; timestamp?: string; location?: string };
+  /** Required on derived sources; optional on extracted sources. */
+  warnings?: string[];
 }
 
 export interface AgentResultV1 {
@@ -102,6 +104,7 @@ export function validateAgentResult(value: unknown): { ok: boolean; issues: stri
       }
       const entry = source as Record<string, unknown>;
       if (typeof entry['id'] !== 'string' || (entry['id'] as string) === '') issues.push(`sources[${index}].id is required`);
+      else if (ids.has(entry['id'] as string)) issues.push(`sources[${index}].id is a duplicate`);
       else ids.add(entry['id'] as string);
       if (typeof entry['url'] !== 'string' || !/^https?:\/\//i.test(entry['url'] as string)) {
         issues.push(`sources[${index}].url must be an http(s) URL`);
@@ -109,6 +112,13 @@ export function validateAgentResult(value: unknown): { ok: boolean; issues: stri
       if (typeof entry['title'] !== 'string') issues.push(`sources[${index}].title must be a string`);
       if (entry['sourceKind'] !== 'extracted' && entry['sourceKind'] !== 'derived') {
         issues.push(`sources[${index}].sourceKind must be extracted or derived`);
+      } else if (entry['sourceKind'] === 'derived') {
+        if (typeof entry['locator'] !== 'object' || entry['locator'] === null || Array.isArray(entry['locator'])) {
+          issues.push(`sources[${index}].locator is required for derived sources`);
+        }
+        if (!Array.isArray(entry['warnings']) || (entry['warnings'] as unknown[]).some((w) => typeof w !== 'string')) {
+          issues.push(`sources[${index}].warnings must be an array of strings for derived sources`);
+        }
       }
     }
     const claims = result['claims'];

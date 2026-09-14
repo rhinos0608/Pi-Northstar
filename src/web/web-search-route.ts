@@ -200,16 +200,14 @@ export function buildSearchRoute(params: SearchRouteParams | Record<string, unkn
   // paths. No inline report generation here: the job runs the opaque
   // Tavily leg synchronously inside job execution; poll serves the snapshot.
   if (normalized.mode === 'agent') {
-    const agent = normalized as AgentSearchParams;
-    const query = typeof contractInput.query === 'string' ? contractInput.query : agent.query;
-    const pointer = createAgentJob({
-      query,
-      ...(typeof contractInput.limit === 'number' ? { limit: contractInput.limit } : {}),
-      ...(typeof agent.category === 'string' ? { category: agent.category } : {}),
-      ...(typeof agent.yearFrom === 'number' ? { yearFrom: agent.yearFrom } : {}),
-      ...(typeof agent.recency === 'string' ? { recency: agent.recency } : {}),
-      ...(Array.isArray(agent.domains) ? { domains: agent.domains } : {}),
-    });
+    // Admission before registration: the canonical validator runs over the
+    // raw input, so invalid queries/limits/filters reject before a job
+    // exists. Only the validated query enters the job — the runtime takes a
+    // bare query string, so remaining filters cannot be honored end-to-end
+    // and the seam rejects them fail-closed instead of dropping silently.
+    const { request } = validateWebRequest({ ...contractInput, mode: 'agent' });
+    const single = request.queries[0]!;
+    const pointer = createAgentJob({ query: single });
     return { tool: 'agent_job', args: { jobId: pointer.jobId }, timeout: DEFAULT_WEB_AGENT_TIMEOUT_MS };
   }
   return buildCanonicalSearchRoute(normalized as SearchRouteParams, contractInput);

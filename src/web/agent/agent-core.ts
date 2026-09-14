@@ -13,7 +13,6 @@ import {
   type AgentResultV1,
   type AgentSourceV1,
 } from './agent-contract.js';
-import { truncateUtf8Bytes } from './agent-report-route.js';
 
 export interface AgentSearchHit {
   title: string;
@@ -26,7 +25,14 @@ export interface AgentSearchHit {
 export interface AgentCoreDeps {
   search(query: string): Promise<AgentSearchHit[]>;
   fetchText(url: string): Promise<string>;
-  report(query: string): Promise<{ text: string; sources: Array<{ url: string; title: string }>; warnings?: string[] }>;
+  report(query: string): Promise<{
+    text: string;
+    sources: Array<{ url: string; title: string }>;
+    warnings?: string[];
+    /** Optional structured claims carrying their own source associations.
+     *  sourceIds must reference composed source ids; unverifiable entries drop. */
+    claims?: Array<{ text: string; sourceIds: string[] }>;
+  }>;
 }
 
 /** Strip provider/model/secret provenance before composition. */
@@ -93,11 +99,13 @@ export async function runAgentCore(query: string, deps: AgentCoreDeps): Promise<
   // local-only evidence with a warning (never a throw that kills the job).
   let reportText = '';
   const reportSources: Array<{ url: string; title: string }> = [];
+  let structuredClaims: Array<{ text: string; sourceIds: string[] }> = [];
   try {
     const report = redactProvenance(await deps.report(trimmed));
     reportText = report.text;
     for (const source of report.sources) reportSources.push(source);
     for (const warning of report.warnings ?? []) warnings.push(warning);
+    structuredClaims = report.claims ?? [];
   } catch {
     warnings.push('opaque report leg unavailable; local evidence only');
   }
@@ -119,16 +127,23 @@ export async function runAgentCore(query: string, deps: AgentCoreDeps): Promise<
     warnings.push('no admissible sources; result carries no claims');
   }
 
-  // Claims: every claim cites >=1 source id (citation contract).
+  // Claims: every claim cites >=1 source id (citation contract). Only claims
+  // with verifiable source associations ship: structured report claims whose
+  // ids all exist, else claims derived from fetched passages (each cites its
+  // own passage source). Report sentences without structured evidence never
+  // become claims — no round-robin citation.
   const claims: AgentClaimV1[] = [];
   const citedIds = sources.map((source) => source.id);
+  const validIds = new Set(citedIds);
   if (citedIds.length > 0) {
-    if (reportText.trim() !== '') {
-      for (const sentence of splitClaims(truncateUtf8Bytes(reportText, 50_000))) {
-        if (claims.length >= citedIds.length * 4) break;
-        claims.push({ text: sentence, sourceIds: [citedIds[claims.length % citedIds.length]!] });
-      }
-    } else {
+    for (const candidate of structuredClaims) {
+      if (claims.length >= citedIds.length * 4) break;
+      if (typeof candidate?.text !== 'string' || candidate.text.trim() === '') continue;
+      if (!Array.isArray(candidate.sourceIds) || candidate.sourceIds.length === 0) continue;
+      if (!candidate.sourceIds.every((id) => typeof id === 'string' && validIds.has(id))) continue;
+      claims.push({ text: candidate.text, sourceIds: [...candidate.sourceIds] });
+    }
+    if (claims.length === 0) {
       for (const passage of ordered.slice(0, citedIds.length)) {
         const first = splitClaims(passage.text)[0] ?? passage.title;
         const id = sources.find((source) => source.url === passage.url)?.id;

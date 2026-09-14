@@ -1,6 +1,13 @@
 // Parent-owned in-memory agent jobs (Plan C3): expiry, owner-bound entries,
 // and byte-stable poll snapshots. The opaque Tavily leg stays
 // synchronous-inside-job; poll serves the snapshot only.
+//
+// Leaf-runtime report leg: when a provider is registered via
+// setLeafRuntimeProvider (agent-rpc.ts seam), PI_NORTHSTAR_LEAF_MODEL names
+// the exact model (read here at call time, never inside the client), and a
+// per-job refreshReady() succeeds, the report leg runs on the leaf runtime.
+// Any leaf failure falls back to the opaque leg with a safe-code warning.
+// Snapshots carry transport + safe reason only, never provider/model identity.
 
 import { randomUUID } from 'node:crypto';
 import {
@@ -9,9 +16,16 @@ import {
   type AgentJobV1,
   type AgentResultV1,
 } from './agent-contract.js';
-import { runAgentCore, type AgentCoreDeps } from './agent-core.js';
-import { runAgentReportRoute } from './agent-report-route.js';
-import { negotiateAgentRpc, type AgentRpcNegotiationInput } from './agent-rpc.js';
+import { runAgentCore, redactProvenance, type AgentCoreDeps } from './agent-core.js';
+import { runAgentReportRoute, truncateUtf8Bytes } from './agent-report-route.js';
+import { AGENT_REPORT_MAX_BYTES } from './agent-contract.js';
+import { RUNTIME_RPC_BOUNDS } from '../../runtime/runtime-rpc-protocol.js';
+import {
+  getLeafRuntimeProvider,
+  negotiateAgentRpc,
+  type AgentRpcNegotiationInput,
+  type LeafRuntimeProvider,
+} from './agent-rpc.js';
 
 export interface AgentJobRunnerDeps {
   search(query: string): Promise<Array<{ title: string; url: string; snippet?: string }>>;
@@ -38,6 +52,15 @@ const store: JobStore = {
   id: () => randomUUID(),
 };
 
+/** In-flight execution per job: concurrent callers reuse one drive. */
+const inFlight = new Map<string, Promise<AgentJobV1>>();
+
+/** Exact env name for the configured leaf model. Read at call time, never in the client. */
+export const LEAF_MODEL_ENV_VAR = 'PI_NORTHSTAR_LEAF_MODEL';
+
+/** Per-request leaf timeout: 60s bounded by the protocol maximum. */
+export const LEAF_REPORT_TIMEOUT_MS = Math.min(60_000, RUNTIME_RPC_BOUNDS.maxTimeoutMs);
+
 /** Test/embedding seam: inject the search/fetch legs. Unset restores lazy defaults. */
 export function setAgentJobRunner(runner: AgentJobRunnerDeps | undefined): void {
   store.runner = runner;
@@ -52,6 +75,7 @@ export function __setAgentJobClock(now: (() => number) | undefined, id?: (() => 
 /** Test seam: drain the registry. */
 export function __resetAgentJobs(): void {
   store.jobs.clear();
+  inFlight.clear();
 }
 
 function expired(job: AgentJobV1, at: number): boolean {
@@ -107,29 +131,174 @@ export function createAgentJobEntry(input: CreateAgentJobInput): AgentJobV1 {
   return job;
 }
 
-/** Run one job to ready/failed. Tests await this directly; creation kicks it. */
+/** Safe leaf failure code: allowlisted token only, never exception text. */
+function safeLeafCode(error: unknown): string {
+  const code = (error as { code?: unknown })?.code;
+  if (typeof code === 'string' && /^[a-z_]{1,64}$/.test(code)) return code;
+  return 'provider_error';
+}
+
+/**
+ * Per-job leaf negotiation: provider registered + model configured + fresh
+ * refreshReady() success records transport 'leaf-runtime'; every other path
+ * keeps standalone with a precise reason. Snapshots never carry model ids.
+ */
+async function negotiateLeafTransport(job: AgentJobV1): Promise<LeafRuntimeProvider | undefined> {
+  const provider = getLeafRuntimeProvider();
+  if (provider === undefined) return undefined;
+  const model = (process.env[LEAF_MODEL_ENV_VAR] ?? '').trim();
+  if (model === '') {
+    job.rpc = {
+      attempted: true,
+      negotiated: false,
+      transport: 'standalone',
+      reason: 'leaf runtime registered but leaf model unset; core runs standalone',
+    };
+    return undefined;
+  }
+  let ready = false;
+  try {
+    ready = await provider.refreshReady();
+  } catch {
+    ready = false;
+  }
+  if (!ready) {
+    job.rpc = {
+      attempted: true,
+      negotiated: false,
+      transport: 'standalone',
+      reason: 'leaf runtime refresh failed; core runs standalone',
+    };
+    return undefined;
+  }
+  job.rpc = {
+    attempted: true,
+    negotiated: true,
+    transport: 'leaf-runtime',
+    reason: 'negotiated exact leaf model',
+  };
+  return provider;
+}
+
+/**
+ * Report-leg prompt from already-captured hits: job query + top
+ * search-snippet excerpts, bounded to maxPromptBytes. Pure (never calls
+ * search): executeAgentJob captures hits once and reuses them for both the
+ * core search leg and this prompt, so a leaf job executes one backend
+ * search and the prompt matches the attached sources.
+ */
+export function buildLeafPrompt(
+  query: string,
+  hits: Array<{ title: string; url: string; snippet?: string }>,
+): string {
+  const parts = [query];
+  for (const hit of hits.slice(0, 5)) {
+    const excerpt = `${hit.title ?? ''}\n${hit.snippet ?? ''}`.trim();
+    if (excerpt !== '') parts.push(excerpt.slice(0, 500));
+  }
+  return truncateUtf8Bytes(parts.join('\n\n'), RUNTIME_RPC_BOUNDS.maxPromptBytes);
+}
+
+/**
+ * Leaf report leg with opaque-leg fallback. On fallback the job snapshot
+ * reflects the ACTUAL producer: transport flips to 'standalone' with the
+ * safe leaf code in the reason (negotiated stays true — negotiation did
+ * happen). On success the negotiated 'leaf-runtime' record stands.
+ */
+async function leafReportWithFallback(
+  job: AgentJobV1,
+  query: string,
+  prompt: string,
+  provider: LeafRuntimeProvider,
+): Promise<{ text: string; sources: Array<{ url: string; title: string }>; warnings: string[] }> {
+  try {
+    const out = await provider.runLeaf(prompt, { timeoutMs: LEAF_REPORT_TIMEOUT_MS });
+    if (typeof out?.text !== 'string' || out.text.trim() === '') {
+      throw { code: 'provider_error' };
+    }
+    const clean = redactProvenance({ text: out.text });
+    const warnings: string[] = [];
+    let text = clean.text;
+    if (Buffer.byteLength(text, 'utf8') > AGENT_REPORT_MAX_BYTES) {
+      text = truncateUtf8Bytes(text, AGENT_REPORT_MAX_BYTES);
+      warnings.push(`report text capped to the ${AGENT_REPORT_MAX_BYTES}-byte evidence budget`);
+    }
+    return { text, sources: [], warnings };
+  } catch (error) {
+    const code = safeLeafCode(error);
+    job.rpc = {
+      attempted: true,
+      negotiated: true,
+      transport: 'standalone',
+      reason: `leaf leg failed (${code}); report leg fallback`,
+    };
+    const leafWarning = `leaf runtime leg failed (${code}); report leg fallback`;
+    try {
+      const fallback = await runAgentReportRoute({ query, env: process.env as Record<string, string | undefined> });
+      return {
+        text: fallback.text,
+        sources: fallback.sources,
+        warnings: [...fallback.warnings, leafWarning],
+      };
+    } catch {
+      // Opaque leg also down: local-evidence result still carries the leaf warning.
+      return { text: '', sources: [], warnings: [leafWarning] };
+    }
+  }
+}
+
+/** Run one job to ready/failed. Concurrent callers share one in-flight
+ *  drive; the entry clears on settle so later calls observe final status. */
 export async function executeAgentJob(jobId: string): Promise<AgentJobV1> {
+  const running = inFlight.get(jobId);
+  if (running !== undefined) return running;
+  const drive = driveAgentJob(jobId).finally(() => {
+    if (inFlight.get(jobId) === drive) inFlight.delete(jobId);
+  });
+  inFlight.set(jobId, drive);
+  return drive;
+}
+
+/** Single-drive job execution. Never called directly when shared. */
+async function driveAgentJob(jobId: string): Promise<AgentJobV1> {
   const job = store.jobs.get(jobId);
   if (job === undefined) throw new Error(`unknown agent job: ${jobId.slice(0, 32)}`);
   if (job.status !== 'running') return job;
   try {
     const runner = await defaultRunner();
+    const leaf = await negotiateLeafTransport(job);
+    // Single search per job: capture hits once, reuse the same array for
+    // the core search leg (memoized one-shot) and the leaf prompt, so the
+    // prompt matches the attached sources. The core always runs the local
+    // leg, so the capture is always consumed.
+    const hits = await runner.search(job.query);
+    const report =
+      leaf !== undefined
+        ? async (query: string) => leafReportWithFallback(job, query, buildLeafPrompt(query, hits), leaf)
+        : async (query: string) => runAgentReportRoute({ query, env: process.env as Record<string, string | undefined> });
     const result: AgentResultV1 = await runAgentCore(job.query, {
-      search: runner.search,
+      search: async () => hits,
       fetchText: runner.fetchText,
-      report: async (query: string) => runAgentReportRoute({ query, env: process.env as Record<string, string | undefined> }),
+      report,
     } as AgentCoreDeps);
     job.result = result;
     job.status = 'ready';
-  } catch (error) {
+  } catch {
     job.status = 'failed';
-    job.error = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+    // Stable generic code only: snapshots are model-visible, so dependency
+    // messages never land in job.error. No protected diagnostics surface
+    // exists — details stay out entirely rather than inventing one.
+    job.error = 'agent_job_failed';
   }
   job.updatedAt = store.now();
   return job;
 }
 
-/** Non-throwing read for embeds that handle absence themselves. */
+/** Non-throwing internal read for embeds that handle absence themselves.
+ *  No owner binding by design: the only model-visible surface is
+ *  getAgentJobSnapshot (owner-gated, indistinguishable-miss). This read
+ *  serves trusted in-process polling only — no caller outside this module
+ *  and its tests resolves jobs through it. */
 export function getAgentJob(jobId: string): AgentJobV1 | undefined {
   const job = store.jobs.get(jobId);
   if (job === undefined || expired(job, store.now())) return undefined;
@@ -147,6 +316,8 @@ export interface AgentJobSnapshot {
   status: 'running' | 'ready' | 'failed';
   query: string;
   updatedAt: number;
+  /** Transport name + safe reason only; never provider or model identity. */
+  rpc: { transport: 'standalone' | 'leaf-runtime'; reason: string };
   result?: AgentResultV1;
   error?: string;
 }
@@ -154,7 +325,8 @@ export interface AgentJobSnapshot {
 /**
  * Byte-stable snapshot: canonical JSON, identical bytes for identical job
  * state. Foreign/missing owner on an owned job resolves exactly like a miss
- * (no existence signal, never another owner's bytes).
+ * (no existence signal, never another owner's bytes). Carries transport +
+ * safe reason only — never provider or model identity.
  */
 export function getAgentJobSnapshot(jobId: string, owner?: string): string {
   prune();
@@ -168,6 +340,7 @@ export function getAgentJobSnapshot(jobId: string, owner?: string): string {
     status: job.status,
     query: job.query,
     updatedAt: job.updatedAt,
+    rpc: { transport: job.rpc.transport, reason: job.rpc.reason },
     ...(job.result !== undefined ? { result: job.result } : {}),
     ...(job.error !== undefined ? { error: job.error } : {}),
   };

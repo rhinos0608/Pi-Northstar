@@ -2,19 +2,61 @@
 // negotiated per the S3 findings; with no handshake present the record is a
 // fail-closed no-op and the core runs standalone. The negotiation attempt is
 // always recorded on the job — never silently skipped.
+//
+// Leaf-runtime seam: agent-jobs registers a provider via
+// setLeafRuntimeProvider (wired in src/index.ts only when
+// PI_NORTHSTAR_LEAF_MODEL is set). executeAgentJob calls refreshReady() per
+// job before first use; transport 'leaf-runtime' records only on a fresh
+// successful negotiate. Snapshots carry transport + safe reason only — never
+// provider/model identity.
+
+export type AgentTransport = 'standalone' | 'leaf-runtime';
 
 export interface AgentRpcRecord {
   /** True once a negotiation attempt ran (even when nothing was found). */
   attempted: boolean;
   negotiated: boolean;
-  /** v1 has no remote transport: standalone only. */
-  transport: 'standalone';
+  /** v1 transports: standalone, or leaf-runtime via the registered provider. */
+  transport: AgentTransport;
   reason: string;
 }
 
 export interface AgentRpcNegotiationInput {
   /** Operator-supplied RPC endpoint when a handshake exists. Absent = standalone. */
   endpoint?: string;
+}
+
+/** Minimal leaf provider surface. Satisfied structurally by LeafRuntimeClient. */
+export interface LeafRuntimeProvider {
+  refreshReady(): Promise<boolean>;
+  runLeaf(prompt: string, opts?: { maxOutputTokens?: number; timeoutMs?: number }): Promise<{ text: string }>;
+}
+
+let leafProvider: LeafRuntimeProvider | undefined;
+
+/** Module-level seam: register (or clear) the leaf runtime provider. */
+export function setLeafRuntimeProvider(provider: LeafRuntimeProvider | undefined): void {
+  leafProvider = provider;
+}
+
+/** Module-level seam read: the currently registered provider, if any. */
+export function getLeafRuntimeProvider(): LeafRuntimeProvider | undefined {
+  return leafProvider;
+}
+
+/**
+ * Shutdown helper: clear the seam and dispose the leaf client. The seam
+ * clears first, so a throwing dispose never leaves a stale provider
+ * behind; dispose errors stay best-effort (shutdown path already runs
+ * inside Promise.allSettled). Testable without the extension host.
+ */
+export function shutdownLeafRuntime(client?: { dispose(): void }): void {
+  setLeafRuntimeProvider(undefined);
+  try {
+    client?.dispose();
+  } catch {
+    // Best-effort shutdown; seam already cleared.
+  }
 }
 
 /**
@@ -32,10 +74,11 @@ export function negotiateAgentRpc(input: AgentRpcNegotiationInput = {}): AgentRp
     };
   }
   // Unknown endpoint shapes never half-negotiate: fail closed, stay standalone.
+  // Static reason: caller-supplied endpoint content must not flow into snapshots.
   return {
     attempted: true,
     negotiated: false,
     transport: 'standalone',
-    reason: `unrecognized RPC endpoint shape (${endpoint.slice(0, 32)}); core runs standalone`,
+    reason: 'unrecognized RPC endpoint shape; core runs standalone',
   };
 }

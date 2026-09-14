@@ -522,8 +522,6 @@ test('fetch never falls back on oversize response', async () => {
       lookup: publicLookupStub(),
     });
     await assert.rejects(promise, /too large/);
-    const details = { fallback: undefined };
-    assert.equal(details.fallback, undefined, 'size failure must never trigger paid fallback');
   });
   assert.equal(analyzeCalls, 0, 'size failure must never trigger paid fallback');
 });

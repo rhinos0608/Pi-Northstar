@@ -47,6 +47,8 @@ import {
 import { WebSearchLedger, type LedgerFailureCode, type WebSearchLedgerOptions } from './web/web-search-ledger.js';
 import { desktopEnabled } from './desktop/desktop-policy.js';
 import { getAgentJobSnapshot } from './web/agent/agent-jobs.js';
+import { setLeafRuntimeProvider, shutdownLeafRuntime } from './web/agent/agent-rpc.js';
+import { LeafRuntimeClient } from './runtime/leaf-runtime-client.js';
 
 const reachFamilies = ['social', 'media', 'web', 'dev', 'research', 'browser'] as const;
 const setupActions = ['auto', 'status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies', 'login'] as const;
@@ -346,10 +348,17 @@ export default function (pi: ExtensionAPI): void {
   if (typeof chromeRenewalTimer.unref === 'function') chromeRenewalTimer.unref();
   void ensureFirstStartBootstrap(env);
 
+  // Leaf-runtime RPC client: only when an exact leaf model is configured.
+  // Absent env = no client, agents stay standalone (existing behavior).
+  // No new tool; the client only feeds the agent report leg.
+  const leafModel = (process.env.PI_NORTHSTAR_LEAF_MODEL ?? '').trim();
+  const leafClient = leafModel !== '' ? new LeafRuntimeClient({ events: pi.events, modelId: leafModel }) : undefined;
+  if (leafClient !== undefined) setLeafRuntimeProvider(leafClient);
   pi.on('session_shutdown', async () => {
     clearInterval(chromeRenewalTimer);
     await Promise.allSettled([
       client.close(),
+      ...(leafClient !== undefined ? [(async () => { shutdownLeafRuntime(leafClient); })()] : []),
       ...(desktop ? [desktop.close()] : []),
       closeBrowserSession(),
       (async () => {
