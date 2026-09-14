@@ -161,6 +161,29 @@ describe('web-search-ledger: near-duplicate suppression', () => {
     ledger.completeSuccess(first.key);
     assert.equal(ledger.begin(['totally unrelated query about plumbing'], { limit: 8 }).status, 'run');
   });
+
+  it('reversed-entity queries both run (order-sensitive fuzzy match)', () => {
+    const { ledger } = ledgerAt(3_100_000);
+    const first = ledger.begin(['Alice acquired Bob'], { limit: 8 });
+    if (first.status !== 'run') throw new Error('expected run');
+    ledger.completeSuccess(first.key);
+    // Same tokens (unigram Jaccard 1.0) but reversed roles share no bigrams:
+    // must run, not suppress.
+    const reversed = ledger.begin(['Bob acquired Alice'], { limit: 8 });
+    assert.equal(reversed.status, 'run');
+    if (reversed.status === 'run') ledger.cancel(reversed.key);
+  });
+
+  it('longer same-token reordering runs despite high unigram overlap', () => {
+    const { ledger } = ledgerAt(3_200_000);
+    const first = ledger.begin(['alpha beta gamma delta epsilon zeta'], { limit: 8 });
+    if (first.status !== 'run') throw new Error('expected run');
+    ledger.completeSuccess(first.key);
+    // Full reversal: unigram Jaccard 1.0, bigram overlap 0.
+    const reversed = ledger.begin(['zeta epsilon delta gamma beta alpha'], { limit: 8 });
+    assert.equal(reversed.status, 'run');
+    if (reversed.status === 'run') ledger.cancel(reversed.key);
+  });
 });
 
 describe('web-search-ledger: batch exact canonical match', () => {

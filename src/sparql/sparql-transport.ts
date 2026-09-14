@@ -5,7 +5,7 @@
 // query parsing here: form gating (SELECT/ASK only) belongs to the adapter.
 // Loopback endpoints allowed: endpoint is operator config, not public input.
 
-import { safeResponseJson } from '../core/http.js';
+import { safeResponseText } from '../core/http.js';
 
 export type SparqlTransportErrorCode =
   | 'transport_invalid_response'
@@ -131,9 +131,9 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
     });
   }
 
-  let parsed: unknown;
+  let raw: string;
   try {
-    parsed = await safeResponseJson(response!, target, maxBytes);
+    raw = await safeResponseText(response!, target, maxBytes);
   } catch (error) {
     if (error instanceof SparqlTransportError) throw error;
     const message = error instanceof Error ? error.message : String(error);
@@ -144,12 +144,28 @@ export async function sparqlPost<T = unknown>(options: SparqlTransportOptions): 
   }
 
   if (!response!.ok) {
-    const detail = parsed !== undefined ? `: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}` : '';
+    let detail = '';
+    if (raw!.length > 0) {
+      try {
+        const parsedError: unknown = JSON.parse(raw!);
+        detail = `: ${typeof parsedError === 'string' ? parsedError : JSON.stringify(parsedError)}`;
+      } catch {
+        detail = `: ${raw}`;
+      }
+    }
     const status = response!.status;
     fail('transport_invalid_response', `SPARQL API error (HTTP ${status}) for ${target}${detail}`, token, {
       status,
       retryable: status >= 500,
     });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw!);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fail('transport_invalid_response', `SPARQL transport failure for ${target}: ${message}`, token, { status: response!.status });
   }
 
   return parsed as T;

@@ -75,7 +75,7 @@ export class CliSearchBackend implements SearchBackend {
       const served = tryServeCliCorpusAction(this.corpus, args);
       if (served !== undefined) return served;
     }
-    const envelope = await this.run(['call', name, JSON.stringify(args)], options.signal, options.timeout);
+    const envelope = await this.run(['call', name, JSON.stringify(args)], options.signal, options.timeout, name);
     if (!envelope.ok) throw new Error(envelope.error?.message ?? 'CLI backend failed');
     if (!envelope.data) throw new Error('CLI backend returned no data.');
     return populateCliCorpus(this.corpus, name, envelope.data);
@@ -83,7 +83,7 @@ export class CliSearchBackend implements SearchBackend {
 
   async close(): Promise<void> {}
 
-  private run(args: string[], signal?: AbortSignal, timeout?: number): Promise<CliEnvelope> {
+  private run(args: string[], signal?: AbortSignal, timeout?: number, toolName?: string): Promise<CliEnvelope> {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
         reject(cliAbortError());
@@ -91,7 +91,7 @@ export class CliSearchBackend implements SearchBackend {
       }
       // Forward the process-local bridge token explicitly at spawn time so
       // late-bound bridges reach one-shot children without global env writes.
-      const childEnv = buildCliEnvironment(this.env);
+      const childEnv = buildCliEnvironment(this.env, toolName);
       const bridgeToken = getProcessLocalBridgeToken();
       if (bridgeToken !== undefined && childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN === undefined) {
         childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN = bridgeToken;
@@ -252,7 +252,7 @@ export function tryServeCliCorpusAction(
   }
 }
 
-export function buildCliEnvironment(env: Record<string, string | undefined>): Record<string, string> {
+export function buildCliEnvironment(env: Record<string, string | undefined>, toolName?: string): Record<string, string> {
   const allowed = [
     'PATH',
     'HOME',
@@ -381,7 +381,11 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'PI_SEARCH_EMBEDDING_PORT',
     'SIDECAR_DEVICE',
   ];
+  // SPARQL endpoint/token stay out of unrelated children by default. The
+  // graph tool child is the related target: forward env-only operator config
+  // so process-env GRAPH_SPARQL_* survives the default CLI boundary.
+  const scoped = toolName === 'graph' ? ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN'] : [];
   return Object.fromEntries(
-    allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),
+    [...allowed, ...scoped].flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),
   );
 }

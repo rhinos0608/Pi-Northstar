@@ -15,6 +15,13 @@ import {
   WEB_SEARCH_MAX_DOMAINS,
 } from './web/web-contract.js';
 import { WEB_PROVIDER_MIN_YEAR_FROM } from './web/web-search-types.js';
+import {
+  ENHANCE_SELECTOR_KEYS,
+  KG_ENHANCE_FIELDS,
+  KG_NLP_MAX_CHARS,
+  MAX_KG_CURSOR_LENGTH,
+  PERSON_ONLY_KEYS,
+} from './knowledge/knowledge-contract.js';
 
 // Category names canonical in web-contract.ts (single source of truth).
 
@@ -98,29 +105,39 @@ import {
   MAX_GRAPH_CURSOR_LENGTH,
   MAX_GRAPH_NAME_CHARS,
   MAX_GRAPH_QUERY_CHARS,
+  type GraphLanguage,
 } from './graph/graph-contract.js';
 
 /**
  * Strict graph parameters: query/probe/schema branches per language, with
  * schema views split by selector shape. SPARQL query carries no
  * pageSize/cursor (v1 returns one bounded response without cursor).
+ * Optional languages filter advertises only configured branches (dql iff
+ * DIFFBOT_TOKEN present, sparql iff GRAPH_SPARQL_ENDPOINT configured).
+ * Defaults to both, preserving existing callers. Runtime per-language
+ * fail-closed stays as backstop for unconfigured dispatch.
  */
-export function buildGraphParameters(): TSchema {
+export function buildGraphParameters(languages: readonly GraphLanguage[] = [...GRAPH_LANGUAGES]): TSchema {
+  const enabled = new Set<GraphLanguage>(languages);
   const queryText = (description: string): TSchema =>
     Type.String({ minLength: 1, maxLength: MAX_GRAPH_QUERY_CHARS, description });
-  const branches: TSchema[] = [
-    Type.Object({
+  const branches: TSchema[] = [];
+  if (enabled.has('dql')) {
+    branches.push(Type.Object({
       action: Type.Literal('query'), language: Type.Literal('dql'),
       query: queryText('DQL query text.'),
       pageSize: Type.Optional(Type.Integer({ minimum: GRAPH_PAGE_SIZE_MIN, maximum: GRAPH_PAGE_SIZE_MAX, description: 'Transport page size (default 10, max 100); never rewrites query text.' })),
       cursor: Type.Optional(Type.String({ maxLength: MAX_GRAPH_CURSOR_LENGTH, description: 'Opaque base64url cursor bound to query/pageSize.' })),
-    }, { additionalProperties: false }),
-    Type.Object({
+    }, { additionalProperties: false }));
+  }
+  if (enabled.has('sparql')) {
+    branches.push(Type.Object({
       action: Type.Literal('query'), language: Type.Literal('sparql'),
-      query: queryText('SPARQL SELECT/ASK text; SERVICE and update forms reject before dispatch.'),
-    }, { additionalProperties: false }),
-  ];
+      query: queryText('SPARQL SELECT/ASK text; SERVICE, dataset (FROM), and update forms reject before dispatch.'),
+    }, { additionalProperties: false }));
+  }
   for (const language of GRAPH_LANGUAGES) {
+    if (!enabled.has(language)) continue;
     const lang = Type.Literal(language);
     branches.push(Type.Object({
       action: Type.Literal('probe'), language: lang,
@@ -372,4 +389,80 @@ export function buildBrowserParameters(): TSchema {
     }, { additionalProperties: false }),
   ];
   return Type.Union(branches, { description: 'Browser action with bounded fields and strict semanticAction vocabulary.' });
+}
+
+// ── kg parameters: discriminated action union from knowledge-contract vocabulary ──
+// Mirrors validateKgSearch/validateKgEnhance/validateKgNlp bounds so the
+// model-facing schema cannot drift from runtime validation. Search pins
+// language 'dql' with integer limit 1..50; enhance splits Person/Organization
+// into per-selector required branches (Person-only employer/title/school never
+// advertised on Organization); analyze_text bounds text 1..KG_NLP_MAX_CHARS with
+// ISO 639-1-or-auto language. Runtime still re-validates every request.
+//
+// Returns the request-body union; registration wraps it as
+// Type.Object({ request: buildKgParameters() }).
+const KG_PERSON_SELECTORS = [...ENHANCE_SELECTOR_KEYS, ...PERSON_ONLY_KEYS] as const;
+
+function kgSharedSelectorFields(): Record<string, TSchema> {
+  return {
+    providers: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: 'Explicit provider fanout; omitted selects the highest-priority capable provider.' })),
+    maxProviders: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: 'Provider fanout cap 1..8 (operator DIFFBOT_MAX_PROVIDERS wins).' })),
+  };
+}
+
+function kgEnhanceModifiers(): Record<string, TSchema> {
+  return {
+    fields: Type.Optional(StringEnum([...KG_ENHANCE_FIELDS], { description: 'Atlas-owned portable field projection.' })),
+    maxEntities: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, description: 'Max entities 1..10.' })),
+    includeRelationships: Type.Optional(Type.Boolean()),
+    includeEvidence: Type.Optional(Type.Boolean()),
+    confidenceThreshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: 'Drop explicit below-threshold numerics 0..1.' })),
+    ...kgSharedSelectorFields(),
+  };
+}
+
+function kgEnhanceBranch(
+  type: 'Person' | 'Organization',
+  requiredSelector: string,
+  allowed: readonly string[],
+): TSchema {
+  const selectorField = (field: string): TSchema =>
+    Type.String({ minLength: 1, description: `Enhance selector: ${field}.` });
+  const properties: Record<string, TSchema> = {
+    action: Type.Literal('enhance'),
+    type: Type.Literal(type),
+    ...kgEnhanceModifiers(),
+  };
+  for (const field of allowed) {
+    properties[field] = field === requiredSelector ? selectorField(field) : Type.Optional(selectorField(field));
+  }
+  return Type.Object(properties, { additionalProperties: false, description: `kg enhance ${type} request (selector ${requiredSelector} required).` });
+}
+
+export function buildKgParameters(): TSchema {
+  const searchBranch = Type.Object({
+    action: Type.Literal('search'),
+    query: Type.String({ minLength: 1, description: 'Entity-returning DQL query text.' }),
+    language: Type.Literal('dql', { description: "Query language; 'dql' fixed in v1." }),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: 'Result limit 1..50.' })),
+    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_KG_CURSOR_LENGTH, description: 'Opaque base64url cursor.' })),
+    ...kgSharedSelectorFields(),
+  }, { additionalProperties: false, description: 'kg search request.' });
+  const enhanceBranches: TSchema[] = [
+    ...KG_PERSON_SELECTORS.map((selector) => kgEnhanceBranch('Person', selector, KG_PERSON_SELECTORS)),
+    ...ENHANCE_SELECTOR_KEYS.map((selector) => kgEnhanceBranch('Organization', selector, ENHANCE_SELECTOR_KEYS)),
+  ];
+  const analyzeBranch = Type.Object({
+    action: Type.Literal('analyze_text'),
+    text: Type.String({ minLength: 1, maxLength: KG_NLP_MAX_CHARS, description: `Source text 1..${KG_NLP_MAX_CHARS} chars (sent with consent).` }),
+    language: Type.Optional(Type.Union(
+      [Type.Literal('auto'), Type.String({ pattern: '^[a-z]{2}$', minLength: 2, maxLength: 2 })],
+      { description: 'ISO 639-1 code or auto.' },
+    )),
+    extractEntities: Type.Optional(Type.Boolean()),
+    extractFacts: Type.Optional(Type.Boolean()),
+    extractSentiment: Type.Optional(Type.Boolean()),
+    extractTopics: Type.Optional(Type.Boolean()),
+  }, { additionalProperties: false, description: 'kg analyze_text request.' });
+  return Type.Union([searchBranch, ...enhanceBranches, analyzeBranch], { description: 'One canonical kg action request.' });
 }

@@ -162,15 +162,167 @@ function stripSparqlComments(query: string): string {
   return out;
 }
 
-/** Strip PREFIX/BASE preamble and leading comments, then read first keyword. */
-function firstKeyword(query: string): string {
-  const noComments = stripSparqlComments(query);
-  const noPreamble = noComments.replace(
-    /\b(?:PREFIX\s+(?:[A-Za-z][\w.-]*\s*)?:\s*<[^>]*>|BASE\s*<[^>]*>)/gi,
-    ' ',
-  );
-  const match = /\b([A-Za-z]+)\b/.exec(noPreamble);
-  return match ? match[1]!.toUpperCase() : '';
+/** Bare-word scan of SPARQL text for form gating (ADR 0006): collects
+ *  uppercase bare keywords, skipping comments, string literals (incl.
+ *  triple-quoted + escapes), IRIREFs, variables (?x/$x), blank-node labels
+ *  (_:x), prefixed names (ex:foo, :foo), language tags (@en), and numbers.
+ *  Only bare words can be SPARQL keywords, so ?service, ex:add, or "FROM"
+ *  inside a literal never match. `<` opens an IRIREF only when valid IRIREF
+ *  content (no whitespace/controls or `<>"{}|^`\`` unescaped before `>`);
+ *  otherwise it is a comparison operator (FILTER(?a < ?b)) and scanning
+ *  continues after it, so `<`-masking cannot swallow a SERVICE ban. */
+function bareSparqlWords(query: string): string[] {
+  const text = stripSparqlComments(query);
+  const words: string[] = [];
+  const n = text.length;
+  let i = 0;
+  const isWordChar = (ch: string): boolean => /[A-Za-z0-9_-]/.test(ch);
+  const skipLocalName = (): void => {
+    while (i < n) {
+      const ch = text[i]!;
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (/[A-Za-z0-9_.%:\-]/.test(ch)) {
+        i += 1;
+        continue;
+      }
+      break;
+    }
+  };
+  while (i < n) {
+    const ch = text[i]!;
+    if (ch === '"' || ch === "'") {
+      let quote: string = ch;
+      if (text.startsWith(ch.repeat(3), i)) quote = ch.repeat(3);
+      i += quote.length;
+      while (i < n) {
+        if (quote.length === 1 && text[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (text.startsWith(quote, i)) {
+          i += quote.length;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === '<') {
+      let j = i + 1;
+      let valid = false;
+      while (j < n) {
+        const c = text[j]!;
+        if (c === '>') {
+          valid = true;
+          break;
+        }
+        if (c === '\\') {
+          const u = text[j + 1];
+          const digits = u === 'u' ? 4 : u === 'U' ? 8 : 0;
+          const hex = digits > 0 ? text.slice(j + 2, j + 2 + digits) : '';
+          if (digits > 0 && /^[0-9A-Fa-f]+$/.test(hex) && hex.length === digits) {
+            j += 2 + digits;
+            continue;
+          }
+          break;
+        }
+        if (c <= ' ' || c === '<' || c === '"' || c === '{' || c === '}' || c === '|' || c === '^' || c === '`' || c === '\x7f') break;
+        j += 1;
+      }
+      if (valid) {
+        i = j + 1;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === '?' || ch === '$') {
+      i += 1;
+      while (i < n && /[A-Za-z0-9_.\-]/.test(text[i]!)) i += 1;
+      continue;
+    }
+    if (ch === '_' && text[i + 1] === ':') {
+      i += 2;
+      while (i < n && /[A-Za-z0-9_.\-]/.test(text[i]!)) i += 1;
+      continue;
+    }
+    if (ch === ':' || ch === '@') {
+      i += 1;
+      while (i < n && isWordChar(text[i]!)) i += 1;
+      if (ch === ':') skipLocalName();
+      continue;
+    }
+    if (/[0-9]/.test(ch) || ((ch === '+' || ch === '-' || ch === '.') && /[0-9]/.test(text[i + 1] ?? ''))) {
+      i += 1;
+      while (i < n && /[0-9eE.+-]/.test(text[i]!)) i += 1;
+      continue;
+    }
+    if (/[A-Za-z]/.test(ch)) {
+      const start = i;
+      while (i < n && isWordChar(text[i]!)) i += 1;
+      if (text[i] === ':') {
+        i += 1;
+        skipLocalName();
+        continue;
+      }
+      words.push(text.slice(start, i).toUpperCase());
+      continue;
+    }
+    i += 1;
+  }
+  return words;
+}
+
+/** `;` stacking outside the single SELECT/ASK form, string/IRIREF-aware:
+ *  a top-level `;` with trailing content means a second operation follows. */
+function hasTopLevelStacking(query: string): boolean {
+  const text = stripSparqlComments(query);
+  const n = text.length;
+  let i = 0;
+  let depth = 0;
+  const skipString = (quote: string): void => {
+    while (i < n) {
+      if (quote.length === 1 && text[i] === '\\') {
+        i += 2;
+        continue;
+      }
+      if (text.startsWith(quote, i)) {
+        i += quote.length;
+        return;
+      }
+      i += 1;
+    }
+  };
+  while (i < n) {
+    const ch = text[i]!;
+    if (ch === '"' || ch === "'") {
+      let quote: string = ch;
+      if (text.startsWith(ch.repeat(3), i)) quote = ch.repeat(3);
+      i += quote.length;
+      skipString(quote);
+      continue;
+    }
+    if (ch === '<') {
+      const close = text.indexOf('>', i + 1);
+      const segment = close === -1 ? '' : text.slice(i + 1, close);
+      if (close !== -1 && !/\s/.test(segment) && !/[<>"{}|^`\\]/.test(segment)) {
+        i = close + 1;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') depth = Math.max(0, depth - 1);
+    else if (ch === ';' && depth === 0) {
+      if (text.slice(i + 1).trim() !== '') return true;
+    }
+    i += 1;
+  }
+  return false;
 }
 
 const UPDATE_KEYWORDS: ReadonlySet<string> = new Set([
@@ -187,32 +339,26 @@ const UPDATE_KEYWORDS: ReadonlySet<string> = new Set([
 ]);
 
 function classifySparqlForm(query: string): SparqlForm {
-  const noStrings = query
-    .replace(/"""[\s\S]*?"""/g, ' ')
-    .replace(/'''[\s\S]*?'''/g, ' ')
-    .replace(/"(?:[^"\\]|\\.)*"/g, ' ')
-    .replace(/'(?:[^'\\]|\\.)*'/g, ' ');
-  const noComments = stripSparqlComments(noStrings);
-  const noIris = noComments.replace(/<[^>]*>/g, ' ');
-  if (/\bSERVICE\b/i.test(noIris)) return 'unsupported';
-  // firstKeyword needs the IRI-bearing text: PREFIX/BASE preamble stripping
-  // matches `<...>` segments, and IRI-stripped text would leave a bare
-  // `PREFIX ex:` prefix that misclassifies prefixed SELECT/ASK as unsupported.
-  const keyword = firstKeyword(noComments);
-  if (keyword !== 'SELECT' && keyword !== 'ASK') return 'unsupported';
-  const firstMatch = /\b(?:SELECT|ASK)\b/i.exec(noIris);
-  const rest = firstMatch ? noIris.slice(firstMatch.index + firstMatch[0].length) : noIris;
-  const updatePattern = new RegExp(`\\b(${[...UPDATE_KEYWORDS].join('|')})\\b`, 'i');
-  if (updatePattern.test(rest)) return 'unsupported';
-  let depth = 0;
-  for (let i = 0; i < noIris.length; i += 1) {
-    const ch = noIris[i];
-    if (ch === '{') depth += 1;
-    else if (ch === '}') depth = Math.max(0, depth - 1);
-    else if (ch === ';' && depth === 0) {
-      if (noIris.slice(i + 1).trim() !== '') return 'unsupported';
+  const words = bareSparqlWords(query);
+  let first = -1;
+  for (let k = 0; k < words.length; k += 1) {
+    if (words[k] !== 'PREFIX' && words[k] !== 'BASE') {
+      first = k;
+      break;
     }
   }
+  if (first === -1) return 'unsupported';
+  const keyword = words[first]!;
+  if (keyword !== 'SELECT' && keyword !== 'ASK') return 'unsupported';
+  const rest = words.slice(first + 1);
+  // SERVICE is explicit federation; FROM / FROM NAMED select the RDF dataset
+  // and can direct some engines to dereference model-supplied IRIs.
+  if (rest.includes('SERVICE')) return 'unsupported';
+  if (rest.includes('FROM')) return 'unsupported';
+  for (const word of rest) {
+    if (UPDATE_KEYWORDS.has(word)) return 'unsupported';
+  }
+  if (hasTopLevelStacking(query)) return 'unsupported';
   return keyword === 'SELECT' ? 'select' : 'ask';
 }
 
@@ -296,7 +442,7 @@ function readCountHits(parsed: unknown): number | undefined {
 }
 
 function gateError(token: string, detail: string): GraphError {
-  return toSparqlError('unsupported_option', `SPARQL ${detail} is not supported: SELECT/ASK only, no SERVICE federation.`, false, token);
+  return toSparqlError('unsupported_option', `SPARQL ${detail} is not supported: SELECT/ASK only, no SERVICE federation or dataset (FROM) clauses.`, false, token);
 }
 
 function fromTransportError(error: unknown, token: string, signal?: AbortSignal): GraphError {

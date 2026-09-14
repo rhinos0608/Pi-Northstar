@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadSearchMcpEnvironment, resolveSparqlConfig } from '../../src/setup/local-config.js';
 import { findProvider, liveAuthSnapshot, providerSummary, sparqlStatus } from '../../src/setup/providers.js';
-import { buildCliEnvironment } from '../../src/cli/cli-backend.js';
+import { buildCliEnvironment, CliSearchBackend } from '../../src/cli/cli-backend.js';
 import { buildServerParameters } from '../../src/process/mcp-client.js';
 
 const ENDPOINT = 'https://sparql.example.org/sparql';
@@ -86,6 +86,37 @@ test('cli backend never forwards sparql credentials to unrelated child processes
   const empty = buildCliEnvironment({ PATH: '/usr/bin' });
   assert.equal(empty.GRAPH_SPARQL_ENDPOINT, undefined);
   assert.equal(empty.GRAPH_SPARQL_TOKEN, undefined);
+});
+
+test('env-only SPARQL config survives default CLI subprocess for the graph tool', async () => {
+  const scoped = buildCliEnvironment({ GRAPH_SPARQL_ENDPOINT: ENDPOINT, GRAPH_SPARQL_TOKEN: TOKEN }, 'graph');
+  assert.equal(scoped.GRAPH_SPARQL_ENDPOINT, ENDPOINT);
+  assert.equal(scoped.GRAPH_SPARQL_TOKEN, TOKEN);
+  const unrelated = buildCliEnvironment({ GRAPH_SPARQL_ENDPOINT: ENDPOINT, GRAPH_SPARQL_TOKEN: TOKEN }, 'web_search');
+  assert.equal(unrelated.GRAPH_SPARQL_ENDPOINT, undefined);
+  assert.equal(unrelated.GRAPH_SPARQL_TOKEN, undefined);
+  // End-to-end through the default CLI subprocess path with env-only config
+  // (no .env, no JSON): an invalid forwarded endpoint must surface as
+  // unsupported_option in the child; a lost endpoint would be auth_required.
+  const dir = await mkdtemp(join(tmpdir(), 'pi-sparql-cli-e2e-'));
+  const backend = new CliSearchBackend({
+    PATH: process.env.PATH,
+    PI_SEARCH_ENV_PATH: join(dir, 'missing.env'),
+    SEARCH_MCP_CONFIG_PATH: join(dir, 'missing.json'),
+    GRAPH_SPARQL_ENDPOINT: 'ftp://sparql.invalid/sparql',
+  });
+  try {
+    const result = await backend.callTool(
+      'graph',
+      { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }' },
+      { timeout: 120_000 },
+    );
+    const graph = (result.details as { graph?: { errors?: Array<{ code?: string }> } } | undefined)?.graph;
+    assert.ok(graph, 'graph envelope expected from CLI child');
+    assert.equal(graph.errors?.[0]?.code, 'unsupported_option');
+  } finally {
+    await backend.close();
+  }
 });
 
 test('mcp client forwards sparql endpoint and token by default without unrelated secrets', () => {

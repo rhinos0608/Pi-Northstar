@@ -126,6 +126,25 @@ test('non-2xx error never contains sentinel token; 5xx retryable, 4xx not', asyn
   );
 });
 
+test('503 HTML proxy error classifies retryable independent of media type', async () => {
+  const fetchFn: FetchFn = async () =>
+    new Response('<html><body>Service Unavailable</body></html>', {
+      status: 503,
+      headers: { 'content-type': 'text/html' },
+    });
+  await assert.rejects(
+    sparqlPost({ endpoint: ENDPOINT, query: 'SELECT * WHERE { ?s ?p ?o }', token: SENTINEL, fetchFn }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { code?: string }).code, 'transport_invalid_response');
+      assert.equal((err as { retryable?: boolean }).retryable, true);
+      assert.equal((err as { status?: number }).status, 503);
+      assert.ok(!err.message.includes(SENTINEL), 'sentinel token leaked in 503 HTML error');
+      return true;
+    },
+  );
+});
+
 test('oversize body maps to non-retryable response_too_large', async () => {
   const fetchFn: FetchFn = async () =>
     new Response('x'.repeat(100), { status: 200, headers: { 'content-length': '100' } });

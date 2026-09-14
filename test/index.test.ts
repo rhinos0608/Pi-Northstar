@@ -812,8 +812,10 @@ async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Pro
   const defs: Record<string, { description: string | undefined; promptSnippet: string | undefined; parameters: Record<string, unknown> }> = {};
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   const previousDiffbotToken = process.env.DIFFBOT_TOKEN;
+  const previousSparqlEndpoint = process.env.GRAPH_SPARQL_ENDPOINT;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
   process.env.DIFFBOT_TOKEN = diffbotToken;
+  process.env.GRAPH_SPARQL_ENDPOINT = 'https://sparql.example.org/sparql';
   const pi = {
     on: () => {},
     registerTool: (def: { name: string; description?: string; promptSnippet?: string; parameters: unknown }) => {
@@ -829,6 +831,8 @@ async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Pro
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
     if (previousDiffbotToken === undefined) delete process.env.DIFFBOT_TOKEN;
     else process.env.DIFFBOT_TOKEN = previousDiffbotToken;
+    if (previousSparqlEndpoint === undefined) delete process.env.GRAPH_SPARQL_ENDPOINT;
+    else process.env.GRAPH_SPARQL_ENDPOINT = previousSparqlEndpoint;
   }
   return defs;
 }
@@ -839,7 +843,8 @@ test('kg tool registered lowercase with action-aware schema', async () => {
   assert.ok(!defs.KG && !defs.knowledge, 'only the lowercase kg name is registered');
   const branches = requestBranches(defs.kg.parameters);
   const props = branchProperties(defs.kg.parameters);
-  assert.deepEqual(branches.map((b) => b.properties?.action?.const).sort(), ['analyze_text', 'enhance', 'search']);
+  assert.deepEqual([...new Set(branches.map((b) => b.properties?.action?.const))].sort(), ['analyze_text', 'enhance', 'search']);
+  assert.equal(branches.length, 19, 'kg schema keeps 1 search + 17 enhance (10 Person, 7 Organization) + 1 analyze_text branch');
   for (const key of ['query', 'type', 'text', 'cursor', 'providers', 'maxProviders', 'limit', 'maxEntities', 'confidenceThreshold', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics']) {
     assert.ok(key in props, `kg schema must expose portable field ${key}`);
   }

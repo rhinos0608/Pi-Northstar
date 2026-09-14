@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import Value from 'typebox/value';
 import { buildGithubParameters } from '../src/github/github.js';
 import { buildFetchRoute } from '../src/index.js';
-import { buildBrowserParameters, buildDesktopParameters, buildGraphParameters, buildSocialParameters, buildWebSearchParameters } from '../src/public-tool-schemas.js';
+import { buildBrowserParameters, buildDesktopParameters, buildGraphParameters, buildKgParameters, buildSocialParameters, buildWebSearchParameters } from '../src/public-tool-schemas.js';
+import { validateKgEnhance, validateKgNlp, validateKgSearch } from '../src/knowledge/knowledge-contract.js';
 
 test('web_search schema accepts single, batch, and agent branches', () => {
   const schema = buildWebSearchParameters();
@@ -223,6 +224,26 @@ test('web_search research branches drop includeContent/recency/domains (no silen
   assert.equal(Value.Check(schema, { query: 'a', category: 'research', yearFrom: 2020 }), true);
 });
 
+test('graph schema sparql-only filter accepts sparql and rejects dql branches', () => {
+  const schema = buildGraphParameters(['sparql']);
+  assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }' }), true);
+  assert.equal(Value.Check(schema, { action: 'probe', language: 'sparql', queries: ['SELECT * WHERE { ?s ?p ?o }'] }), true);
+  assert.equal(Value.Check(schema, { action: 'schema', language: 'sparql', view: 'types' }), true);
+  assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person' }), false);
+  assert.equal(Value.Check(schema, { action: 'probe', language: 'dql', queries: ['type:Person'] }), false);
+  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'types' }), false);
+});
+
+test('graph schema dql-only filter accepts dql and rejects sparql branches', () => {
+  const schema = buildGraphParameters(['dql']);
+  assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person' }), true);
+  assert.equal(Value.Check(schema, { action: 'probe', language: 'dql', queries: ['type:Person'] }), true);
+  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'types' }), true);
+  assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }' }), false);
+  assert.equal(Value.Check(schema, { action: 'probe', language: 'sparql', queries: ['SELECT * WHERE { ?s ?p ?o }'] }), false);
+  assert.equal(Value.Check(schema, { action: 'schema', language: 'sparql', view: 'types' }), false);
+});
+
 test('web_search route rejects research + includeContent/recency/domains loudly', async () => {
   const { buildSearchRoute } = await import('../src/web/web-search-route.js');
   assert.throws(() => buildSearchRoute({ query: 'a', category: 'research', includeContent: true } as never), /includeContent/);
@@ -231,4 +252,64 @@ test('web_search route rejects research + includeContent/recency/domains loudly'
   // Plain search still routes with the filters.
   const routed = buildSearchRoute({ query: 'a', includeContent: true, recency: 'week', domains: ['example.com'] });
   assert.equal(routed.tool, 'web_search');
+});
+
+test('kg schema pins search language dql with integer limit bounds', () => {
+  const schema = buildKgParameters();
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql' }), true);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 10 }), true);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 10, providers: ['diffbot'], maxProviders: 2 }), true);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person' }), false);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'sparql' }), false);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 0 }), false);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 51 }), false);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 2.5 }), false);
+  assert.equal(Value.Check(schema, { action: 'search', query: '', language: 'dql' }), false);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', nativeOptions: {} }), false);
+});
+
+test('kg schema requires enhance type with selector and Person-only fields', () => {
+  const schema = buildKgParameters();
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada Lovelace' }), true);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', employer: 'Analytical Engines' }), true);
+  assert.equal(
+    Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', fields: 'professional', maxEntities: 5, includeRelationships: true, includeEvidence: false, confidenceThreshold: 0.8 }),
+    true,
+  );
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', name: 'Analytical Engines' }), true);
+  assert.equal(Value.Check(schema, { action: 'enhance', name: 'Ada' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'person', name: 'Ada' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', employer: 'Analytical Engines' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', title: 'CEO', name: 'Ada' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', school: 'MIT', name: 'Ada' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', maxEntities: 0 }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', maxEntities: 11 }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', maxEntities: 2.5 }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', confidenceThreshold: 1.5 }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', fields: 'native' }), false);
+});
+
+test('kg schema bounds analyze_text length with ISO-ish language', () => {
+  const schema = buildKgParameters();
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'Ada built the first program.' }), true);
+  assert.equal(
+    Value.Check(schema, { action: 'analyze_text', text: 'Ada built it.', language: 'en', extractEntities: true, extractFacts: true, extractSentiment: false, extractTopics: true }),
+    true,
+  );
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'x', language: 'auto' }), true);
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: '' }), false);
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'x'.repeat(100_001) }), false);
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'x', language: 'english' }), false);
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'x', language: 'EN' }), false);
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'x', extractEntities: 'yes' }), false);
+});
+
+test('kg schema-accepted requests pass runtime validators (no drift)', () => {
+  assert.equal(validateKgSearch({ query: 'type:Person', language: 'dql', limit: 10 }).ok, true);
+  assert.equal(validateKgEnhance({ type: 'Person', name: 'Ada', fields: 'professional', maxEntities: 5, confidenceThreshold: 0.8 }).ok, true);
+  assert.equal(validateKgEnhance({ type: 'Organization', name: 'Analytical Engines' }).ok, true);
+  assert.equal(validateKgNlp({ text: 'Ada built it.', language: 'en', extractEntities: true }).ok, true);
+  // Runtime still distrusts schema: blank query passes schema minLength but fails validation.
+  assert.equal(validateKgSearch({ query: ' ', language: 'dql' }).ok, false);
 });

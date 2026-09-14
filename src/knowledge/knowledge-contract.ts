@@ -725,8 +725,8 @@ export type KgEnhanceResult =
     }
   | { ok: false; code: KgErrorCode; message: string };
 
-const ENHANCE_SELECTOR_KEYS = ['id', 'name', 'url', 'email', 'phone', 'location', 'description'] as const;
-const PERSON_ONLY_KEYS = ['employer', 'title', 'school'] as const;
+export const ENHANCE_SELECTOR_KEYS = ['id', 'name', 'url', 'email', 'phone', 'location', 'description'] as const;
+export const PERSON_ONLY_KEYS = ['employer', 'title', 'school'] as const;
 
 export function validateKgEnhance(input: unknown): KgEnhanceResult {
   if (!isRecord(input)) return { ok: false, code: 'invalid_input', message: 'enhance input must be an object' };

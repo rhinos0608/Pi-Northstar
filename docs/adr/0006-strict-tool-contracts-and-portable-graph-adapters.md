@@ -47,8 +47,12 @@ Policy:
 
 - Memory-only, bounded (`MAX_LEDGER_ENTRIES = 128`, LRU eviction).
 - Successful single-query searches suppress near-duplicates for 30 minutes
-  (`SUCCESS_SUPPRESS_MS`); fuzzy match is Jaccard ≥ 0.85 over hashed tokens
-  (`NEAR_DUPLICATE_JACCARD`). Batch entries suppress only on exact canonical
+  (`SUCCESS_SUPPRESS_MS`); fuzzy match requires unigram Jaccard ≥ 0.85 over
+  hashed tokens (`NEAR_DUPLICATE_JACCARD`) **and** bigram Jaccard ≥ 0.5 over
+  adjacent token pairs (`NEAR_DUPLICATE_BIGRAM_JACCARD`). The bigram gate
+  makes suppression order-sensitive: same-token reorderings such as
+  'Alice acquired Bob' vs 'Bob acquired Alice' share no bigrams, so both
+  run. Batch entries suppress only on exact canonical
   match. Cursor continuations (paged research reads) bypass the ledger.
 - Failures: non-retryable codes (`invalid_response`, `response_too_large`)
   block immediately; retryable codes (`timeout`, `upstream_error`) allow one

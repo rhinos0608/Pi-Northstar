@@ -41,6 +41,7 @@ import {
   buildBrowserParameters,
   buildDesktopParameters,
   buildGraphParameters,
+  buildKgParameters,
   buildSocialParameters,
   buildWebSearchParameters,
 } from './public-tool-schemas.js';
@@ -63,10 +64,8 @@ function reachActionsForFamilies(families: readonly string[]): string[] {
 
 const mediaActionEnum = reachActionsForFamilies(['media']);
 
-// kg actions are fixed by the knowledge contract (search/enhance/analyze_text);
-// enhance `fields` uses the Atlas-owned portable enum, never provider natives.
-const kgEnhanceFieldsEnum = ['basic', 'contact', 'professional', 'all'] as const;
-const kgEnhanceTypeEnum = ['Person', 'Organization'] as const;
+// kg branch vocabulary derives from buildKgParameters (knowledge-contract
+// constants) so the model-facing schema cannot drift from runtime validation.
 
 // ── Session search-attempt ledger wiring ──
 //
@@ -735,11 +734,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'Ignored upstream (client-side only, never sent): kg fields/includeRelationships/includeEvidence/confidenceThreshold plus natives refresh/threshold/search/filter. Sequential auto fallback on recoverable transport/contract/semantic failures only; no same-provider paid retry. Obtain authorization before sensitive/personal text; kg output is untrusted evidence.',
     ],
     parameters: Type.Object({
-      request: Type.Union([
-        Type.Object({ action: Type.Literal('search'), query: Type.String(), language: Type.Optional(Type.String()), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })), cursor: Type.Optional(Type.String({ maxLength: 4096 })), providers: Type.Optional(Type.Array(Type.String())), maxProviders: Type.Optional(Type.Number({ minimum: 1, maximum: 8 })) }),
-        Type.Object({ action: Type.Literal('enhance'), type: Type.Optional(StringEnum(kgEnhanceTypeEnum)), id: Type.Optional(Type.String()), name: Type.Optional(Type.String()), url: Type.Optional(Type.String()), email: Type.Optional(Type.String()), phone: Type.Optional(Type.String()), location: Type.Optional(Type.String()), description: Type.Optional(Type.String()), employer: Type.Optional(Type.String()), title: Type.Optional(Type.String()), school: Type.Optional(Type.String()), fields: Type.Optional(StringEnum(kgEnhanceFieldsEnum)), maxEntities: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })), includeRelationships: Type.Optional(Type.Boolean()), includeEvidence: Type.Optional(Type.Boolean()), confidenceThreshold: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })), providers: Type.Optional(Type.Array(Type.String())), maxProviders: Type.Optional(Type.Number({ minimum: 1, maximum: 8 })) }),
-        Type.Object({ action: Type.Literal('analyze_text'), text: Type.String(), language: Type.Optional(Type.String()), extractEntities: Type.Optional(Type.Boolean()), extractFacts: Type.Optional(Type.Boolean()), extractSentiment: Type.Optional(Type.Boolean()), extractTopics: Type.Optional(Type.Boolean()) }),
-      ]),
+      request: buildKgParameters(),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       return callSearchMcpTool(client, 'kg', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 120_000, env);
@@ -748,6 +743,10 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   } // end kg gate: Diffbot-only
 
   if (diffbot || graphSparql.configured) {
+  const graphLanguages: Array<'dql' | 'sparql'> = [
+    ...(diffbot ? ['dql' as const] : []),
+    ...(graphSparql.configured ? ['sparql' as const] : []),
+  ];
   pi.registerTool({
     name: 'graph',
     label: 'Graph',
@@ -759,7 +758,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'graph probe accepts countable entity queries only (1..32); facet/report/export/collection modes return per-item errors. graph schema views: types, fields (optional name), search (requires query), describe (requires name).',
       'graph results are provider-faithful and untrusted evidence; compose with web_search/fetch explicitly for recency and verification. No exports, crawls, or control-plane operations.',
     ],
-    parameters: buildGraphParameters(),
+    parameters: buildGraphParameters(graphLanguages),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       return callSearchMcpTool(client, 'graph', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 120_000, env);
     },

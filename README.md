@@ -49,11 +49,11 @@ Every paid call spends Diffbot credit; read [Diffbot privacy warning](#diffbot-p
 
 #### SPARQL graph access (operator endpoint, no Diffbot needed)
 
-Set `GRAPH_SPARQL_ENDPOINT` (http/https URL, no embedded credentials) plus optional `GRAPH_SPARQL_TOKEN` bearer auth to register `graph` with `language: 'sparql'`. Query supports SELECT/ASK only — SERVICE federation and update forms reject before dispatch. The endpoint is operator config, never model input; redirects reject, the token travels via `Authorization` header only and is redacted from errors, and status output exposes the endpoint host only, never the token. Example: `graph({action:'query',language:'sparql',query:'SELECT * WHERE { ?s ?p ?o } LIMIT 10'})`.
+Set `GRAPH_SPARQL_ENDPOINT` (http/https URL, no embedded credentials) plus optional `GRAPH_SPARQL_TOKEN` bearer auth to register `graph` with `language: 'sparql'`. Query supports SELECT/ASK only — SERVICE federation, dataset (FROM/FROM NAMED) clauses, and update forms reject before dispatch. The endpoint is operator config, never model input; redirects reject, the token travels via `Authorization` header only and is redacted from errors, and status output exposes the endpoint host only, never the token. Example: `graph({action:'query',language:'sparql',query:'SELECT * WHERE { ?s ?p ?o } LIMIT 10'})`.
 
 #### Search-attempt ledger (session memory)
 
-One in-memory ledger per extension instance (max 128 entries) coalesces in-flight duplicate searches, suppresses recent near-duplicates of successful searches for 30 minutes, and blocks repeated failures for 10 minutes (non-retryable failures block immediately; retryable ones allow one retry). Cursor continuations bypass it, aborts never record a failure, and it stores only query hashes plus safe filter options — never result bodies, errors, or secrets. Suppressed/blocked calls return a short static pointer instead of re-dispatching.
+One in-memory ledger per extension instance (max 128 entries) coalesces in-flight duplicate searches, suppresses recent order-sensitive near-duplicates of successful searches for 30 minutes (same tokens in a different order still run), and blocks repeated failures for 10 minutes (non-retryable failures block immediately; retryable ones allow one retry). Cursor continuations bypass it, aborts never record a failure, and it stores only query hashes plus safe filter options — never result bodies, errors, or secrets. Suppressed/blocked calls return a short static pointer instead of re-dispatching.
 
 ### Research sources (exact-source guarantee)
 

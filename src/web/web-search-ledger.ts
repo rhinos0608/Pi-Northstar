@@ -1,6 +1,7 @@
 // Search-attempt ledger core (Task 4): pure bounded in-memory state machine.
 //
-// Coalesces in-flight duplicate searches, suppresses completed near-duplicates,
+// Coalesces in-flight duplicate searches, suppresses completed near-duplicates
+// (order-sensitive: unigram Jaccard plus bigram overlap),
 // and blocks repeated failures with bounded retries. Stores only SHA-256
 // hashes, outcome state, counters, and safe failure codes — never result
 // bodies, raw upstream errors, query text, or secrets.
@@ -15,6 +16,9 @@ export const FAILURE_BLOCK_MS = 10 * 60_000;
 export const MAX_LEDGER_ENTRIES = 128;
 export const MAX_LEDGER_ACTIVE_SEARCHES = 32;
 export const NEAR_DUPLICATE_JACCARD = 0.85;
+/** Bigram-order gate alongside unigram Jaccard: same tokens in a
+ *  different order share no bigrams, so reversed-entity queries run. */
+export const NEAR_DUPLICATE_BIGRAM_JACCARD = 0.5;
 
 export type LedgerFailureCode =
   | 'timeout'
@@ -57,6 +61,9 @@ interface CompletedEntry {
   single: boolean;
   /** SHA-256 of each normalized token; empty for batch entries. */
   tokens: Set<string>;
+  /** SHA-256 of each adjacent hashed-token pair; empty for batch entries
+   *  and queries under two tokens. Makes fuzzy suppression order-sensitive. */
+  bigrams: Set<string>;
   optionsKey: string;
   successAt: number | undefined;
   failureCount: number;
@@ -67,6 +74,7 @@ interface CompletedEntry {
 
 interface PendingContext {
   tokens: Set<string>;
+  bigrams: Set<string>;
   single: boolean;
   optionsKey: string;
 }
@@ -89,6 +97,18 @@ function tokenize(normalized: string): string[] {
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+function hashTokenList(normalized: string): string[] {
+  return tokenize(normalized).map(hashToken);
+}
+
+function hashBigrams(tokenHashes: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (let index = 0; index + 1 < tokenHashes.length; index += 1) {
+    out.add(createHash('sha256').update(`${tokenHashes[index]!}\u0000${tokenHashes[index + 1]!}`, 'utf8').digest('hex'));
+  }
+  return out;
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {
@@ -190,8 +210,10 @@ export class WebSearchLedger {
     // unhandled rejection from the shared promise.
     promise.catch(() => {});
     this.inFlight.set(key, { key, resolve, reject, promise, waiters: 1 });
+    const tokenHashes = single ? hashTokenList(normalized[0]!) : [];
     this.pending.set(key, {
-      tokens: single ? new Set(tokenize(normalized[0]!).map(hashToken)) : new Set<string>(),
+      tokens: new Set<string>(tokenHashes),
+      bigrams: single ? hashBigrams(tokenHashes) : new Set<string>(),
       single,
       optionsKey,
     });
@@ -219,6 +241,7 @@ export class WebSearchLedger {
       hash: key,
       single: prior?.single ?? context?.single ?? true,
       tokens: context?.tokens ?? prior?.tokens ?? new Set<string>(),
+      bigrams: context?.bigrams ?? prior?.bigrams ?? new Set<string>(),
       optionsKey: context?.optionsKey ?? prior?.optionsKey ?? '',
       successAt: now,
       failureCount: 0,
@@ -251,6 +274,7 @@ export class WebSearchLedger {
       hash: key,
       single: prior?.single ?? context?.single ?? true,
       tokens: prior?.tokens ?? context?.tokens ?? new Set<string>(),
+      bigrams: prior?.bigrams ?? context?.bigrams ?? new Set<string>(),
       optionsKey: prior?.optionsKey ?? context?.optionsKey ?? '',
       successAt: undefined,
       failureCount,
@@ -327,15 +351,22 @@ export class WebSearchLedger {
     optionsKey: string,
     now: number,
   ): CompletedEntry | undefined {
-    const tokens = new Set(tokenize(normalizedQuery).map(hashToken));
+    const tokenHashes = hashTokenList(normalizedQuery);
+    const tokens = new Set<string>(tokenHashes);
+    const bigrams = hashBigrams(tokenHashes);
     for (const entry of this.completed.values()) {
       if (!entry.single || entry.successAt === undefined) continue;
       if (now - entry.successAt >= SUCCESS_SUPPRESS_MS) continue;
       if (entry.optionsKey !== optionsKey) continue;
-      if (jaccard(tokens, entry.tokens) >= NEAR_DUPLICATE_JACCARD) {
-        this.touch(entry.hash, entry);
-        return entry;
-      }
+      if (jaccard(tokens, entry.tokens) < NEAR_DUPLICATE_JACCARD) continue;
+      // Order gate: unigram Jaccard alone is order-blind (a token Set), so
+      // same-token reorderings ('Alice acquired Bob' vs 'Bob acquired Alice')
+      // hit Jaccard 1.0. Require adjacent-pair overlap too; a pure reorder
+      // shares no bigrams. Single-token queries have empty bigram sets on
+      // both sides, and jaccard(empty, empty) is 1, so they still suppress.
+      if (jaccard(bigrams, entry.bigrams) < NEAR_DUPLICATE_BIGRAM_JACCARD) continue;
+      this.touch(entry.hash, entry);
+      return entry;
     }
     return undefined;
   }

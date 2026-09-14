@@ -358,3 +358,76 @@ test('query executes bounded SELECT results JSON as object shape, no cursor', as
   assert.deepEqual(outcome.result, payload);
   assert.deepEqual(outcome.pagination, { hasMore: false });
 });
+
+test('query allows keyword-shaped identifiers: variables, prefixed names, literals', async () => {
+  const payload = { head: { vars: ['s'] }, results: { bindings: [] } };
+  let calls = 0;
+  const fetchFn: SparqlFetchFn = (async () => {
+    calls += 1;
+    return jsonResponse(payload);
+  }) as SparqlFetchFn;
+  const adapter = createSparqlGraphAdapter({ endpoint: ENDPOINT, fetchFn });
+  const cases = [
+    'SELECT * WHERE { ?s ?p ?service }',
+    'SELECT * WHERE { ?s ?p ?add }',
+    'SELECT * WHERE { ?s ?p ?move }',
+    'SELECT * WHERE { ?s ?p ?from }',
+    'PREFIX ex: <http://ex.org/> SELECT * WHERE { ?s ex:service ?o }',
+    'SELECT * WHERE { ?s ?p "SERVICE FROM ADD" }',
+    'SELECT * WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+  ];
+  for (const query of cases) {
+    const outcome = await adapter.executeQuery({ query, pageSize: 10, from: 0 }, { token: SENTINEL });
+    assert.equal(outcome.error, undefined, `expected dispatch for: ${query}`);
+  }
+  assert.equal(calls, cases.length);
+});
+
+test('query and probe reject FROM / FROM NAMED dataset clauses before dispatch', async () => {
+  let calls = 0;
+  const fetchFn: SparqlFetchFn = (async () => {
+    calls += 1;
+    return jsonResponse({});
+  }) as SparqlFetchFn;
+  const adapter = createSparqlGraphAdapter({ endpoint: ENDPOINT, fetchFn });
+  for (const query of [
+    'SELECT * FROM <http://evil.example.org/g> WHERE { ?s ?p ?o }',
+    'SELECT * FROM NAMED <http://evil.example.org/g> WHERE { ?s ?p ?o }',
+    'ASK FROM <http://evil.example.org/g> { ?s ?p ?o }',
+  ]) {
+    const outcome = await adapter.executeQuery({ query, pageSize: 10, from: 0 }, { token: SENTINEL });
+    assert.equal(outcome.error?.code, 'unsupported_option', `expected gate for: ${query}`);
+    assert.ok(!outcome.error?.message.includes(SENTINEL), 'token leaked in gate error');
+  }
+  const probe = await adapter.probeCardinality(
+    { queries: ['SELECT * FROM <http://evil.example.org/g> WHERE { ?s ?p ?o }'] },
+    { token: SENTINEL },
+  );
+  assert.equal(probe.items[0]?.status, 'error');
+  assert.equal(calls, 0);
+});
+
+test('query rejects SERVICE hidden behind <-comparison masking, allows IRIREF query strings', async () => {
+  const payload = { head: { vars: ['s'] }, results: { bindings: [] } };
+  let calls = 0;
+  const fetchFn: SparqlFetchFn = (async () => {
+    calls += 1;
+    return jsonResponse(payload);
+  }) as SparqlFetchFn;
+  const adapter = createSparqlGraphAdapter({ endpoint: ENDPOINT, fetchFn });
+  const masked = await adapter.executeQuery(
+    {
+      query: 'SELECT * WHERE { ?s ?p ?x . FILTER(?x < ?y && EXISTS { SERVICE <https://other.example/sparql> { ?a ?b ?c } }) }',
+      pageSize: 10,
+      from: 0,
+    },
+    { token: SENTINEL },
+  );
+  assert.equal(masked.error?.code, 'unsupported_option');
+  const iriQuery = await adapter.executeQuery(
+    { query: 'SELECT * WHERE { <https://host/path?q=$v> ?p ?o }', pageSize: 10, from: 0 },
+    { token: SENTINEL },
+  );
+  assert.equal(iriQuery.error, undefined);
+  assert.equal(calls, 1);
+});
