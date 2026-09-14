@@ -141,6 +141,8 @@ test('spawnProcess (via fetch) passes buildPythonChildEnvironment as env option'
 
   const bridge = new ScraplingBridge({
     fetchTimeout: 5000,
+    // Hermetic DNS: example.com resolves to a public IP without external network.
+    lookup: async () => [{ address: '93.184.216.34', family: 4 }],
     _spawn: scraplingSpawnRecorder(records, {
       ok: true,
       url: 'https://example.com/',

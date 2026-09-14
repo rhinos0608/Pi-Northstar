@@ -42,6 +42,7 @@ import {
   type AgentBrowserResult,
 } from './agent-browser-process.js';
 import { jsonTextResult, textResult } from '../core/tool-output.js';
+import type { DnsLookup } from '../network-policy.js';
 import { SessionPageStateStore, StaleRefError, preflightRef } from './session-page-state.js';
 
 function stripIpv6Brackets(hostname: string): string {
@@ -162,6 +163,8 @@ export interface AgentBrowserAdapterOptions {
   runtimeRoot?: string;
   env?: Record<string, string | undefined> | undefined;
   signal?: AbortSignal;
+  /** DNS stub seam: hermetic tests resolve without external network. Production omits it (system DNS). */
+  dnsLookup?: DnsLookup | undefined;
   loopbackMode?: {
     proxyUrl: string;
     proxyBypass?: string;
@@ -193,10 +196,12 @@ export class AgentBrowserAdapter {
   private readonly pageState = new SessionPageStateStore();
   /** Immutable loopback mode, if active. */
   readonly loopbackMode?: AgentBrowserAdapterOptions['loopbackMode'];
+  private readonly dnsLookup?: DnsLookup | undefined;
 
   constructor(options: AgentBrowserAdapterOptions = {}) {
     this.executablePath = options.executablePath;
     this.loopbackMode = options.loopbackMode;
+    this.dnsLookup = options.dnsLookup;
     this.session = {
       runtimeRoot: options.runtimeRoot ?? '',
       namespace: '',
@@ -420,11 +425,11 @@ export class AgentBrowserAdapter {
   private async preflightNavigationTarget(rawUrl: string, signal?: AbortSignal, staged?: string[]): Promise<{ ok: true; url: string; pendingHostname?: string } | { ok: false; error: string }> {
     const url = validateNavigationUrl(rawUrl);
     const hostname = new URL(url).hostname.toLowerCase();
-    await dnsPreflight(hostname, signal);
+    await dnsPreflight(hostname, signal, this.dnsLookup);
     const effective = this.domainsFrozen ? this.allowedDomains : (staged ?? this.allowedDomains);
     if (this.isStagingFirstNavigation(staged)) {
       const candidate = freezeAllowedDomains([hostname]);
-      await validateAllowedDomainsDns(candidate, signal);
+      await validateAllowedDomainsDns(candidate, signal, this.dnsLookup);
       return { ok: true, url, pendingHostname: candidate[0]! };
     }
     if (effective.length > 0 && !checkDomainAllowed(hostname, effective)) {

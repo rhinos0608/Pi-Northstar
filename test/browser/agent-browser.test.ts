@@ -352,7 +352,9 @@ process.stdin.on('end', () => {
 });
 `);
   await chmod6(executablePath, 0o700);
-  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot: joinp6(root, 'runtime') });
+  // Hermetic DNS: stub resolves EXAMPLE.com to a public IP without external network.
+  const stubLookup = async (): Promise<Array<{ address: string; family: number }>> => [{ address: '93.184.216.34', family: 4 }];
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot: joinp6(root, 'runtime'), dnsLookup: stubLookup });
   try {
     const result = await adapter.execute(
       { action: 'batch', batch: { commands: [{ args: ['open', 'https://EXAMPLE.com/'] }, { args: ['click', '#btn'] }] } },

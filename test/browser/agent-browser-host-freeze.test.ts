@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { AgentBrowserAdapter } from '../../src/browser/agent-browser.js';
+import type { DnsLookup } from '../../src/network-policy.js';
+
+/** Hermetic DNS: example.com/example.org resolve to a public IP without external network. */
+const stubLookup: DnsLookup = async () => [{ address: '93.184.216.34', family: 4 }];
 
 function fakeScript(): string {
   return `#!/usr/bin/env node
@@ -33,7 +37,7 @@ async function makeAdapter() {
   await mkdir(join(runtimeRoot, 'screenshots'), { recursive: true });
   await writeFile(executablePath, fakeScript(), { mode: 0o700 });
   await chmod(executablePath, 0o700);
-  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot });
+  const adapter = new AgentBrowserAdapter({ executablePath, runtimeRoot, dnsLookup: stubLookup });
   return { adapter, root };
 }
 
