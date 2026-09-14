@@ -25,6 +25,7 @@
     "bench:cli-spawn": "node --import tsx bench/cli-spawn-bench.mjs"
   },
   "dependencies": {
+    "@google/genai": "1.52.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "tsx": "^4.21.0",
     "unpdf": "^1.8.1"

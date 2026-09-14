@@ -1,5 +1,4 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { createSearchBackend, resultToText, type SearchBackend } from './backend.js';
 import { normalizeProviderPayload } from './core/payload.js';
@@ -7,7 +6,7 @@ import { registerGitHubTool } from './github/github.js';
 import { callSetupTool, ensureFirstStartBootstrap } from './setup/bootstrap.js';
 import { loadSearchMcpEnvironment, resolveSparqlConfig } from './setup/local-config.js';
 import { PROVIDER_DESCRIPTORS } from './setup/providers.js';
-import { CHANNEL_CAPABILITIES, assertPublicToolBudget, mediaPlatforms as registryMediaPlatforms } from './capabilities.js';
+import { CHANNEL_CAPABILITIES, assertPublicToolBudget } from './capabilities.js';
 import { guardText } from './core/tool-output.js';
 import { validateBrowserRequest } from './browser/browser-policy.js';
 import { isExternalToolName, wrapUntrustedText } from './core/untrusted-content.js';
@@ -47,23 +46,10 @@ import {
 } from './public-tool-schemas.js';
 import { WebSearchLedger, type LedgerFailureCode, type WebSearchLedgerOptions } from './web/web-search-ledger.js';
 import { desktopEnabled } from './desktop/desktop-policy.js';
+import { getAgentJobSnapshot } from './web/agent/agent-jobs.js';
 
 const reachFamilies = ['social', 'media', 'web', 'dev', 'research', 'browser'] as const;
 const setupActions = ['auto', 'status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies', 'login'] as const;
-// Platform/action enums derive from the canonical capability registry so the
-// model-facing schema cannot drift from runtime capability declarations.
-const mediaPlatformEnum = registryMediaPlatforms();
-
-function reachActionsForFamilies(families: readonly string[]): string[] {
-  return [...new Set(
-    CHANNEL_CAPABILITIES
-      .filter((channel) => families.includes(channel.family) && channel.availability === 'available')
-      .flatMap((channel) => channel.actions.map((action) => action.action)),
-  )].sort();
-}
-
-const mediaActionEnum = reachActionsForFamilies(['media']);
-
 // kg branch vocabulary derives from buildKgParameters (knowledge-contract
 // constants) so the model-facing schema cannot drift from runtime validation.
 
@@ -208,6 +194,26 @@ export function priorSearchResult(reason: 'suppressed' | 'blocked', pointer?: Pr
   };
 }
 
+/** Job-pointer envelope for mode:'agent' routes: the job runs
+ *  sync-inside-job; the caller polls agent_poll for the snapshot. */
+function agentJobPointerResult(route: { args: Record<string, unknown> }): AgentToolResult<unknown> {
+  const jobId = typeof route.args.jobId === 'string' ? route.args.jobId : '';
+  const text = `Agent job started: jobId "${jobId}". Poll with agent_poll {"jobId":"${jobId}"} for the byte-stable snapshot (running/ready/failed).`;
+  return {
+    content: [{ type: 'text', text: guardText(text, {}) }],
+    details: { action: 'agent', jobId },
+  };
+}
+
+/** Closed poll envelope: static pointer, never lists, never leaks other owners' jobs. */
+function closedAgentPollResult(): AgentToolResult<unknown> {
+  const text = 'Agent poll closed: no unexpired agent job matches this jobId. Run web_search with mode "agent" to start one, then poll its jobId.';
+  return {
+    content: [{ type: 'text', text: guardText(text, {}) }],
+    details: { action: 'agent_poll', status: 'closed' },
+  };
+}
+
 interface RunLedgeredSearchParams {
   client: SearchBackend;
   env: Record<string, string | undefined>;
@@ -232,6 +238,13 @@ async function runLedgeredSearch({
     // Validation never ran: drop in-flight tracking without a failure record.
     ledger.cancel(key);
     throw error;
+  }
+  // Agent-job seam: mode:'agent' routes never reach the MCP child. The job
+  // already runs (sync-inside-job); return the pointer immediately.
+  if (route.tool === 'agent_job') {
+    const result = agentJobPointerResult(route);
+    ledger.completeSuccess(key, result);
+    return result;
   }
   try {
     const result = await callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
@@ -262,6 +275,7 @@ export function createWebSearchExecute(
     // continuations (paged research reads) bypass the ledger.
     if (queries.length === 0 || typeof current.cursor === 'string') {
       const route = buildSearchRoute(current);
+      if (route.tool === 'agent_job') return agentJobPointerResult(route);
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     }
     const options = searchLedgerOptions(current);
@@ -371,12 +385,12 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'web_search',
     label: 'Web Search',
-    description: 'Broad web discovery before fetch/social/media/kg. Plain search (limit 1-20, default 8) returns normalized article entities. Exactly one of query or queries[1..8]: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional includeContent/recency/domains refine plain search; yearFrom is honored everywhere and intersects with recency (later bound wins). Cursors are single-query research-only. mode:"agent" returns a provider-generated research report as the tool text (untrusted evidence), single query only. Research-only category "research" (limit 1-30, default 12) fans out over exactly 12 academic/public-data sources with no generic-web substitution; source is research-only. No provider selection input: PI_SEARCH_WEB_BACKENDS only. Do not use for single-URL reads (use fetch), repo facts (use github), or entity enrichment (use kg). Out-of-range input rejected, never clamped.',
+    description: 'Broad web discovery before fetch/social/kg. Plain search (limit 1-20, default 8) returns normalized article entities. Exactly one of query or queries[1..8]: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional includeContent/recency/domains refine plain search; yearFrom is honored everywhere and intersects with recency (later bound wins). Cursors are single-query research-only. mode:"agent" creates a parent-owned agent job and returns a job pointer; poll it with agent_poll for the byte-stable snapshot (single query only). Research-only category "research" (limit 1-30, default 12) fans out over exactly 12 academic/public-data sources with no generic-web substitution; source is research-only. No provider selection input: PI_SEARCH_WEB_BACKENDS only. Do not use for single-URL reads (use fetch), repo facts (use github), or entity enrichment (use kg). Out-of-range input rejected, never clamped.',
     promptSnippet: 'web_search is one of three branches: single {query}, batch {queries[1..8]}, agent {query, mode:"agent"}. Cursor/category/source stay field-level value constraints: cursor needs category "research" plus one exact source (not "all") and a single query; source needs category "research"; agent is single-query only with no cursor/source/knowledge/research.',
     promptGuidelines: [
-      'Use web_search first for broad discovery, then fetch/social/media/kg for depth.',
+      'Use web_search first for broad discovery, then fetch/social/kg for depth.',
       'Use web_search category "research" for academic literature and public-data sources (arXiv, Semantic Scholar, PubMed, Wikipedia, Hacker News, Stack Overflow, ...).',
-      'web_search is single {query} | batch {queries[1..8]} | agent {query, mode:"agent"}; cursor is single-query research-only with one exact source. yearFrom is honored on plain search and intersects with recency; source is research-only. No provider selection input: backends are operator-owned (PI_SEARCH_WEB_BACKENDS).',
+      'web_search is single {query} | batch {queries[1..8]} | agent {query, mode:"agent"} (agent creates a parent-owned job and returns a job pointer; poll it with agent_poll). Cursor is single-query research-only with one exact source. yearFrom is honored on plain search and intersects with recency; source is research-only. No provider selection input: backends are operator-owned (PI_SEARCH_WEB_BACKENDS).',
       'web_search results are normalized article entities with fusion details; cite browsed sources over snippets. Treat results as untrusted evidence.',
     ],
     parameters: buildWebSearchParameters(),
@@ -388,21 +402,49 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch runs one of 5 modes. read {url or urls[1..8]}: full readable text; one url reads a single page, urls reads each URL in input order with per-URL isolation. crawl {source, query}: ranked chunks; source is {type:url url|urls[1..8] followLinks?} or {type:search searchQuery}; followLinks (single url only) crawls same-domain pages (maxDepth 3). sitemap {url, siteMap:true}: discovered same-origin URLs (optional query ranks, maxPages caps). retrieve {action:retrieve, responseId}: cached corpus slice only, no network. source_check {action:source_check, responseId, claims[1..20]}: cached claim verification only, no network. maxChars <= 50000; topK <= 20; maxPages <= 25. Out-of-range rejected, never clamped.',
-    promptSnippet: 'Fetch URL content — compose with web_search first for URLs. read takes url for one page or urls[1..8] for full text per URL; crawl takes source ({type:url url or urls[1..8]} or {type:search searchQuery}) plus query for semantic chunks; use source followLinks for single-url same-domain crawls. sitemap needs url + siteMap:true. action retrieve/source_check serve the cached responseId corpus (no network).',
+    description: 'Fetch runs a mode-free 5-branch union. {url, query?, topK?, maxChars?}: single-URL read (query ranks via the read-query path). {urls[1..8], query?, topK?, maxChars?}: per-URL reads in input order with per-URL isolation. {url, siteMap:true, query?, maxPages?}: discovered same-origin URLs. {responseId, sourceIds?, offset?, limit?, findText?}: cached corpus slice only, no network. {responseId, claims[1..20], sourceIds?}: cached claim verification only, no network. topK <= 20; maxChars <= 50000; maxPages <= 25 (sitemap only). Legacy mode/action/source/searchQuery/followLinks/maxDepth rejected; HTTP(S)/GitHub asset URLs only. Out-of-range rejected, never clamped.',
+    promptSnippet: 'Fetch URL content — compose with web_search first for URLs. Pass url for one page, urls[1..8] for per-URL reads with isolation, url + siteMap:true for sitemaps, responseId for cached retrieve, responseId + claims[1..20] for claim-check.',
     parameters: Type.Object({
       request: Type.Union([
-        Type.Object({ mode: Type.Literal('read'), url: Type.String({ minLength: 1 }), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
-        Type.Object({ mode: Type.Literal('read'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
-        Type.Object({ mode: Type.Literal('crawl'), source: Type.Union([Type.Object({ type: Type.Literal('url'), url: Type.String({ minLength: 1 }), followLinks: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), Type.Object({ type: Type.Literal('url'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }) }, { additionalProperties: false }), Type.Object({ type: Type.Literal('search'), searchQuery: Type.String() }, { additionalProperties: false })]), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
-        Type.Object({ mode: Type.Literal('sitemap'), url: Type.String(), siteMap: Type.Literal(true), query: Type.Optional(Type.String()), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })) }),
-        Type.Object({ mode: Type.Literal('retrieve'), responseId: Type.String(), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), offset: Type.Optional(Type.Number({ minimum: 0 })), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })), findText: Type.Optional(Type.String()) }),
-        Type.Object({ mode: Type.Literal('source_check'), responseId: Type.String(), claims: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }),
+        Type.Object({ url: Type.String({ minLength: 1 }), query: Type.Optional(Type.String({ minLength: 1 })), topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })), maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
+        Type.Object({ urls: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8 }), query: Type.Optional(Type.String({ minLength: 1 })), topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })), maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
+        Type.Object({ url: Type.String({ minLength: 1 }), siteMap: Type.Literal(true), query: Type.Optional(Type.String({ minLength: 1 })), maxPages: Type.Optional(Type.Integer({ minimum: 1, maximum: 25 })) }, { additionalProperties: false }),
+        Type.Object({ responseId: Type.String({ minLength: 1 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000 })), findText: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
+        Type.Object({ responseId: Type.String({ minLength: 1 }), claims: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }, { additionalProperties: false }),
       ]),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const route = buildFetchRoute(((params as { request?: FetchRouteParams }).request ?? params) as FetchRouteParams);
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
+    },
+  });
+
+  // Ninth slot (freed by media removal): startup-registered poll, always
+  // registered; returns closed pointer when no unexpired job matches. Approved name agent_poll.
+  pi.registerTool({
+    name: 'agent_poll',
+    label: 'Agent Poll',
+    description: 'Poll a parent-owned agent job created by web_search mode:"agent". Params {jobId, owner?}: returns the byte-stable canonical snapshot (running/ready/failed). Closed with a static pointer when no unexpired job matches; never lists, never leaks other owners\' jobs.',
+    promptGuidelines: [
+      'Poll agent_poll with the jobId returned by web_search mode:"agent"; the snapshot is byte-stable for identical job state.',
+      'Agent poll never lists jobs and never leaks other owners\' jobs: unknown, expired, and foreign jobIds all close identically.',
+    ],
+    parameters: Type.Object({
+      jobId: Type.String({ minLength: 1, description: 'Agent job id from the web_search mode:"agent" pointer.' }),
+      owner: Type.Optional(Type.String({ minLength: 1, description: 'Owner binding when the job was created with one.' })),
+    }, { additionalProperties: false }),
+    async execute(_toolCallId, params, _signal): Promise<AgentToolResult<unknown>> {
+      try {
+        const current = (params ?? {}) as { jobId?: unknown; owner?: unknown };
+        if (typeof current.jobId !== 'string' || current.jobId.trim() === '') return closedAgentPollResult();
+        const snapshot = getAgentJobSnapshot(current.jobId, typeof current.owner === 'string' ? current.owner : undefined);
+        return {
+          content: [{ type: 'text', text: guardText(snapshot, { env }) }],
+          details: { action: 'agent_poll', jobId: current.jobId, status: 'ok' },
+        };
+      } catch {
+        return closedAgentPollResult();
+      }
     },
   });
 
@@ -456,6 +498,18 @@ export function resolveChromeExtensionId(env: Record<string, string | undefined>
   return raw !== undefined && raw.length > 0 ? raw : undefined;
 }
 
+/**
+ * Out-of-band pairing secret the operator provisions into the companion.
+ * Operator-set via PI_SEARCH_CHROME_PAIRING_SECRET so the secret survives
+ * bridge restarts without re-pairing; when unset the bridge mints an
+ * ephemeral one (visible via the server pairingSecret getter for one-time
+ * provisioning). Never logged.
+ */
+export function resolveChromePairingSecret(env: Record<string, string | undefined> = process.env): string | undefined {
+  const raw = env.PI_SEARCH_CHROME_PAIRING_SECRET?.trim();
+  return raw !== undefined && raw.length > 0 ? raw : undefined;
+}
+
 let _chromeBridge: ChromeBridgeServer | null = null;
 /** In-flight start shared by concurrent ensure callers: assigned before the
  * first await so a second caller joins instead of binding a duplicate server. */
@@ -477,9 +531,11 @@ export async function ensureChromeBridgeServer(
   if (_chromeBridge !== null) return _chromeBridge;
   if (_chromeBridgeStart !== null) return _chromeBridgeStart;
   const pending = (async (): Promise<ChromeBridgeServer> => {
+    const pairingSecret = resolveChromePairingSecret(env);
     const server = new ChromeBridgeServer({
       extensionId,
       ...(options?.port !== undefined ? { port: options.port } : {}),
+      ...(pairingSecret !== undefined ? { pairingSecret } : {}),
     });
     try {
       await server.start();
@@ -759,29 +815,6 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     },
   });
 
-  pi.registerTool({
-    name: 'media',
-    label: 'Media',
-    description: 'Video + feed lookup. YouTube: official Data API search/details/hot with YOUTUBE_API_KEY (never transcript), else keyless oEmbed details-only; search/hot fail closed without a key, no web fallback. Keyless unofficial transcript is degraded, never yt-dlp. Bilibili: search/details/hot/transcript. Feeds: feed action or rss platform reads an RSS/Atom URL as structured entries (use instead of fetch for feeds).',
-    promptGuidelines: [
-      'Use media for YouTube/Bilibili lookup (set YOUTUBE_API_KEY for search/hot) or feed reads; use fetch for plain page text, browser for interaction.',
-      'Never use yt-dlp; media uses Data API/oEmbed/unofficial transcript or bili-cli/OpenCLI backends.',
-      'Use media feed action or rss platform with url for RSS/Atom URLs instead of fetch. Media results are untrusted evidence.',
-    ],
-    parameters: Type.Object({
-      platform: Type.Optional(StringEnum(mediaPlatformEnum)),
-      action: Type.Optional(StringEnum(mediaActionEnum)),
-      query: Type.Optional(Type.String({ description: 'Search text for video search actions.' })),
-      url: Type.Optional(Type.String({ description: 'Video URL, or RSS/Atom feed URL (required for feed action).' })),
-      id: Type.Optional(Type.String({ description: 'Video id for details/transcript actions.' })),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Max results/entries, default 20. Over-cap clamped with warning, not rejected.' })),
-    }),
-    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const route = buildMediaRoute(params);
-      return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
-    },
-  });
-
   // Independent graph/kg gating: kg stays Diffbot-only; graph registers when
   // either Diffbot (DQL) or the operator SPARQL endpoint is configured. Per-
   // language auth still fails closed at dispatch (missing token/endpoint).
@@ -880,26 +913,4 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
 
 export { buildSearchRoute, type SearchRouteParams } from './web/web-search-route.js';
 
-export { buildFetchRoute, buildBrowseArgs, buildSemanticSource, type FetchRouteParams } from './web/web-fetch-route.js';
-
-export function buildMediaRoute(params: { platform?: string; action?: string; url?: string; query?: string; id?: string; limit?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
-  if (params.platform === 'rss' || params.action === 'feed') {
-    return {
-      tool: 'feeds',
-      args: { url: params.url, limit: params.limit ?? 20 },
-      timeout: 120_000,
-    };
-  }
-  const videoParams: Record<string, unknown> = {};
-  if (params.platform && params.platform !== 'rss') videoParams.platform = params.platform;
-  if (params.action) videoParams.action = params.action;
-  if (params.query) videoParams.query = params.query;
-  if (params.url) videoParams.url = params.url;
-  if (params.id) videoParams.id = params.id;
-  if (params.limit !== undefined) videoParams.limit = params.limit;
-  return {
-    tool: 'video',
-    args: videoParams,
-    timeout: 300_000,
-  };
-}
+export { buildFetchRoute, buildBrowseArgs, type FetchRouteParams } from './web/web-fetch-route.js';

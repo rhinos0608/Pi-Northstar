@@ -218,6 +218,16 @@ Setting `DIFFBOT_TOKEN` routes paid traffic to Diffbot endpoints. Read this befo
 - Status: native adapters landed (`src/diffbot-transport.ts`, `src/diffbot-search.ts`, `src/diffbot-extract.ts`, `src/diffbot-kg.ts`, `src/knowledge-contract.ts`); `web_search`/`kg`/registry wiring registered. No behavior without `DIFFBOT_TOKEN`.
 - Canonical docs: [overview](https://www.diffbot.com/docs/) · [authentication](https://www.diffbot.com/docs/authentication) · [Extract/Analyze](https://www.diffbot.com/docs/extract/article) · [DQL](https://www.diffbot.com/docs/dql/post) · [Enhance](https://www.diffbot.com/docs/enhance/post) · [Web Search](https://www.diffbot.com/docs/web-search/post) · [NL process text](https://www.diffbot.com/docs/natural-language/process-text).
 
+## Vision / multimodal privacy warning (read before enabling)
+
+Image/PDF/video understanding sends content off-machine. Read this before setting any `PI_VISION_*`, `GEMINI_*`, `GOOGLE_*`, or Vertex vision variable.
+
+- **What leaves the machine.** Every vision call sends the admitted image/PDF/video bytes plus the OCR/description text derived from them to the operator-configured destination: the `PI_VISION_OPENAI_COMPAT_BASE_URL` endpoint (loopback or cloud), Google (`GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` Developer API or `GOOGLE_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` Vertex), or the Gemini web session (`PI_VISION_GEMINI_WEB_ENABLED=1`). Do not submit content you are not authorized to share.
+- **Explicit opt-in only.** Nothing leaves the machine until the operator configures a destination: unconfigured tiers are skipped and pipelines degrade to native evidence with warnings. `gemini-web` is additionally gated behind the exact value `PI_VISION_GEMINI_WEB_ENABLED=1` (disabled default, last resort) and `vision-private-gate` behind `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`.
+- **Private GitHub content needs the independent flag.** Public transfer is authorized by configuring the destination endpoint/credential, but private or authenticated GitHub content additionally requires the exact value `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`. Without it, private content never reaches any cloud vision endpoint — calls degrade to native evidence with warnings.
+- **Synthetic probe first.** Each exact model ID is probe-gated with a tiny synthetic image before any user content is sent; text-only / non-vision models reject fail-closed and never receive user bytes.
+- **Policy/auth failure never broadens eligibility.** A failure drops the failed tier (fail-closed subset); it never unlocks a tier the operator did not configure.
+
 ## Quick start
 
 Two ways to bring Pi-Northstar into `pi`:

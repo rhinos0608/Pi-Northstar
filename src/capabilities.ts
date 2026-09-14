@@ -14,7 +14,19 @@ import { SOCIAL_CANONICAL_ACTIONS as STAGE2_CANONICAL_ACTIONS } from './social/s
 
 export type ReachFamily = 'social' | 'media' | 'web' | 'dev' | 'research' | 'browser';
 
-export type PublicToolName = 'web_search' | 'github' | 'social' | 'media' | 'browser' | 'kg' | 'graph';
+export type PublicToolName =
+  | 'web_search'
+  | 'fetch'
+  | 'github'
+  | 'social'
+  | 'kg'
+  | 'graph'
+  | 'browser'
+  | 'desktop'
+  | 'agent_poll';
+
+/** Registry marker for internal-acquisition channels with no public tool surface. */
+export type InternalAcquisitionName = 'internal-acquisition';
 
 /** Public surface budget: at most nine model-facing tools. Future domains
  *  require profiles or retrieval/describe redesign, not silent growth. */
@@ -68,7 +80,7 @@ export interface ProviderCapability {
 export interface ChannelCapability {
   id: string;
   family: ReachFamily;
-  publicTool: PublicToolName;
+  publicTool: PublicToolName | InternalAcquisitionName;
   availability: 'available' | 'planned';
   description: string;
   tier: 0 | 1 | 2;
@@ -155,7 +167,7 @@ export const CHANNEL_CAPABILITIES: readonly ChannelCapability[] = [
   {
     id: 'rss',
     family: 'media',
-    publicTool: 'media',
+    publicTool: 'internal-acquisition',
     availability: 'available',
     description: 'RSS and Atom feed reading',
     tier: 0,
@@ -430,7 +442,7 @@ export const CHANNEL_CAPABILITIES: readonly ChannelCapability[] = [
   {
     id: 'youtube',
     family: 'media',
-    publicTool: 'media',
+    publicTool: 'internal-acquisition',
     availability: 'available',
     description: 'YouTube search, details, and hot via the official Data API, with keyless oEmbed fallback for details',
     tier: 1,
@@ -480,7 +492,7 @@ export const CHANNEL_CAPABILITIES: readonly ChannelCapability[] = [
   {
     id: 'bilibili',
     family: 'media',
-    publicTool: 'media',
+    publicTool: 'internal-acquisition',
     availability: 'available',
     description: 'Bilibili search, hot videos, details, and subtitles',
     tier: 1,
