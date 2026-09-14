@@ -91,11 +91,154 @@ describe('web-access pdf: bounded local extraction, page citations, no OCR/cloud
     assert.equal(typeof loaded, 'function');
   });
 
+  it('bounds huge-page-count PDFs: numPages gate first, only first 50 pages read', async () => {
+    const { loadUnpdfExtractor, WEB_ACCESS_PDF_MAX_PAGES } = await import(
+      '../../../src/web/access/web-access-pdf.js'
+    );
+    const requested: number[] = [];
+    let destroyed = false;
+    const fakeModule = {
+      getDocumentProxy: async () => ({
+        numPages: 200,
+        getPage: async (n: number) => {
+          requested.push(n);
+          return { getTextContent: async () => ({ items: [{ str: `t${n}`, hasEOL: false }] }) };
+        },
+        loadingTask: {
+          destroy: async () => {
+            destroyed = true;
+          },
+        },
+      }),
+    };
+    const extractor = await loadUnpdfExtractor(fakeModule);
+    assert.equal(typeof extractor, 'function');
+    const raw = await extractor?.(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {});
+    assert.equal(raw?.totalPages, 200);
+    assert.equal(raw?.pages.length, WEB_ACCESS_PDF_MAX_PAGES);
+    assert.deepEqual(requested, Array.from({ length: WEB_ACCESS_PDF_MAX_PAGES }, (_, i) => i + 1));
+    assert.equal(destroyed, true);
+    // End-to-end through the page/char capper: still reports 200, keeps 50.
+    const { extractWebAccessPdfText } = await import('../../../src/web/access/web-access-pdf.js');
+    const out = await extractWebAccessPdfText(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {
+      extractor: extractor as (data: Uint8Array) => Promise<{ totalPages: number; pages: string[] }>,
+    });
+    assert.equal(out.totalPages, 200);
+    assert.equal(out.pages.length, WEB_ACCESS_PDF_MAX_PAGES);
+    assert.equal(out.truncated, true);
+  });
+
+  it('destroys the eventual proxy when abort/timeout fires before open settles', async () => {
+    const { extractBoundedProxyPages, extractWebAccessPdfText } = await import(
+      '../../../src/web/access/web-access-pdf.js'
+    );
+    // Abort before open settles: eventual proxy destroyed, read rejects.
+    let destroyedBeforeOpen = false;
+    let resolveOpen!: (proxy: never) => void;
+    const gate = new Promise<never>((resolve) => {
+      resolveOpen = resolve;
+    });
+    const controller = new AbortController();
+    const task = extractBoundedProxyPages(() => gate, 50, controller.signal);
+    controller.abort();
+    resolveOpen({
+      numPages: 1,
+      getPage: async () => ({
+        getTextContent: async () => ({ items: [{ str: 'late', hasEOL: false }] }),
+      }),
+      loadingTask: {
+        destroy: async () => {
+          destroyedBeforeOpen = true;
+        },
+      },
+    } as unknown as never);
+    await assert.rejects(task);
+    assert.equal(destroyedBeforeOpen, true);
+    // Timeout path: withTimeout aborts the controller while open is pending;
+    // the late proxy is still destroyed instead of leaking.
+    let destroyedOnTimeout = false;
+    let resolveLate!: (proxy: never) => void;
+    const lateGate = new Promise<never>((resolve) => {
+      resolveLate = resolve;
+    });
+    const pendingText = extractWebAccessPdfText(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {
+      extractor: (_data: Uint8Array, options?: { signal?: AbortSignal | undefined }) =>
+        extractBoundedProxyPages(() => lateGate, 50, options?.signal),
+      timeoutMs: 10,
+    });
+    // Attach early so the timeout rejection at 10ms is handled before the
+    // late proxy resolves below; assert.rejects still observes it afterwards.
+    void pendingText.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    resolveLate({
+      numPages: 1,
+      getPage: async () => ({
+        getTextContent: async () => ({ items: [{ str: 'late', hasEOL: false }] }),
+      }),
+      loadingTask: {
+        destroy: async () => {
+          destroyedOnTimeout = true;
+        },
+      },
+    } as unknown as never);
+    await assert.rejects(pendingText, /timed out|timeout/i);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(destroyedOnTimeout, true);
+  });
+
   it('isPdfUrl infers format internally from path or content type', async () => {
     const { isPdfUrl } = await import('../../../src/web/access/web-access-pdf.js');
     assert.equal(isPdfUrl('https://example.com/doc.pdf'), true);
     assert.equal(isPdfUrl('https://example.com/a', 'application/pdf'), true);
     assert.equal(isPdfUrl('https://example.com/a', 'text/html'), false);
     assert.equal(isPdfUrl('https://example.com/a'), false);
+  });
+
+  it('rejects mid-read abort during page 2 of N and destroys the proxy', async () => {
+    const { extractBoundedProxyPages, extractWebAccessPdfText } = await import(
+      '../../../src/web/access/web-access-pdf.js'
+    );
+    // Proxy-level: abort fires while page 2 getTextContent is in flight.
+    // The late-resolving read must not return success; proxy destroyed once.
+    let destroyed = 0;
+    let releasePage2!: () => void;
+    const page2Gate = new Promise<void>((resolve) => {
+      releasePage2 = resolve;
+    });
+    const controller = new AbortController();
+    const task = extractBoundedProxyPages(
+      async () => ({
+        numPages: 5,
+        getPage: async (n: number) => ({
+          getTextContent: async () => {
+            if (n === 2) await page2Gate;
+            return { items: [{ str: `t${n}`, hasEOL: false }] };
+          },
+        }),
+        loadingTask: {
+          destroy: async () => {
+            destroyed += 1;
+          },
+        },
+      }),
+      50,
+      controller.signal,
+    );
+    void task.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    releasePage2();
+    await assert.rejects(task);
+    assert.equal(destroyed, 1);
+    // Extractor-level: signal-ignoring extractor resolving after abort still rejects.
+    const slowController = new AbortController();
+    const pending = extractWebAccessPdfText(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {
+      extractor: () => new Promise((resolve) => setTimeout(() => resolve({ totalPages: 1, pages: ['late'] }), 30)),
+      signal: slowController.signal,
+      timeoutMs: 1000,
+    });
+    void pending.catch(() => {});
+    slowController.abort();
+    await assert.rejects(pending);
   });
 });

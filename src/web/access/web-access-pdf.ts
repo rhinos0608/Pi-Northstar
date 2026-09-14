@@ -84,66 +84,148 @@ export async function extractWebAccessPdfText(
   const timeoutMs = options.timeoutMs ?? WEB_ACCESS_PDF_TIMEOUT_MS;
   const controller = new AbortController();
   if (options.signal) options.signal.addEventListener('abort', () => controller.abort(), { once: true });
-  const raw = await withTimeout(options.extractor(data, { signal: controller.signal }), timeoutMs, controller);
-  const totalPages = Number.isInteger(raw.totalPages) && raw.totalPages >= 0 ? raw.totalPages : raw.pages.length;
-  const kept = raw.pages.slice(0, maxPages).map((text, index) => ({ page: index + 1, text: cleanPageText(text, maxChars) }));
-  const citations = kept.map((p) => ({ page: p.page, cite: `[p. ${p.page}]` }));
-  // Page-cited body: `[p. N]` marker then page text. Char cap keeps citations.
-  let text = '';
-  for (const [index, page] of kept.entries()) {
-    const chunk = `${citations[index]?.cite ?? `[p. ${page.page}]`}\n${page.text}\n\n`;
-    if ((text + chunk).length > maxChars + 500) break;
-    text += chunk;
-  }
-  text = text.trimEnd();
+  let onExternalAbort: (() => void) | undefined;
+  const externalAbort =
+    options.signal !== undefined
+      ? new Promise<never>((_, reject) => {
+          onExternalAbort = () => {
+            const reason = options.signal?.reason;
+            reject(reason instanceof Error ? reason : new Error('PDF extraction aborted'));
+          };
+        })
+      : undefined;
+  if (options.signal !== undefined && onExternalAbort !== undefined)
+    options.signal.addEventListener('abort', onExternalAbort, { once: true });
+  try {
+    const extraction = withTimeout(options.extractor(data, { signal: controller.signal }), timeoutMs, controller);
+    const raw =
+      externalAbort !== undefined ? await Promise.race([extraction, externalAbort]) : await extraction;
+    options.signal?.throwIfAborted();
+    const totalPages = Number.isInteger(raw.totalPages) && raw.totalPages >= 0 ? raw.totalPages : raw.pages.length;
+    const kept = raw.pages.slice(0, maxPages).map((text, index) => ({ page: index + 1, text: cleanPageText(text, maxChars) }));
+    const citations = kept.map((p) => ({ page: p.page, cite: `[p. ${p.page}]` }));
+    // Page-cited body: `[p. N]` marker then page text. Char cap keeps citations.
+    let text = '';
+    for (const [index, page] of kept.entries()) {
+      const chunk = `${citations[index]?.cite ?? `[p. ${page.page}]`}\n${page.text}\n\n`;
+      if ((text + chunk).length > maxChars + 500) break;
+      text += chunk;
+    }
+    text = text.trimEnd();
   if (text.length > maxChars) text = text.slice(0, maxChars);
   return { totalPages, pages: kept, citations, text, truncated: totalPages > kept.length || text.length >= maxChars };
+  } finally {
+    if (options.signal !== undefined && onExternalAbort !== undefined)
+      options.signal.removeEventListener('abort', onExternalAbort);
+  }
 }
 
 // ── Optional unpdf loader (dynamic, manifest untouched) ──
-// unpdf ^1.8.1 exposes `extractText(data, { mergePages })`. Shape varies
-// (string vs string[] text), so adapt best-effort to per-page output. No OCR:
-// never passes image/OCR options; scanned-image PDFs yield empty page text.
+// unpdf ^1.8.1 exposes `getDocumentProxy(data)` plus per-page `getPage(n)`.
+// The loader opens the proxy, gates on `numPages`, and reads only the first
+// capped pages — never `extractText`, which fans out over ALL pages and
+// outlives the caller timeout on huge-page-count PDFs. No OCR: never passes
+// image/OCR options; scanned-image PDFs yield empty page text.
 
-interface UnpdfModule {
-  extractText?: (data: Uint8Array, options?: Record<string, unknown>) => Promise<unknown>;
+interface UnpdfPageProxy {
+  getTextContent: () => Promise<{ items: Array<{ str?: unknown; hasEOL?: unknown }> }>;
 }
 
-function adaptUnpdfResult(result: unknown): WebAccessPdfRawResult {
-  if (typeof result === 'object' && result !== null) {
-    const record = result as Record<string, unknown>;
-    const totalPages =
-      typeof record.totalPages === 'number' && Number.isInteger(record.totalPages)
-        ? (record.totalPages as number)
-        : Array.isArray(record.text)
-          ? (record.text as unknown[]).length
-          : 1;
-    if (Array.isArray(record.text)) {
-      return { totalPages, pages: (record.text as unknown[]).map((t) => (typeof t === 'string' ? t : '')) };
-    }
-    if (typeof record.text === 'string') return { totalPages, pages: [record.text as string] };
+interface UnpdfDocumentProxy {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<UnpdfPageProxy>;
+  loadingTask?: { destroy: () => Promise<void> } | undefined;
+  destroy?: () => Promise<void> | void;
+}
+
+interface UnpdfModule {
+  getDocumentProxy?: (data: Uint8Array, options?: Record<string, unknown>) => Promise<UnpdfDocumentProxy>;
+}
+
+/** Join one page's text items the same way `unpdf` does (`str + hasEOL break`). */
+function joinPageItems(items: Array<{ str?: unknown; hasEOL?: unknown }>): string {
+  return items
+    .filter((item) => typeof item.str === 'string')
+    .map((item) => `${item.str as string}${item.hasEOL === true ? '\n' : ''}`)
+    .join('');
+}
+
+async function destroyProxy(proxy: UnpdfDocumentProxy): Promise<void> {
+  try {
+    if (proxy.loadingTask) await proxy.loadingTask.destroy();
+    else if (typeof proxy.destroy === 'function') await proxy.destroy();
+  } catch {
+    // Best-effort cleanup; extraction result already captured.
   }
-  if (typeof result === 'string') return { totalPages: 1, pages: [result] };
-  return { totalPages: 0, pages: [] };
+}
+
+/**
+ * Bounded extraction over an already-opened document proxy: inspect
+ * `numPages` first, then read only the first `maxPages` pages. Never fans
+ * out across the full page count, so a sub-10MB huge-page-count PDF cannot
+ * outlive the caller timeout in per-page parsing.
+ */
+export async function extractBoundedProxyPages(
+  openProxy: () => Promise<UnpdfDocumentProxy>,
+  maxPages: number,
+  signal?: AbortSignal | undefined,
+): Promise<WebAccessPdfRawResult> {
+  signal?.throwIfAborted();
+  const pending = openProxy();
+  let cleaned = false;
+  const cleanupOnce = (proxy: UnpdfDocumentProxy): Promise<void> => {
+    if (cleaned) return Promise.resolve();
+    cleaned = true;
+    return destroyProxy(proxy);
+  };
+  // getDocumentProxy takes no signal option: when abort/timeout fires before
+  // open settles, destroy the eventual proxy when it resolves instead of leaking it.
+  pending.then(
+    (proxy) => {
+      if (signal?.aborted) void cleanupOnce(proxy);
+    },
+    () => {},
+  );
+  const proxy = await pending;
+  signal?.throwIfAborted();
+  // Abort during page reads cannot cancel in-flight getPage promises either:
+  // destroy the proxy promptly instead of waiting for page completion.
+  const onAbortDuringRead = (): void => {
+    void cleanupOnce(proxy);
+  };
+  signal?.addEventListener('abort', onAbortDuringRead, { once: true });
+  try {
+    const totalPages =
+      Number.isInteger(proxy.numPages) && (proxy.numPages as number) >= 0 ? (proxy.numPages as number) : 0;
+    const pageCount = Math.min(totalPages, maxPages);
+    const pages: string[] = [];
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      signal?.throwIfAborted();
+      const page = await proxy.getPage(pageNumber);
+      signal?.throwIfAborted();
+      const content = await page.getTextContent();
+      signal?.throwIfAborted();
+      pages.push(joinPageItems(Array.isArray(content.items) ? content.items : []));
+    }
+    return { totalPages, pages };
+  } finally {
+    signal?.removeEventListener('abort', onAbortDuringRead);
+    await cleanupOnce(proxy);
+  }
 }
 
 /** Dynamically import `unpdf` when installed; `undefined` when absent. */
-export async function loadUnpdfExtractor(): Promise<WebAccessPdfExtractor | undefined> {
+export async function loadUnpdfExtractor(injected?: unknown): Promise<WebAccessPdfExtractor | undefined> {
   let mod: UnpdfModule;
   try {
     // Hard dependency (package.json): dynamic import keeps startup lazy.
-    // @ts-ignore - unpdf has no bundled types here; runtime shape checked below.
-    mod = (await import('unpdf')) as UnpdfModule;
+    // `injected` is a test-only seam (fake proxy module); production omits it.
+    mod = ((injected as UnpdfModule | undefined) ?? ((await import('unpdf')) as UnpdfModule));
   } catch {
     return undefined;
   }
-  if (typeof mod.extractText !== 'function') return undefined;
-  const extractText = mod.extractText.bind(mod);
+  if (typeof mod.getDocumentProxy !== 'function') return undefined;
+  const getDocumentProxy = mod.getDocumentProxy.bind(mod);
   return async (data: Uint8Array, options?: { signal?: AbortSignal | undefined }) =>
-    adaptUnpdfResult(
-      await extractText(data, {
-        mergePages: false,
-        ...(options?.signal !== undefined ? { signal: options.signal } : {}),
-      }),
-    );
+    extractBoundedProxyPages(() => getDocumentProxy(data), WEB_ACCESS_PDF_MAX_PAGES, options?.signal);
 }
