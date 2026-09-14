@@ -333,3 +333,67 @@ test('companion: poll loop starts, heartbeats, and idles without busy-loop', asy
   const inst = (await (chrome as unknown as { storage: { session: { get: (k: string) => Promise<Record<string, unknown>> } } }).storage.session.get(instKey))[instKey] as Record<string, unknown>;
   assert.ok(inst && typeof inst.lastSeen === 'number', 'poll loop heartbeats instance');
 });
+
+test('companion: pairing secret rides register body and poll/result headers; never urls or grants', async () => {
+  const chrome = fakeChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  const setPairing = c.setPairingSecret as unknown as (s: string) => string | null;
+  assert.equal(setPairing('opaque-code-123'), 'opaque-code-123');
+  const headersOf = c.pairingHeaders as unknown as () => Record<string, string>;
+  assert.equal(headersOf()['x-pairing-secret'], 'opaque-code-123');
+  const inst = { instanceId: 'inst-comp-0001', family: 'chromium', version: '1.0.0' };
+  const nextUrl = (c.buildNextUrl as unknown as (t: number, i: unknown) => string)(25000, inst);
+  assert.ok(!nextUrl.includes('pairingSecret'), 'poll url never carries pairing secret');
+  assert.ok(!nextUrl.includes(encodeURIComponent('opaque-code-123')), 'poll url never carries secret value');
+  const resUrl = (c.resultUrl as unknown as (i: unknown) => string)(inst);
+  assert.ok(!resUrl.includes('pairingSecret'), 'result url never carries pairing secret');
+  assert.ok(!resUrl.includes(encodeURIComponent('opaque-code-123')), 'result url never carries secret value');
+  let sentBody = '';
+  let sentHeaders: Record<string, string> = {};
+  const fetchImpl = async (_url: string, init: { body?: string; headers?: Record<string, string> }) => {
+    sentBody = String(init.body ?? '');
+    sentHeaders = init.headers ?? {};
+    return { ok: true, json: async () => ({ bridgeToken: 'tok' }) };
+  };
+  const token = await (c.registerCompanion as unknown as (f: unknown, ch: unknown, i: unknown) => Promise<string | null>)(fetchImpl, chrome, inst);
+  assert.equal(token, 'tok');
+  const parsed = JSON.parse(sentBody) as Record<string, unknown>;
+  assert.equal(parsed.pairingSecret, 'opaque-code-123');
+  assert.equal(sentHeaders['x-pairing-secret'], undefined, 'register stays body-only');
+  assert.equal(parsed.sessionKey, undefined, 'register carries no grant material');
+  assert.equal(parsed.grantId, undefined, 'register carries no grant material');
+});
+
+test('companion: poll loop restores pairing secret from session storage after worker restart', async () => {
+  const { chrome, store } = sessionChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  const setPairing = c.setPairingSecret as unknown as (s: string) => string | null;
+  const restore = c.restorePairingSecret as unknown as (ch: unknown) => Promise<string | null>;
+  const state = (c as unknown as { _state: { pairingSecret: string | null } })._state;
+  const reset = (c as unknown as { _reset: () => void })._reset;
+  assert.equal(setPairing('restart-code-456'), 'restart-code-456');
+  assert.equal(store.get(c.PAIRING_KEY as unknown as string), 'restart-code-456', 'secret persisted to session storage');
+  // Worker restart: in-memory state cleared, session storage survives.
+  reset();
+  assert.equal(state.pairingSecret, null, 'restart clears in-memory secret');
+  assert.equal(await restore(chrome), 'restart-code-456', 'restore repopulates from session storage');
+  // Full loop: reset again, then pollLoop must restore before first register/poll.
+  reset();
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const fetchImpl = async (url: string, init?: { headers?: Record<string, string> }) => {
+    calls.push({ url: String(url), headers: init?.headers ?? {} });
+    return { ok: true, json: async () => ({ none: true }) };
+  };
+  const ctl = new AbortController();
+  setTimeout(() => ctl.abort(), 30);
+  await (c.pollLoop as unknown as (d: unknown) => Promise<void>)({ chrome, fetchImpl, idleMs: 5, signal: ctl.signal }).catch(() => {});
+  assert.ok(calls.length >= 1, 'poll loop issued bridge fetch');
+  assert.ok(
+    calls.every((call) => !call.url.includes('pairingSecret')),
+    'no bridge url carries the pairing secret',
+  );
+  assert.ok(
+    calls.some((call) => call.headers['x-pairing-secret'] === 'restart-code-456'),
+    'poll carries restored pairing secret in header',
+  );
+});

@@ -41,7 +41,8 @@
 
   var state = {
     grant: null, // { sessionKey, grantId, leaseExpiresAt }
-    bridgeToken: null, // session token paired via origin-pinned POST /register
+    pairingSecret: null, // out-of-band pairing secret provisioned by the operator; sent on every bridge request
+    bridgeToken: null, // session token paired via POST /register (pinned origin + pairing secret)
     lastRegisterAttempt: 0, // epoch ms of last POST /register attempt
     owned: null, // { tabId, frozenHostname, sessionKey, grantId }
     polling: false,
@@ -220,7 +221,34 @@
     return ensureInstance(chrome, at);
   }
 
-  /** Pair the bridge session token via origin-pinned POST /register.
+  /** Operator provisioning for the out-of-band pairing secret. Persisted
+   *  best-effort in session storage so a worker restart stays paired. */
+  var PAIRING_KEY = 'atlasPairingSecret';
+  function setPairingSecret(secret) {
+    state.pairingSecret = isNonEmptyString(secret) ? secret : null;
+    try {
+      var c = globalThis.chrome;
+      if (c && c.storage && c.storage.session && typeof c.storage.session.set === 'function') {
+        var put = {};
+        put[PAIRING_KEY] = state.pairingSecret;
+        var p = c.storage.session.set(put);
+        if (p && typeof p.catch === 'function') p.catch(function () {});
+      }
+    } catch (e) {}
+    return state.pairingSecret;
+  }
+  async function restorePairingSecret(chrome) {
+    if (isNonEmptyString(state.pairingSecret)) return state.pairingSecret;
+    try {
+      if (!chrome || !chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== 'function') return null;
+      var got = await chrome.storage.session.get(PAIRING_KEY);
+      var cur = got && got[PAIRING_KEY];
+      if (isNonEmptyString(cur)) state.pairingSecret = cur;
+    } catch (e) {}
+    return state.pairingSecret;
+  }
+  /** Pair the bridge session token via POST /register (pinned origin +
+   *  pairing secret; Origin alone never pairs).
    *  Best-effort: pollLoop retries while unpaired; commands fail closed
    *  against a foreign token once paired. Never logged. */
   async function registerCompanion(fetchImpl, chrome, inst, opts) {
@@ -264,6 +292,7 @@
           family: record.family,
           version: record.version,
           caps: record.evidence || '',
+          pairingSecret: state.pairingSecret,
         }),
       });
       if (!res.ok) return null;
@@ -854,7 +883,13 @@
   }
 
   /** Canonical poll URL: GET /next with anonymous instance claims in query.
-   * Never carries sessionKey/grantId (dual grant travels in commands only). */
+   * Never carries sessionKey/grantId (dual grant travels in commands only).
+   * Never carries the pairing secret either: it rides the x-pairing-secret
+   * request header (see pairingHeaders), never a URL query string. */
+  function pairingHeaders() {
+    if (!isNonEmptyString(state.pairingSecret)) return {};
+    return { 'x-pairing-secret': state.pairingSecret };
+  }
   function buildNextUrl(timeoutMs, inst) {
     var q = 'timeoutMs=' + encodeURIComponent(String(timeoutMs));
     q += '&protocol=' + encodeURIComponent(String(PROTOCOL));
@@ -893,6 +928,11 @@
     if (!fetchImpl) throw new Error('chrome_extension_unavailable: fetch unavailable');
     if (state.polling) return;
     state.polling = true;
+    // Session storage survives worker restarts: restore the operator-provisioned
+    // pairing secret before the first register so polls stay paired.
+    if (chrome && chrome.storage && chrome.storage.session) {
+      try { await restorePairingSecret(chrome); } catch (e) {}
+    }
     if (chrome && chrome.storage && chrome.storage.session) {
       try { await heartbeatInstance(chrome); } catch (e) {}
     }
@@ -927,6 +967,7 @@
           try {
             res = await fetchImpl(buildNextUrl(COMMAND_TIMEOUT_MS, inst), {
               method: 'GET',
+              headers: pairingHeaders(),
               signal: pollCtrl ? pollCtrl.signal : deps.signal,
             });
           } finally {
@@ -1011,7 +1052,7 @@
         try {
           await fetchImpl(resultUrl(inst), {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: Object.assign({ 'content-type': 'application/json' }, pairingHeaders()),
             body: JSON.stringify(out),
           });
         } catch (e) {
@@ -1064,6 +1105,10 @@
     detectFamily: detectFamily,
     ensureInstance: ensureInstance,
     heartbeatInstance: heartbeatInstance,
+    setPairingSecret: setPairingSecret,
+    restorePairingSecret: restorePairingSecret,
+    pairingHeaders: pairingHeaders,
+    PAIRING_KEY: PAIRING_KEY,
     registerCompanion: registerCompanion,
     buildNextUrl: buildNextUrl,
     resultUrl: resultUrl,
@@ -1075,6 +1120,7 @@
       state.grant = null;
       state.owned = null;
       state.polling = false;
+      state.pairingSecret = null;
       state.bridgeToken = null;
       state.lastRegisterAttempt = 0;
       ruleBaseNext = 1000;

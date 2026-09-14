@@ -13,8 +13,16 @@
 // - Bind host fixed literal 127.0.0.1; no bind-host override exists.
 // - POST /command accepts only headerless local callers: any `Origin` or
 //   `Sec-Fetch-Site` header is rejected. Browser fetches always carry one.
-// - GET /next and POST /result accept only the pinned extension origin
-//   `chrome-extension://<manifest-id>` (exact match).
+// - GET /next, POST /result, and POST /register accept only callers that
+//   present BOTH the pinned extension origin `chrome-extension://<manifest-id>`
+//   (exact match) AND the out-of-band pairing secret provisioned into the
+//   companion by the operator. The secret travels in the `x-pairing-secret`
+//   request header on GET /next and POST /result, and in the JSON body (only)
+//   on POST /register: never in a URL query string, on any path. The Origin header alone is forgeable from
+//   loopback (any local process can set it), so Origin without the pairing
+//   secret never registers an instance, never discloses the session token,
+//   never dequeues a command, and never delivers a result. Pairing failures
+//   use the same ambiguous 403 as origin failures: no oracle.
 // - Request/result byte caps; oversize rejected without echoing the body.
 // - Unknown protocol/version fails closed.
 // - Foreign-protocol port occupant reports conflict; never forwards blindly.
@@ -117,7 +125,10 @@ export function isLocalCommandAllowed(headers: Record<string, string | string[] 
   return true;
 }
 
-/** GET /next and POST /result accept only the exact pinned extension origin.
+/** Origin check only: necessary but never sufficient on its own. Every
+ * extension-facing handler must AND this with `checkPairing` (out-of-band
+ * pairing secret) before any side effect; the Origin header is forgeable
+ * from loopback, so it is never the sole factor.
  * Canonical poll is GET /next (long-poll); POST /next is rejected with 405. */
 export function isExtensionRequestAllowed(
   headers: Record<string, string | string[] | undefined>,
@@ -125,6 +136,27 @@ export function isExtensionRequestAllowed(
 ): boolean {
   const origin = header(headers, 'origin');
   return origin === extensionOrigin;
+}
+
+/** JSON body field carrying the pairing secret on POST /register (body-only:
+ * the register handler never reads the secret from the query string or a
+ * header, keeping pair material out of URLs). The value is high-entropy
+ * operator-provisioned material; the secret value is the factor, never
+ * which transport carries it. */
+export const CHROME_BRIDGE_PAIRING_PARAM = 'pairingSecret';
+
+/** Request header carrying the pairing secret on GET /next and POST /result
+ * (header-only: neither handler reads the secret from the query string, so a
+ * query-alone secret is rejected). Node lowercases incoming header names. */
+export const CHROME_BRIDGE_PAIRING_HEADER = 'x-pairing-secret';
+
+/** Constant-time pairing-secret comparison; never reveals which byte differed. */
+export function isPairingSecretAllowed(presented: unknown, expected: string): boolean {
+  if (typeof presented !== 'string' || presented.length === 0) return false;
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  const actualBytes = Buffer.from(presented, 'utf8');
+  if (actualBytes.length !== expectedBytes.length) return false;
+  return timingSafeEqual(actualBytes, expectedBytes);
 }
 
 function httpErrorBody(code: ChromeProfileErrorCode, message: string, retryable = false): ChromeBridgeHttpErrorBody {
@@ -181,6 +213,12 @@ export function parseBridgeInstanceQuery(url: URL): { instanceId: string; family
 export interface ChromeBridgeServerOptions {
   /** Manifest extension id used to pin the allowed origin. Required. */
   extensionId: string;
+  /** Out-of-band pairing secret the operator provisions into the companion.
+   *  Required on every extension-facing request (/register, /next, /result)
+   *  alongside the pinned Origin. Auto-generated when omitted; the operator
+   *  reads it back via the pairingSecret getter for one-time provisioning.
+   *  Must be 8..256 chars when supplied. */
+  pairingSecret?: string | undefined;
   /** TCP port. Defaults to 17319. Host is always literal 127.0.0.1. */
   port?: number | undefined;
   commandTimeoutMs?: number | undefined;
@@ -339,8 +377,11 @@ export class ChromeBridgeServer {
   private readonly instances = new Map<string, ChromeBridgeInstanceInfo>();
   /** Session token minted at construction; every /command must carry it.
    *  Never logged, never echoed in errors. Shared with the companion via the
-   *  origin-pinned /register response only. */
+   *  paired /register response only (origin + pairing secret required). */
   private readonly sessionToken: string = randomUUID();
+  /** Out-of-band pairing secret. Required alongside the pinned Origin on
+   *  every extension-facing request. Never logged, never echoed in errors. */
+  private readonly pairingSecretValue: string;
   private readonly now: () => number;
   private started = false;
   /** Port already served our protocol; this instance shares instead of binds. */
@@ -350,6 +391,11 @@ export class ChromeBridgeServer {
     if (options.extensionId.length === 0) {
       throw new ChromeBridgeError('chrome_invalid_request', 'extensionId must be a non-empty string');
     }
+    const pairing = options.pairingSecret ?? randomUUID();
+    if (pairing.length < 8 || pairing.length > 256) {
+      throw new ChromeBridgeError('chrome_invalid_request', 'pairingSecret must be 8..256 chars');
+    }
+    this.pairingSecretValue = pairing;
     this.extensionOrigin = extensionOriginForId(options.extensionId);
     this.port = options.port ?? CHROME_BRIDGE_PORT;
     this.commandTimeoutMs = options.commandTimeoutMs ?? CHROME_BRIDGE_DEFAULT_COMMAND_TIMEOUT_MS;
@@ -371,6 +417,21 @@ export class ChromeBridgeServer {
       throw new ChromeBridgeError('chrome_extension_unavailable', CHROME_BRIDGE_SHARED_OWNER_MESSAGE, false, 409);
     }
     return this.sessionToken;
+  }
+
+  /** Out-of-band pairing secret for one-time operator provisioning into the
+   *  companion. Throws in share mode: only the owner pairs companions.
+   *  Never logged, never echoed in errors. */
+  get pairingSecret(): string {
+    if (this.shared) {
+      throw new ChromeBridgeError('chrome_extension_unavailable', CHROME_BRIDGE_SHARED_OWNER_MESSAGE, false, 409);
+    }
+    return this.pairingSecretValue;
+  }
+
+  /** Constant-time pairing check for extension-facing requests. */
+  checkPairing(presented: unknown): boolean {
+    return isPairingSecretAllowed(presented, this.pairingSecretValue);
   }
 
   /** Throw when this instance shares (never owns) the bridge port. */
@@ -606,7 +667,7 @@ a shared instance throws instead of returning a misleading empty list. */
       return;
     }
     if (req.method === 'POST' && url.pathname === CHROME_BRIDGE_REGISTER_PATH) {
-      await this.handleRegister(req, res, headers);
+      await this.handleRegister(req, res, headers, url);
       return;
     }
     if (req.method === 'POST' && url.pathname === CHROME_BRIDGE_NEXT_PATH) {
@@ -755,6 +816,7 @@ a shared instance throws instead of returning a misleading empty list. */
     req: http.IncomingMessage,
     res: http.ServerResponse,
     headers: Record<string, string | string[] | undefined>,
+    _url: URL,
   ): Promise<void> {
     if (!isExtensionRequestAllowed(headers, this.extensionOrigin)) {
       sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'extension origin not allowed'));
@@ -770,7 +832,18 @@ a shared instance throws instead of returning a misleading empty list. */
       return;
     }
     try {
-      const claim = parseBridgeInstanceClaim(JSON.parse(body.text) as unknown);
+      const parsed = JSON.parse(body.text) as unknown;
+      // Body-only: /register never reads the secret from the query string or
+      // a header, keeping pair material out of URLs.
+      const presented =
+        typeof parsed === 'object' && parsed !== null
+          ? (parsed as Record<string, unknown>)[CHROME_BRIDGE_PAIRING_PARAM]
+          : undefined;
+      if (!this.checkPairing(presented)) {
+        sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'extension origin not allowed'));
+        return;
+      }
+      const claim = parseBridgeInstanceClaim(parsed);
       const info = this.registerInstance(claim);
       sendJson(res, 200, { protocol: CHROME_BRIDGE_PROTOCOL, ok: true, instanceId: info.instanceId, bridgeToken: this.sessionToken });
     } catch (error) {
@@ -790,6 +863,13 @@ a shared instance throws instead of returning a misleading empty list. */
     url: URL,
   ): Promise<void> {
     if (!isExtensionRequestAllowed(headers, this.extensionOrigin)) {
+      sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'extension origin not allowed'));
+      return;
+    }
+    // Pairing gate before any registry write or queue read: Origin alone
+    // never polls. Header-only: a query-alone secret is rejected.
+    // Same ambiguous 403 as an origin mismatch: no oracle.
+    if (!this.checkPairing(header(headers, CHROME_BRIDGE_PAIRING_HEADER))) {
       sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'extension origin not allowed'));
       return;
     }
@@ -880,6 +960,13 @@ a shared instance throws instead of returning a misleading empty list. */
     url?: URL,
   ): Promise<void> {
     if (!isExtensionRequestAllowed(headers, this.extensionOrigin)) {
+      sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'extension origin not allowed'));
+      return;
+    }
+    // Pairing gate before heartbeat or result delivery: Origin alone never
+    // completes a result. Header-only: a query-alone secret is rejected.
+    // Same ambiguous 403 as an origin mismatch: no oracle.
+    if (!this.checkPairing(header(headers, CHROME_BRIDGE_PAIRING_HEADER))) {
       sendJson(res, 403, httpErrorBody('chrome_invalid_request', 'extension origin not allowed'));
       return;
     }

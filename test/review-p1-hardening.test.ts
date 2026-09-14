@@ -51,11 +51,11 @@ function freePort(): Promise<number> {
   });
 }
 
-function raw(port: number, path: string, body?: string, origin?: string): Promise<{ status: number; text: string }> {
+function raw(port: number, path: string, body?: string, origin?: string, extraHeaders?: Record<string, string>): Promise<{ status: number; text: string }> {
   const extensionOrigin = `chrome-extension://${EXTENSION_ID}`;
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: CHROME_BRIDGE_HOST, port, path, method: body !== undefined ? 'POST' : 'GET', headers: { origin: origin ?? extensionOrigin, ...(body !== undefined ? { 'content-length': Buffer.byteLength(body) } : {}) } },
+      { host: CHROME_BRIDGE_HOST, port, path, method: body !== undefined ? 'POST' : 'GET', headers: { origin: origin ?? extensionOrigin, ...(body !== undefined ? { 'content-length': Buffer.byteLength(body) } : {}), ...extraHeaders } },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
@@ -70,6 +70,10 @@ function raw(port: number, path: string, body?: string, origin?: string): Promis
 
 function claimQuery(id: string): string {
   return `/next?timeoutMs=0&protocol=1&instanceId=${id}&family=chrome&version=1.0.0&caps=`;
+}
+
+function pairHeaders(server: ChromeBridgeServer): Record<string, string> {
+  return { 'x-pairing-secret': server.pairingSecret };
 }
 
 test('contract rejects commands without target/token', () => {
@@ -104,9 +108,9 @@ test('per-instance queues: B never receives A-targeted authorize', async () => {
     server.registerInstance({ instanceId: TARGET_A, family: 'chrome', version: '1.0.0', caps: '' });
     server.registerInstance({ instanceId: TARGET_B, family: 'edge', version: '1.0.0', caps: '' });
     const send = client.send(cmd(server, 'iso-1', TARGET_A));
-    const pollB = await raw(port, claimQuery(TARGET_B), undefined);
+    const pollB = await raw(port, claimQuery(TARGET_B), undefined, undefined, pairHeaders(server));
     assert.equal(pollB.status, 204);
-    const pollA = await raw(port, claimQuery(TARGET_A), undefined);
+    const pollA = await raw(port, claimQuery(TARGET_A), undefined, undefined, pairHeaders(server));
     assert.equal(pollA.status, 200);
     assert.equal((JSON.parse(pollA.text) as { id: string }).id, 'iso-1');
     server.revokeAll();
@@ -128,10 +132,18 @@ test('register response pairs the session token', async () => {
     );
     // register requires extension origin
     assert.equal(res.status, 403);
-    const ok = await raw(
+    // register requires the pairing secret even with the pinned origin
+    const unpaired = await raw(
       port,
       '/register',
       JSON.stringify({ instanceId: TARGET_A, family: 'chrome', version: '1.0.0', caps: '' }),
+    );
+    assert.equal(unpaired.status, 403);
+    assert.ok(!unpaired.text.includes('bridgeToken'));
+    const ok = await raw(
+      port,
+      '/register',
+      JSON.stringify({ instanceId: TARGET_A, family: 'chrome', version: '1.0.0', caps: '', pairingSecret: server.pairingSecret }),
     );
     assert.equal(ok.status, 200);
     assert.equal((JSON.parse(ok.text) as { bridgeToken: string }).bridgeToken, server.bridgeToken);

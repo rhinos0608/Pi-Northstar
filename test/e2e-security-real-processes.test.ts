@@ -309,7 +309,7 @@ test(
       const next = await rawRequest(
         port,
         `/next?timeoutMs=5000&protocol=1&instanceId=${TEST_TARGET}&family=chrome&version=1.0.0&caps=`,
-        { headers: { origin: EXTENSION_ORIGIN } },
+        { headers: { origin: EXTENSION_ORIGIN, 'x-pairing-secret': server.pairingSecret } },
       );
       assert.equal(next.status, 200);
       const picked = JSON.parse(next.text) as ChromeBridgeCommand;
@@ -317,7 +317,7 @@ test(
 
       const posted = await rawRequest(port, '/result', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+        headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN, 'x-pairing-secret': server.pairingSecret },
         body: JSON.stringify({ protocol: 1, id: 'e2e-roundtrip', ok: true, data: { tabs: 1 } }),
       });
       assert.equal(posted.status, 200);

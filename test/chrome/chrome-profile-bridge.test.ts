@@ -23,6 +23,25 @@ import {
 
 const EXTENSION_ID = 'abcdefghijklmnopqrstuvwxyzabcdef';
 const EXTENSION_ORIGIN = extensionOriginForId(EXTENSION_ID);
+function pairedHeaders(server: ChromeBridgeServer): Record<string, string> {
+  return { origin: EXTENSION_ORIGIN, 'x-pairing-secret': server.pairingSecret };
+}
+
+function pairedJsonHeaders(server: ChromeBridgeServer): Record<string, string> {
+  return { 'content-type': 'application/json', ...pairedHeaders(server) };
+}
+
+function registerBody(server: ChromeBridgeServer, instanceId: string, extra?: Record<string, unknown>): string {
+  return JSON.stringify({
+    protocol: 1,
+    instanceId,
+    family: 'chromium',
+    version: '1.0.0',
+    caps: '',
+    pairingSecret: server.pairingSecret,
+    ...extra,
+  });
+}
 
 const TEST_TARGET = 'inst-test-001';
 
@@ -157,8 +176,12 @@ test('/next and /result accept only the pinned extension origin', async () => {
       body: JSON.stringify({ protocol: 1, id: 'x', ok: true }),
     });
     assert.equal(deniedResult.status, 403);
-    const allowed = await rawRequest(port, '/next?timeoutMs=0', {
+    const unpaired = await rawRequest(port, '/next?timeoutMs=0', {
       headers: { origin: EXTENSION_ORIGIN },
+    });
+    assert.equal(unpaired.status, 403);
+    const allowed = await rawRequest(port, '/next?timeoutMs=0', {
+      headers: pairedHeaders(server),
     });
     assert.equal(allowed.status, 204);
   } finally {
@@ -204,7 +227,7 @@ test('command/result byte caps reject oversize payloads without echo', async () 
     assert.ok(!big.text.includes('oversize-command-payload-marker'));
     const bigResult = await rawRequest(port, '/result', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      headers: pairedJsonHeaders(server),
       body: JSON.stringify({ protocol: 1, id: 'r1', ok: true, data: 'y'.repeat(500) }),
     });
     assert.equal(bigResult.status, 413);
@@ -222,7 +245,7 @@ test('full roundtrip: client command reaches extension poll and resolves', async
     registerTestTarget(server);
     const send = client.send(testCommand(server, 'roundtrip-1'));
     const next = await rawRequest(port, '/next?timeoutMs=5000&protocol=1&instanceId=inst-test-001&family=chrome&version=1.0.0&caps=', {
-      headers: { origin: EXTENSION_ORIGIN },
+      headers: pairedHeaders(server),
     });
     assert.equal(next.status, 200);
     const picked = JSON.parse(next.text) as ChromeBridgeCommand;
@@ -230,7 +253,7 @@ test('full roundtrip: client command reaches extension poll and resolves', async
     assert.equal(picked.kind, 'execute');
     const posted = await rawRequest(port, '/result', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      headers: pairedJsonHeaders(server),
       body: JSON.stringify({ protocol: 1, id: 'roundtrip-1', ok: true, data: { tabs: 1 } }),
     });
     assert.equal(posted.status, 200);
@@ -291,7 +314,7 @@ test('revoke purges the queue and withholds late results (never success-after-re
     // Late extension result is acknowledged but withheld, never delivered.
     const late = await rawRequest(port, '/result', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      headers: pairedJsonHeaders(server),
       body: JSON.stringify({ protocol: 1, id: 'revoke-1', ok: true, data: 'late' }),
     });
     assert.equal(late.status, 200);
@@ -345,6 +368,7 @@ test('EADDRINUSE sharing allowed only after our handshake answers', async () => 
       return true;
     });
     assert.throws(() => second.bridgeToken, /bridge owner process only/);
+    assert.throws(() => second.pairingSecret, /bridge owner process only/);
     assert.throws(
       () => second.registerInstance({ instanceId: TEST_TARGET, family: 'chrome', version: '1.0.0', caps: '' }),
       /bridge owner process only/,
@@ -421,7 +445,7 @@ test('GET /next upserts instance registry and heartbeats; strict version/caps', 
     const poll = await rawRequest(
       port,
       '/next?timeoutMs=0&protocol=1&instanceId=inst-reg-001&family=chromium&version=1.0.0&caps=closed-union-v1',
-      { headers: { origin: EXTENSION_ORIGIN } },
+      { headers: pairedHeaders(server) },
     );
     assert.equal(poll.status, 204);
     assert.equal(server.liveInstanceCount, 1);
@@ -432,12 +456,12 @@ test('GET /next upserts instance registry and heartbeats; strict version/caps', 
     const badVersion = await rawRequest(
       port,
       '/next?timeoutMs=0&protocol=9&instanceId=inst-reg-002&family=chromium&version=1.0.0',
-      { headers: { origin: EXTENSION_ORIGIN } },
+      { headers: pairedHeaders(server) },
     );
     assert.equal(badVersion.status, 400);
     assert.ok(badVersion.text.includes('chrome_version_mismatch'));
     const badClaim = await rawRequest(port, '/next?timeoutMs=0&protocol=1&instanceId=x&family=chromium&version=1.0.0', {
-      headers: { origin: EXTENSION_ORIGIN },
+      headers: pairedHeaders(server),
     });
     assert.equal(badClaim.status, 400);
   } finally {
@@ -459,14 +483,14 @@ test('POST /register pins extension origin and validates claims strictly', async
     const ok = await rawRequest(port, '/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
-      body: JSON.stringify({ protocol: 1, instanceId: 'inst-reg-010', family: 'chromium', version: '1.0.0', caps: '' }),
+      body: registerBody(server, 'inst-reg-010'),
     });
     assert.equal(ok.status, 200);
     assert.equal(server.liveInstanceCount, 1);
     const bad = await rawRequest(port, '/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
-      body: JSON.stringify({ protocol: 1, instanceId: 'inst-reg-011', family: 'chromium', version: 'bogus' }),
+      body: registerBody(server, 'inst-reg-011', { version: 'bogus' }),
     });
     assert.equal(bad.status, 400);
   } finally {
@@ -526,10 +550,177 @@ test('GET /next rejects a malformed bare instanceId instead of tracking it', asy
   try {
     await server.start();
     const bad = await rawRequest(port, '/next?timeoutMs=0&instanceId=!!!not-an-id!!!', {
-      headers: { origin: EXTENSION_ORIGIN },
+      headers: pairedHeaders(server),
     });
     assert.equal(bad.status, 400);
     assert.ok(bad.text.includes('chrome_invalid_request'));
+  } finally {
+    await server.stop();
+  }
+});
+
+test('forged-Origin registration without pairing secret yields no usable token', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port });
+  try {
+    await server.start();
+    // Forged Origin alone (the pre-fix factor): no token, no instance.
+    const forged = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({ protocol: 1, instanceId: 'inst-fake-0001', family: 'chromium', version: '1.0.0', caps: '' }),
+    });
+    assert.equal(forged.status, 403);
+    assert.ok(!forged.text.includes('bridgeToken'));
+    assert.equal(server.liveInstanceCount, 0);
+    assert.deepEqual(server.listInstances(), []);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('pairing failure is ambiguous with origin failure: same status, same message, no token', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port });
+  try {
+    await server.start();
+    const wrongOrigin = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://example.com' },
+      body: registerBody(server, 'inst-amb-0001'),
+    });
+    const wrongSecret = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({ protocol: 1, instanceId: 'inst-amb-0002', family: 'chromium', version: '1.0.0', caps: '', pairingSecret: 'wrong-secret' }),
+    });
+    assert.equal(wrongOrigin.status, 403);
+    assert.equal(wrongSecret.status, 403);
+    assert.equal(wrongOrigin.text, wrongSecret.text);
+    assert.ok(!wrongSecret.text.includes('bridgeToken'));
+    assert.equal(server.liveInstanceCount, 0);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('fake companion cannot complete next/command/result roundtrip without the pairing secret', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port, commandTimeoutMs: 5_000 });
+  const client = new ChromeBridgeClient({ port, timeoutMs: 5_000 });
+  try {
+    await server.start();
+    registerTestTarget(server);
+    const send = client.send(testCommand(server, 'fake-roundtrip-1'));
+    // Fake poll with forged Origin but no secret: rejected before queue read.
+    const fakeNext = await rawRequest(port, '/next?timeoutMs=0&protocol=1&instanceId=inst-test-001&family=chrome&version=1.0.0&caps=', {
+      headers: { origin: EXTENSION_ORIGIN },
+    });
+    assert.equal(fakeNext.status, 403);
+    // Fake result with forged Origin but no secret: rejected before delivery.
+    const fakeResult = await rawRequest(port, '/result', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({ protocol: 1, id: 'fake-roundtrip-1', ok: true, data: 'evil' }),
+    });
+    assert.equal(fakeResult.status, 403);
+    // The command is still pending: nothing leaked to the fake companion.
+    assert.equal(server.pendingCommandCount, 1);
+    assert.equal(server.pendingResultCount, 1);
+    server.revokeAll();
+    await assert.rejects(send, /revoked/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('paired companion with the secret registers and completes the roundtrip', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port, pairingSecret: 'operator-provisioned-code-1' });
+  const client = new ChromeBridgeClient({ port, timeoutMs: 5_000 });
+  try {
+    await server.start();
+    assert.equal(server.pairingSecret, 'operator-provisioned-code-1');
+    const reg = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({ protocol: 1, instanceId: 'inst-paired-01', family: 'chromium', version: '1.0.0', caps: '', pairingSecret: 'operator-provisioned-code-1' }),
+    });
+    assert.equal(reg.status, 200);
+    assert.equal((JSON.parse(reg.text) as { bridgeToken: string }).bridgeToken, server.bridgeToken);
+    assert.equal(server.liveInstanceCount, 1);
+    const send = client.send({ protocol: 1, id: 'paired-1', sessionKey: 'sk-test', grantId: 'grant-test', targetInstanceId: 'inst-paired-01', bridgeToken: server.bridgeToken, kind: 'execute', operation: { kind: 'tabs' } });
+    const next = await rawRequest(port, '/next?timeoutMs=5000&protocol=1&instanceId=inst-paired-01&family=chromium&version=1.0.0&caps=', {
+      headers: pairedHeaders(server),
+    });
+    assert.equal(next.status, 200);
+    const posted = await rawRequest(port, '/result', {
+      method: 'POST',
+      headers: pairedJsonHeaders(server),
+      body: JSON.stringify({ protocol: 1, id: 'paired-1', ok: true, data: {} }),
+    });
+    assert.equal(posted.status, 200);
+    const result = await send;
+    assert.equal(result.ok, true);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('register is body-only: valid secret in query string alone is rejected', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port, pairingSecret: 'operator-provisioned-code-2' });
+  try {
+    await server.start();
+    // Correct secret, wrong transport (query instead of body): no token, no instance.
+    const viaQuery = await rawRequest(
+      port,
+      `/register?pairingSecret=${encodeURIComponent('operator-provisioned-code-2')}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+        body: JSON.stringify({ protocol: 1, instanceId: 'inst-query-01', family: 'chromium', version: '1.0.0', caps: '' }),
+      },
+    );
+    assert.equal(viaQuery.status, 403);
+    assert.ok(!viaQuery.text.includes('bridgeToken'));
+    assert.equal(server.liveInstanceCount, 0);
+    assert.deepEqual(server.listInstances(), []);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('query-alone pairing secret is rejected on /next and /result (header-only)', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port, pairingSecret: 'operator-provisioned-code-3' });
+  const client = new ChromeBridgeClient({ port, timeoutMs: 5_000 });
+  try {
+    await server.start();
+    const secret = encodeURIComponent('operator-provisioned-code-3');
+    // Correct secret in the query string, no header: rejected before any
+    // registry write or queue read. Same ambiguous 403 as an origin failure.
+    const queryNext = await rawRequest(port, `/next?timeoutMs=0&pairingSecret=${secret}`, {
+      headers: { origin: EXTENSION_ORIGIN },
+    });
+    assert.equal(queryNext.status, 403);
+    assert.ok(queryNext.text.includes('extension origin not allowed'));
+    assert.equal(server.liveInstanceCount, 0);
+    // Same on the result path: a queued command must not leak to a
+    // query-only caller, and the late result must not resolve the waiter.
+    server.registerInstance({ instanceId: TEST_TARGET, family: 'chrome', version: '1.0.0', caps: '' });
+    const send = client.send(testCommand(server, 'query-only-1'));
+    const queryResult = await rawRequest(port, `/result?pairingSecret=${secret}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({ protocol: 1, id: 'query-only-1', ok: true, data: 'evil' }),
+    });
+    assert.equal(queryResult.status, 403);
+    assert.ok(queryResult.text.includes('extension origin not allowed'));
+    assert.equal(server.pendingCommandCount, 1);
+    assert.equal(server.pendingResultCount, 1);
+    server.revokeAll();
+    await assert.rejects(send, /revoked/);
   } finally {
     await server.stop();
   }
