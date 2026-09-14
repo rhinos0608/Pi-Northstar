@@ -91,6 +91,15 @@ function u24le(bytes: Uint8Array, at: number): number {
   return (bytes[at] ?? 0) + (bytes[at + 1] ?? 0) * 256 + (bytes[at + 2] ?? 0) * 65536;
 }
 
+function u32le(bytes: Uint8Array, at: number): number {
+  return (
+    (bytes[at] ?? 0) +
+    (bytes[at + 1] ?? 0) * 256 +
+    (bytes[at + 2] ?? 0) * 65536 +
+    (bytes[at + 3] ?? 0) * 16777216
+  );
+}
+
 /** Best-effort dimension parse for PNG/GIF/JPEG/WebP; undefined when unreadable. */
 export function readImageDimensions(bytes: Uint8Array, mimeType: string): { width: number; height: number } | undefined {
   try {
@@ -130,9 +139,13 @@ export function readImageDimensions(bytes: Uint8Array, mimeType: string): { widt
         const height = u16le(bytes, 28) & 0x3fff;
         if (width > 0 && height > 0) return { width, height };
       } else if (tag === 'VP8L' && bytes.length >= 25) {
-        const bits = u24le(bytes, 21);
+        // Lossless bitstream: byte 20 is the 0x2f signature, bytes 21-24 pack
+        // 14-bit (width - 1) in bits 0-13 and 14-bit (height - 1) in bits
+        // 14-27. The top height bits live in byte 24, so all four bytes are
+        // required; `>>>` avoids signed 32-bit truncation of the height field.
+        const bits = u32le(bytes, 21);
         const width = (bits & 0x3fff) + 1;
-        const height = ((bits >> 14) & 0x3fff) + 1;
+        const height = ((bits >>> 14) & 0x3fff) + 1;
         if (width > 0 && height > 0) return { width, height };
       } else if (tag === 'VP8X' && bytes.length >= 30) {
         const width = u24le(bytes, 24) + 1;
@@ -171,8 +184,12 @@ export async function runImagePipeline(
   if (bytes.byteLength > IMAGE_MAX_BYTES) {
     return { ok: false, reason: 'over-byte-ceiling', warnings: ['image-over-byte-ceiling'] };
   }
-  const mimeType = mimeHint ?? sniffImageMime(bytes);
-  if (mimeType === undefined) return { ok: false, reason: 'unknown-image-type', warnings: [] };
+  const sniffed = sniffImageMime(bytes);
+  if (sniffed === undefined) return { ok: false, reason: 'unknown-image-type', warnings: [] };
+  if (mimeHint !== undefined && mimeHint !== sniffed) {
+    return { ok: false, reason: 'unknown-image-type', warnings: [] };
+  }
+  const mimeType = sniffed;
 
   const warnings: string[] = [];
   const dims = readImageDimensions(bytes, mimeType);
@@ -240,7 +257,7 @@ export function chunkVisionEvidence(
       : {
         ...(options.maxChars !== undefined ? { maxChars: options.maxChars } : {}),
         ...(options.overlap !== undefined ? { overlap: options.overlap } : {}),
-        ...(options.minChars !== undefined ? { minChars: options.minChars } : {}),
+        ...(options.minChars !== undefined ? { minChars: options.minChars } : { minChars: 1 }),
       };
     for (const chunk of chunkText(item.text, chunkOptions)) {
       out.push({ chunk, evidenceIndex });

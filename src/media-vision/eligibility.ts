@@ -22,6 +22,9 @@ export const VISION_TIER_ORDER: readonly VisionTier[] = [
 /** Env keys proving a Gemini Developer-API credential is configured. */
 export const GEMINI_API_KEY_ENV_VARS: readonly string[] = ['GEMINI_API_KEY', 'GOOGLE_GENAI_API_KEY'];
 
+/** Exact-value env enabling the Gemini cloud route (developer or Vertex). */
+export const GEMINI_ENABLED_ENV_VAR = 'PI_VISION_GEMINI_ENABLED';
+
 /** Env keys proving a Vertex project is configured (ADC supplies auth). */
 export const VERTEX_PROJECT_ENV_VARS: readonly string[] = [
   'GOOGLE_VERTEX_PROJECT',
@@ -33,8 +36,9 @@ export const GEMINI_WEB_ENABLED_ENV_VAR = 'PI_VISION_GEMINI_WEB_ENABLED';
 
 export type VisionEnv = NodeJS.ProcessEnv | Record<string, string | undefined>;
 
-/** True when a Gemini Developer key or a Vertex project is configured. */
+/** True when the exact Gemini opt-in is set plus a Developer key or Vertex project. */
 export function isGeminiConfigured(env: VisionEnv = process.env): boolean {
+  if (env[GEMINI_ENABLED_ENV_VAR] !== '1') return false;
   for (const key of [...GEMINI_API_KEY_ENV_VARS, ...VERTEX_PROJECT_ENV_VARS]) {
     const value = env[key];
     if (typeof value === 'string' && value.trim().length > 0) return true;

@@ -8,8 +8,12 @@
 // chrome-profile-adapter) via injection — never chrome-profile-auth (TTL parse
 // only), never raw cookie input/config.
 
-/** Exact-value env enabling the Gemini Web last-resort route. Default off. */
-export const GEMINI_WEB_ENABLED_ENV_VAR = 'PI_VISION_GEMINI_WEB_ENABLED';
+import {
+  GEMINI_WEB_ENABLED_ENV_VAR,
+  isGeminiWebEnabled,
+} from './eligibility.js';
+
+export { GEMINI_WEB_ENABLED_ENV_VAR, isGeminiWebEnabled };
 
 /** Exact Gemini Web origins a leased tab may target. No other origin allowed. */
 export const GEMINI_WEB_ORIGINS: readonly string[] = ['https://gemini.google.com'];
@@ -35,12 +39,8 @@ export type GeminiWebResult =
   | { ok: true; text: string; warnings: string[] }
   | { ok: false; reason: 'disabled' | 'lease-origin-rejected' | 'empty-response'; warnings: string[] };
 
-/** True only on the explicit exact-value opt-in. Absent/any other value: off. */
-export function geminiWebEnabled(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
-): boolean {
-  return env[GEMINI_WEB_ENABLED_ENV_VAR] === '1';
-}
+/** Legacy alias for {@link isGeminiWebEnabled} (kept for existing importers). */
+export const geminiWebEnabled = isGeminiWebEnabled;
 
 /**
  * Last-resort ask through a leased Gemini Web tab. Zero lease/browser calls

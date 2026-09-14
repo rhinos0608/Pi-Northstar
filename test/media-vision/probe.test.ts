@@ -10,11 +10,22 @@ import {
 import {
   buildSyntheticProbeImage,
   isVisionRefusal,
+  mentionsProbeValue,
   probeVisionModels,
   runVisionProbe,
   VISION_PROBE_PROMPT,
   type VisionProbeTransport,
 } from '../../src/media-vision/probe.js';
+
+/** Echo the randomized probe SVG back as text, like a true vision model would. */
+function echoProbeImage(imageBytes: Uint8Array): string {
+  const svg = new TextDecoder().decode(imageBytes);
+  const shape = svg.includes('<circle') ? 'circle' : svg.includes('<polygon') ? 'triangle' : 'square';
+  const fills = svg.match(/fill="(#[0-9a-f]{6})"/gi) ?? [];
+  const last = (fills[1] ?? fills[0] ?? '').toLowerCase();
+  const color = last.includes('e5484d') ? 'red' : last.includes('2f6feb') ? 'blue' : 'green';
+  return `a ${color} ${shape} on white`;
+}
 
 const CONFIG: OpenAICompatibleVisionConfig = {
   baseUrl: 'http://127.0.0.1:11434/v1',
@@ -202,10 +213,29 @@ describe('openai-compatible transport', () => {
 
 describe('synthetic vision probe', () => {
   it('probe image is tiny synthetic bytes, prompt is closed-vocabulary', () => {
-    const { bytes, mimeType } = buildSyntheticProbeImage();
-    assert.equal(mimeType, 'image/png');
+    const { bytes, mimeType, shape, color } = buildSyntheticProbeImage();
+    assert.equal(mimeType, 'image/svg+xml');
     assert.ok(bytes.byteLength > 0 && bytes.byteLength < 1024);
+    assert.ok(['circle', 'square', 'triangle'].includes(shape));
+    assert.ok(['red', 'blue', 'green'].includes(color));
     assert.ok(VISION_PROBE_PROMPT.length > 0);
+    assert.ok(!VISION_PROBE_PROMPT.includes(shape));
+    assert.ok(!VISION_PROBE_PROMPT.includes(color));
+  });
+
+  it('probe challenge varies across draws', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 30; i += 1) {
+      const { shape, color } = buildSyntheticProbeImage();
+      seen.add(`${shape}:${color}`);
+    }
+    assert.ok(seen.size > 1);
+  });
+
+  it('mentionsProbeValue uses word matches, not substrings', () => {
+    assert.equal(mentionsProbeValue('a colored square', 'square'), true);
+    assert.equal(mentionsProbeValue('a colored square', 'red'), false);
+    assert.equal(mentionsProbeValue('a red square', 'red'), true);
   });
 
   it('accepts a model that describes the probe image', async () => {
@@ -213,12 +243,23 @@ describe('synthetic vision probe', () => {
       describe: async (request) => {
         assert.ok(request.imageBytes.byteLength > 0);
         assert.equal(request.prompt, VISION_PROBE_PROMPT);
-        return { ok: true, text: 'a small red square' };
+        return { ok: true, text: echoProbeImage(request.imageBytes) };
       },
     };
     const result = await runVisionProbe(transport, { modelId: 'llava' });
     assert.equal(result.ok, true);
     assert.equal(result.modelId, 'llava');
+  });
+
+  it('rejects ungrounded descriptions missing shape or color', async () => {
+    for (const text of ['a nice picture', 'a red thing', 'a square']) {
+      const transport: VisionProbeTransport = {
+        describe: async () => ({ ok: true, text }),
+      };
+      const result = await runVisionProbe(transport, { modelId: 'text-model' });
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.reason, 'probe_mismatch');
+    }
   });
 
   it('rejects non-vision models (refusal text)', async () => {
@@ -257,7 +298,7 @@ describe('synthetic vision probe', () => {
     const transport: VisionProbeTransport = {
       describe: async (request) =>
         request.modelId === 'good'
-          ? { ok: true, text: 'a red square' }
+          ? { ok: true, text: echoProbeImage(request.imageBytes) }
           : { ok: true, text: 'I cannot view images.' },
     };
     const results = await probeVisionModels(transport, ['bad', 'good', 'later'], {

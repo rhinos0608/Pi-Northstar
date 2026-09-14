@@ -47,6 +47,26 @@ test('gemini disabled by default: resolve false, zero transport calls', () => {
   assert.equal(typeof transport.generateContent, 'function');
 });
 
+test('gemini vertex resolves GOOGLE_VERTEX_PROJECT alias like GOOGLE_CLOUD_PROJECT', () => {
+  const result = resolveGeminiConfig({
+    PI_VISION_GEMINI_ENABLED: '1',
+    GOOGLE_GENAI_USE_VERTEXAI: '1',
+    GOOGLE_VERTEX_PROJECT: 'proj-alias',
+    GOOGLE_CLOUD_LOCATION: 'us-central1',
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.config.auth.kind, 'vertex');
+    if (result.config.auth.kind === 'vertex') assert.equal(result.config.auth.project, 'proj-alias');
+  }
+});
+
+test('gemini developer transport without a key rejects before SDK construction', async () => {
+  const config: GeminiConfig = { model: GEMINI_DEFAULT_VISION_MODEL, auth: { kind: 'developer' } };
+  const transport = createGeminiTransport(config, {});
+  await assert.rejects(transport.generateContent({ prompt: 'hi' }), /unconfigured/);
+});
+
 test('gemini enabled without key is unconfigured (never broadens tier)', () => {
   const result = resolveGeminiConfig({ PI_VISION_GEMINI_ENABLED: '1' });
   assert.equal(result.ok, false);

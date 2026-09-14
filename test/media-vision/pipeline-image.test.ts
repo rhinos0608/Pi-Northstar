@@ -66,10 +66,32 @@ test('unknown type rejects before any vision call', async () => {
 
 test('oversize bytes reject before any vision call', async () => {
   const { seams, calls } = visionSeams();
-  const result = await runImagePipeline(new Uint8Array(IMAGE_MAX_BYTES + 1), seams, 'image/png');
+  const big = new Uint8Array(IMAGE_MAX_BYTES + 1);
+  big.set(tinyPng().subarray(0, Math.min(tinyPng().length, big.length)));
+  const result = await runImagePipeline(big, seams, 'image/png');
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, 'over-byte-ceiling');
   assert.deepEqual(calls, { ocr: 0, describe: 0 });
+});
+
+test('mismatched mime hint rejects instead of trusting the caller', async () => {
+  const { seams, calls } = visionSeams();
+  const result = await runImagePipeline(tinyPng(), seams, 'image/jpeg');
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'unknown-image-type');
+  assert.deepEqual(calls, { ocr: 0, describe: 0 });
+});
+
+test('dimensions parse VP8L height bits from the fourth packed byte', () => {
+  // RIFF/WEBP/VP8L headers + 0x2f signature + packed dims for 1x16384:
+  // (width - 1) = 0 in bits 0-13, (height - 1) = 0x3fff in bits 14-27.
+  const bytes = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00,
+    0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+    0x05, 0x00, 0x00, 0x00, 0x2f, 0x00, 0xc0, 0xff, 0x0f,
+  ]);
+  assert.equal(sniffImageMime(bytes), 'image/webp');
+  assert.deepEqual(readImageDimensions(bytes, 'image/webp'), { width: 1, height: 16384 });
 });
 
 test('ocr and description are distinct sourceKind entries with locators', async () => {

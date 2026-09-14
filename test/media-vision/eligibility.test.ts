@@ -89,12 +89,24 @@ describe('policy/auth failure never broadens eligibility', () => {
 });
 
 describe('env helpers', () => {
-  it('gemini configured by key or vertex project only', () => {
+  it('gemini requires exact opt-in plus key or vertex project', () => {
     assert.equal(isGeminiConfigured({}), false);
-    assert.equal(isGeminiConfigured({ GEMINI_API_KEY: 'x' }), true);
-    assert.equal(isGeminiConfigured({ GOOGLE_GENAI_API_KEY: 'x' }), true);
-    assert.equal(isGeminiConfigured({ GOOGLE_VERTEX_PROJECT: 'p' }), true);
-    assert.equal(isGeminiConfigured({ GEMINI_API_KEY: '   ' }), false);
+    assert.equal(isGeminiConfigured({ GEMINI_API_KEY: 'x' }), false);
+    assert.equal(isGeminiConfigured({ PI_VISION_GEMINI_ENABLED: '1', GEMINI_API_KEY: 'x' }), true);
+    assert.equal(
+      isGeminiConfigured({ PI_VISION_GEMINI_ENABLED: '1', GOOGLE_GENAI_API_KEY: 'x' }),
+      true,
+    );
+    assert.equal(
+      isGeminiConfigured({ PI_VISION_GEMINI_ENABLED: '1', GOOGLE_VERTEX_PROJECT: 'p' }),
+      true,
+    );
+    assert.equal(
+      isGeminiConfigured({ PI_VISION_GEMINI_ENABLED: '1', GOOGLE_CLOUD_PROJECT: 'p' }),
+      true,
+    );
+    assert.equal(isGeminiConfigured({ PI_VISION_GEMINI_ENABLED: 'true', GEMINI_API_KEY: 'x' }), false);
+    assert.equal(isGeminiConfigured({ PI_VISION_GEMINI_ENABLED: '1', GEMINI_API_KEY: '   ' }), false);
   });
 
   it('gemini-web requires exact "1"', () => {

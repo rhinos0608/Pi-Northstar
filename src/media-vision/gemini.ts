@@ -7,10 +7,13 @@
 // provider/model identity is never embedded in returned text.
 
 import { GoogleGenAI } from '@google/genai';
-import { GEMINI_API_KEY_ENV_VARS } from './eligibility.js';
+import {
+  GEMINI_API_KEY_ENV_VARS,
+  GEMINI_ENABLED_ENV_VAR,
+  VERTEX_PROJECT_ENV_VARS,
+} from './eligibility.js';
 
-/** Exact-value env enabling the Gemini cloud route (developer or Vertex). */
-export const GEMINI_ENABLED_ENV_VAR = 'PI_VISION_GEMINI_ENABLED';
+export { GEMINI_ENABLED_ENV_VAR };
 
 /** Env holding the exact vision model ID (passed verbatim, never aliased). */
 export const GEMINI_VISION_MODEL_ENV_VAR = 'PI_VISION_GEMINI_MODEL';
@@ -66,7 +69,14 @@ function resolveVertexConfig(
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
   model: string,
 ): GeminiConfigResult {
-  const project = typeof env.GOOGLE_CLOUD_PROJECT === 'string' ? env.GOOGLE_CLOUD_PROJECT.trim() : '';
+  let project = '';
+  for (const key of VERTEX_PROJECT_ENV_VARS) {
+    const raw = env[key];
+    if (typeof raw === 'string' && raw.trim().length > 0) {
+      project = raw.trim();
+      break;
+    }
+  }
   const location = typeof env.GOOGLE_CLOUD_LOCATION === 'string' ? env.GOOGLE_CLOUD_LOCATION.trim() : '';
   if (project.length === 0 || location.length === 0) {
     return { ok: false, reason: 'vertex-misconfigured' };
@@ -112,7 +122,10 @@ function buildSdkClient(config: GeminiConfig, apiKey: string | undefined): Googl
       location: config.auth.location,
     });
   }
-  return new GoogleGenAI({ apiKey: apiKey ?? '' });
+  if (apiKey === undefined || apiKey.trim().length === 0) {
+    throw new Error('gemini unconfigured: developer API key missing');
+  }
+  return new GoogleGenAI({ apiKey });
 }
 
 /**
