@@ -162,14 +162,49 @@ function isAgentToolResult(value: unknown): value is AgentToolResult<unknown> {
   );
 }
 
-/** Concise prior-pointer result: static text only, no bodies or secrets. */
-export function priorSearchResult(reason: 'suppressed' | 'blocked'): AgentToolResult<unknown> {
-  const text = reason === 'blocked'
-    ? 'Search blocked: this session recorded repeated failures for this search recently. Wait before retrying.'
+/** Opaque prior-search pointer: cached responseId + age, never bodies/secrets. */
+export interface PriorSearchPointer {
+  responseId?: string | undefined;
+  ageMs?: number | undefined;
+}
+
+/** Freshness age label: short human age for the suppressed pointer text. */
+function priorSearchAgeLabel(ageMs: number | undefined): string | undefined {
+  if (ageMs === undefined || !Number.isFinite(ageMs) || ageMs < 0) return undefined;
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
+}
+
+/** Concise prior-pointer result: cached responseId + age, no bodies or secrets. */
+export function priorSearchResult(reason: 'suppressed' | 'blocked', pointer?: PriorSearchPointer): AgentToolResult<unknown> {
+  if (reason === 'blocked') {
+    const text = 'Search blocked: this session recorded repeated failures for this search recently. Wait before retrying.';
+    return {
+      content: [{ type: 'text', text: guardText(text, {}) }],
+      details: { action: 'search', ledger: reason },
+    };
+  }
+  const responseId = typeof pointer?.responseId === 'string' && pointer.responseId.length > 0
+    ? pointer.responseId
+    : undefined;
+  const ageMs = typeof pointer?.ageMs === 'number' && Number.isFinite(pointer.ageMs) && pointer.ageMs >= 0
+    ? pointer.ageMs
+    : undefined;
+  const ageLabel = priorSearchAgeLabel(ageMs);
+  const text = responseId !== undefined
+    ? `Search suppressed: this session already ran this (or a near-duplicate) search${ageLabel !== undefined ? ` ${ageLabel} ago` : ''}. Reuse cached responseId "${responseId}" via fetch retrieve (action:retrieve) or source_check; re-run only if stale.`
     : 'Search suppressed: this session already ran this (or a near-duplicate) search recently. Refine the query or wait before retrying.';
   return {
     content: [{ type: 'text', text: guardText(text, {}) }],
-    details: { action: 'search', ledger: reason },
+    details: {
+      action: 'search',
+      ledger: reason,
+      ...(responseId !== undefined ? { responseId } : {}),
+      ...(ageMs !== undefined ? { ageMs, ageSec: Math.floor(ageMs / 1000) } : {}),
+    },
   };
 }
 
@@ -231,7 +266,7 @@ export function createWebSearchExecute(
     }
     const options = searchLedgerOptions(current);
     const begun = ledger.begin(queries, options, signal);
-    if (begun.status === 'suppressed') return priorSearchResult('suppressed');
+    if (begun.status === 'suppressed') return priorSearchResult('suppressed', { responseId: begun.responseId, ageMs: begun.ageMs });
     if (begun.status === 'blocked') return priorSearchResult('blocked');
     if (begun.status === 'coalesced') {
       // Follow-and-retry loop: after a leader failure one follower wins the
@@ -261,7 +296,8 @@ export function createWebSearchExecute(
         }
         // blocked/suppressed here are terminal: success recorded or retry
         // budget exhausted. Preserve existing pointer semantics.
-        return priorSearchResult(next.status === 'blocked' ? 'blocked' : 'suppressed');
+        if (next.status === 'blocked') return priorSearchResult('blocked');
+        return priorSearchResult('suppressed', { responseId: next.responseId, ageMs: next.ageMs });
       }
       if (signal?.aborted) throw abortLedgerError();
       // Livelock cap hit: fail closed without inventing a false suppression.
@@ -296,17 +332,19 @@ export default function (pi: ExtensionAPI): void {
   if (typeof chromeRenewalTimer.unref === 'function') chromeRenewalTimer.unref();
   void ensureFirstStartBootstrap(env);
 
-  pi.on('session_shutdown', () => {
-    void client.close();
-    if (desktop) void desktop.close();
-    void closeBrowserSession();
+  pi.on('session_shutdown', async () => {
     clearInterval(chromeRenewalTimer);
-    void (async () => {
-      try {
-        await revokeUserChrome('shutdown', env);
-      } catch { /* remote cleanup best-effort; local lock already holds */ }
-      await stopChromeBridgeServer();
-    })();
+    await Promise.allSettled([
+      client.close(),
+      ...(desktop ? [desktop.close()] : []),
+      closeBrowserSession(),
+      (async () => {
+        try {
+          await revokeUserChrome('shutdown', env);
+        } catch { /* remote cleanup best-effort; local lock already holds */ }
+        await stopChromeBridgeServer();
+      })(),
+    ]);
   });
 
   pi.on('before_provider_request', (event) => normalizeProviderPayload(event.payload));
@@ -354,8 +392,9 @@ export default function (pi: ExtensionAPI): void {
     promptSnippet: 'Fetch URL content — compose with web_search first for URLs. read takes url for one page or urls[1..8] for full text per URL; crawl takes source ({type:url url or urls[1..8]} or {type:search searchQuery}) plus query for semantic chunks; use source followLinks for single-url same-domain crawls. sitemap needs url + siteMap:true. action retrieve/source_check serve the cached responseId corpus (no network).',
     parameters: Type.Object({
       request: Type.Union([
-        Type.Object({ mode: Type.Literal('read'), url: Type.Optional(Type.String()), urls: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 8 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
-        Type.Object({ mode: Type.Literal('crawl'), source: Type.Union([Type.Object({ type: Type.Literal('url'), url: Type.Optional(Type.String()), urls: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 8 })), followLinks: Type.Optional(Type.Boolean()) }), Type.Object({ type: Type.Literal('search'), searchQuery: Type.String() })]), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
+        Type.Object({ mode: Type.Literal('read'), url: Type.String({ minLength: 1 }), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
+        Type.Object({ mode: Type.Literal('read'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
+        Type.Object({ mode: Type.Literal('crawl'), source: Type.Union([Type.Object({ type: Type.Literal('url'), url: Type.String({ minLength: 1 }), followLinks: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), Type.Object({ type: Type.Literal('url'), urls: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }) }, { additionalProperties: false }), Type.Object({ type: Type.Literal('search'), searchQuery: Type.String() }, { additionalProperties: false })]), query: Type.String(), topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })), maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })) }),
         Type.Object({ mode: Type.Literal('sitemap'), url: Type.String(), siteMap: Type.Literal(true), query: Type.Optional(Type.String()), maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25 })) }),
         Type.Object({ mode: Type.Literal('retrieve'), responseId: Type.String(), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), offset: Type.Optional(Type.Number({ minimum: 0 })), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50000 })), findText: Type.Optional(Type.String()) }),
         Type.Object({ mode: Type.Literal('source_check'), responseId: Type.String(), claims: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }),

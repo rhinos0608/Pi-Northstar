@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildBrowseArgs, buildSemanticSource, buildMediaRoute, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs } from '../src/index.js';
+import Value from 'typebox/value';
 import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
 
 function registryActionEnum(family: string): string[] {
@@ -135,6 +136,11 @@ test('buildFetchRoute read rejects url+urls together', () => {
     () => buildFetchRoute({ mode: 'read', url: 'https://example.com/a', urls: ['https://example.com/b'] }),
     /either url or urls/,
   );
+  // Empty-string url still counts as present: fail closed, never multi-read.
+  assert.throws(
+    () => buildFetchRoute({ mode: 'read', url: '', urls: ['https://example.com/b'] }),
+    /either url or urls/,
+  );
 });
 
 test('buildFetchRoute crawl source urls routes multi-crawl', () => {
@@ -158,6 +164,16 @@ test('buildFetchRoute crawl rejects source url+urls and multi followLinks', () =
       }),
     /either url or urls/,
   );
+  // Empty-string url still counts as present: fail closed, never multi-crawl.
+  assert.throws(
+    () =>
+      buildFetchRoute({
+        mode: 'crawl',
+        source: { type: 'url', url: '', urls: ['https://example.com/b'] },
+        query: 'docs',
+      }),
+    /either url or urls/,
+  );
   assert.throws(
     () =>
       buildFetchRoute({
@@ -167,6 +183,20 @@ test('buildFetchRoute crawl rejects source url+urls and multi followLinks', () =
       }),
     /followLinks needs a single source url/,
   );
+});
+
+test('fetch schema enforces url/urls XOR at validation (read + crawl source)', async () => {
+  const defs = await captureAllTools();
+  const schema = defs.fetch!.parameters as Parameters<typeof Value.Check>[0];
+  assert.equal(Value.Check(schema, { request: { mode: 'read', url: 'https://example.com/a' } }), true);
+  assert.equal(Value.Check(schema, { request: { mode: 'read', urls: ['https://example.com/a'] } }), true);
+  assert.equal(Value.Check(schema, { request: { mode: 'read', url: 'https://example.com/a', urls: ['https://example.com/b'] } }), false);
+  assert.equal(Value.Check(schema, { request: { mode: 'read' } }), false);
+  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'q' } }), true);
+  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', urls: ['https://example.com'] }, query: 'q' } }), true);
+  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', url: 'https://example.com', urls: ['https://example.com/b'] }, query: 'q' } }), false);
+  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url' }, query: 'q' } }), false);
+  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', urls: ['https://example.com'], followLinks: true }, query: 'q' } }), false);
 });
 
 test('buildFetchRoute crawl_search routes to semantic_crawl with defaults', () => {

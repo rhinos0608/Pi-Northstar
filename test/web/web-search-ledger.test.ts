@@ -186,6 +186,62 @@ describe('web-search-ledger: near-duplicate suppression', () => {
   });
 });
 
+describe('web-search-ledger: cached responseId pointer + age', () => {
+  it('suppressed returns the opaque cached pointer and age, never bodies', () => {
+    const { ledger, advance } = ledgerAt(20_000_000);
+    const first = ledger.begin(['pointer query reusable evidence'], { limit: 8 });
+    if (first.status !== 'run') throw new Error('expected run');
+    const body = 'BODY-SENSITIVE-POINTER-TEST-VALUE';
+    ledger.completeSuccess(first.key, { details: { responseId: 'resp-opaque-123', body } });
+    advance(90_000);
+    const second = ledger.begin(['pointer query reusable evidence'], { limit: 8 });
+    assert.equal(second.status, 'suppressed');
+    if (second.status !== 'suppressed') throw new Error('expected suppressed');
+    assert.equal(second.responseId, 'resp-opaque-123');
+    assert.equal(second.ageMs, 90_000);
+    const snapshot = JSON.stringify(ledger.debugEntries());
+    assert.ok(!snapshot.includes(body), 'result bodies must not be stored');
+    assert.ok(!snapshot.includes('resp-opaque-123'), 'debug snapshot stays hash-only (no pointers)');
+  });
+
+  it('near-duplicate suppression carries the pointer + age', () => {
+    const { ledger, advance } = ledgerAt(21_000_000);
+    const first = ledger.begin(['alpha beta gamma delta epsilon zeta'], { limit: 8 });
+    if (first.status !== 'run') throw new Error('expected run');
+    ledger.completeSuccess(first.key, { details: { responseId: 'resp-near-dup' } });
+    advance(60_000);
+    const dup = ledger.begin(['alpha beta gamma delta epsilon zeta extra'], { limit: 8 });
+    assert.equal(dup.status, 'suppressed');
+    if (dup.status !== 'suppressed') throw new Error('expected suppressed');
+    assert.equal(dup.responseId, 'resp-near-dup');
+    assert.equal(dup.ageMs, 60_000);
+  });
+
+  it('nested backend payload shape (details.details.responseId) stores the pointer', () => {
+    const { ledger } = ledgerAt(23_000_000);
+    const first = ledger.begin(['nested payload pointer query'], { limit: 8 });
+    if (first.status !== 'run') throw new Error('expected run');
+    // callSearchMcpTool nests the raw backend payload under details.
+    ledger.completeSuccess(first.key, { details: { content: [], details: { responseId: 'resp-nested-1' } } });
+    const second = ledger.begin(['nested payload pointer query'], { limit: 8 });
+    assert.equal(second.status, 'suppressed');
+    if (second.status !== 'suppressed') throw new Error('expected suppressed');
+    assert.equal(second.responseId, 'resp-nested-1');
+  });
+
+  it('non-string or oversized responseId stores no pointer but still suppresses', () => {
+    const { ledger } = ledgerAt(22_000_000);
+    const first = ledger.begin(['unpointed query alpha unique'], { limit: 8 });
+    if (first.status !== 'run') throw new Error('expected run');
+    ledger.completeSuccess(first.key, { details: { responseId: 12345 } });
+    const second = ledger.begin(['unpointed query alpha unique'], { limit: 8 });
+    assert.equal(second.status, 'suppressed');
+    if (second.status !== 'suppressed') throw new Error('expected suppressed');
+    assert.equal(second.responseId, undefined);
+    assert.ok(typeof second.ageMs === 'number');
+  });
+});
+
 describe('web-search-ledger: batch exact canonical match', () => {
   it('identical batch suppresses after success', () => {
     const { ledger } = ledgerAt(4_000_000);

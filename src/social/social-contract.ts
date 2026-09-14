@@ -175,6 +175,76 @@ export function selectorSpecFor(platform: SocialPlatform, action: SocialAction):
   return SOCIAL_ACTION_SELECTORS[platform][action] ?? {};
 }
 
+// ── Per-action auxiliary-field contract ──
+// Only fields listed here for a platform/action are honored. Closed string
+// lists are the intersection every backend path supports, so a validated
+// value can never be silently dropped downstream. `timeRange: 'date'` pins
+// YYYY-MM-DD; `timeRange: true` accepts any non-empty string the backends
+// forward verbatim. Actions without an entry honor no aux fields.
+export interface SocialAuxSpec {
+  sort?: readonly string[];
+  timeRange?: true | 'date';
+  feedVariant?: readonly string[];
+  includeReplies?: true;
+}
+
+const SOCIAL_AUX_SPECS: Readonly<Record<SocialPlatform, Readonly<Partial<Record<SocialAction, SocialAuxSpec>>>>> = {
+  twitter: {
+    search: { sort: ['top', 'latest'], timeRange: 'date' },
+    get_feed: { feedVariant: ['for-you', 'following'] },
+  },
+  reddit: {
+    search: { sort: ['relevance', 'hot', 'top', 'new', 'comments'], timeRange: true },
+    get_thread: { includeReplies: true },
+    get_comments: { includeReplies: true },
+    get_feed: { feedVariant: ['popular', 'all'] },
+    get_trending: { feedVariant: ['hot'] },
+    get_community_posts: { sort: ['hot', 'new', 'top', 'rising'] },
+  },
+  xiaohongshu: {
+    get_comments: { includeReplies: true },
+    get_notifications: { feedVariant: ['mentions', 'likes', 'connections'] },
+  },
+  facebook: {},
+  instagram: {},
+  v2ex: {},
+  linkedin: {},
+};
+
+export function auxSpecFor(platform: SocialPlatform, action: SocialAction): SocialAuxSpec {
+  return SOCIAL_AUX_SPECS[platform][action] ?? {};
+}
+
+export const SOCIAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function validateAuxField(
+  platform: SocialPlatform,
+  action: SocialAction,
+  spec: SocialAuxSpec,
+  field: 'sort' | 'timeRange' | 'feedVariant',
+  value: unknown,
+): string | undefined {
+  if (value === undefined) return undefined;
+  const allowed = spec[field];
+  if (allowed === undefined) {
+    throw new SocialError('invalid_request', `${platform} ${action} does not support ${field}`);
+  }
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new SocialError('invalid_request', `${field} must be a non-empty string when provided`);
+  }
+  if (Array.isArray(allowed)) {
+    if (!(allowed as readonly string[]).includes(value)) {
+      throw new SocialError(
+        'invalid_request',
+        `${platform} ${action} invalid ${field} "${value}", expected one of: ${(allowed as readonly string[]).join(', ')}`,
+      );
+    }
+  } else if (allowed === 'date' && !SOCIAL_DATE_RE.test(value)) {
+    throw new SocialError('invalid_request', `${field} must match YYYY-MM-DD, got "${value}"`);
+  }
+  return value;
+}
+
 export const DEFAULT_SOCIAL_LIMIT = 20;
 export const SOCIAL_MAX_LIMIT = 100;
 export const MAX_SELECTOR_LENGTH = 1024;
@@ -307,10 +377,22 @@ export function validateSocialRequest(input: SocialRequestInput): { request: Soc
     if (selectors[field] !== undefined) request[field] = selectors[field];
   }
   if (url !== undefined) request.url = url;
-  if (input.feedVariant !== undefined) request.feedVariant = input.feedVariant;
-  if (input.sort !== undefined) request.sort = input.sort;
-  if (input.timeRange !== undefined) request.timeRange = input.timeRange;
-  if (input.includeReplies !== undefined) request.includeReplies = input.includeReplies;
+  const aux = auxSpecFor(platform, action);
+  const feedVariant = validateAuxField(platform, action, aux, 'feedVariant', input.feedVariant);
+  const sort = validateAuxField(platform, action, aux, 'sort', input.sort);
+  const timeRange = validateAuxField(platform, action, aux, 'timeRange', input.timeRange);
+  if (feedVariant !== undefined) request.feedVariant = feedVariant;
+  if (sort !== undefined) request.sort = sort;
+  if (timeRange !== undefined) request.timeRange = timeRange;
+  if (input.includeReplies !== undefined) {
+    if (aux.includeReplies === undefined) {
+      throw new SocialError('invalid_request', `${platform} ${action} does not support includeReplies`);
+    }
+    if (typeof input.includeReplies !== 'boolean') {
+      throw new SocialError('invalid_request', 'includeReplies must be a boolean when provided');
+    }
+    request.includeReplies = input.includeReplies;
+  }
   return { request, warnings };
 }
 

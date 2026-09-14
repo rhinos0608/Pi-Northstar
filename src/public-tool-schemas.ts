@@ -198,12 +198,15 @@ export function buildDesktopParameters(): TSchema {
 }
 
 import {
+  auxSpecFor,
   canonicalActionsFor,
   MAX_SELECTOR_LENGTH as MAX_SOCIAL_SELECTOR_LENGTH,
   selectorSpecFor,
+  SOCIAL_DATE_RE,
   SOCIAL_MAX_LIMIT,
   SOCIAL_PLATFORMS,
   type SocialAction,
+  type SocialAuxSpec,
   type SocialPlatform,
   type SocialSelectorField,
 } from './social/social-contract.js';
@@ -223,6 +226,22 @@ function socialSelectorField(field: SocialSelectorField): TSchema {
   return Type.String({ minLength: 1, maxLength: MAX_SOCIAL_SELECTOR_LENGTH, description: SELECTOR_DESCRIPTIONS[field] });
 }
 
+// Aux fields mirror the per-action contract registry: only honored fields are
+// advertised, with closed enums where the registry pins vocabulary. Anything
+// else rejects at schema validation instead of dropping silently at runtime.
+function socialAuxFields(aux: SocialAuxSpec): Record<string, TSchema> {
+  const fields: Record<string, TSchema> = {};
+  if (aux.sort !== undefined) fields.sort = Type.Optional(StringEnum([...aux.sort], { description: 'Result ordering; unsupported values reject.' }));
+  if (aux.timeRange !== undefined) {
+    fields.timeRange = aux.timeRange === 'date'
+      ? Type.Optional(Type.String({ pattern: SOCIAL_DATE_RE.source, description: 'Earliest date as YYYY-MM-DD.' }))
+      : Type.Optional(Type.String({ minLength: 1, description: 'Upstream time filter passed verbatim.' }));
+  }
+  if (aux.feedVariant !== undefined) fields.feedVariant = Type.Optional(StringEnum([...aux.feedVariant], { description: 'Feed or notification variant.' }));
+  if (aux.includeReplies !== undefined) fields.includeReplies = Type.Optional(Type.Boolean({ description: 'Include nested replies; false keeps top-level items only.' }));
+  return fields;
+}
+
 function socialBody(
   platform: SocialPlatform,
   action: SocialAction,
@@ -237,10 +256,7 @@ function socialBody(
       : Type.Optional(Type.String({ minLength: 1, description: 'Canonical platform URL (selectors derived from closed path shapes).' })),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: SOCIAL_MAX_LIMIT, description: 'Max items. Over-cap clamps with warning at runtime.' })),
     cursor: Type.Optional(Type.String({ maxLength: MAX_SOCIAL_CURSOR_LENGTH, description: 'Opaque pagination cursor.' })),
-    feedVariant: Type.Optional(Type.String()),
-    sort: Type.Optional(Type.String()),
-    timeRange: Type.Optional(Type.String()),
-    includeReplies: Type.Optional(Type.Boolean()),
+    ...socialAuxFields(auxSpecFor(platform, action)),
   };
   for (const field of allowed) {
     properties[field] = requiredFields.has(field)

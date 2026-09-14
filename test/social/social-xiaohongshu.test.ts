@@ -139,6 +139,16 @@ test('xhs-cli get_comments is read --comments, never a mutation command', () => 
   assert.deepEqual(operation?.upstreamAction, ['read', '--comments', '--json']);
 });
 
+test('get_comments includeReplies:false skips xhs-cli instead of ignoring the flag', async () => {
+  const { runner } = fakeRunner([]);
+  const worker = createXiaohongshuWorker({ runner });
+  const plain = await worker.plans(request({ action: 'get_comments', postId: 'a'.repeat(24) }), {});
+  assert.equal(plain.length, 2);
+  const narrowed = await worker.plans(request({ action: 'get_comments', postId: 'a'.repeat(24), includeReplies: false }), {});
+  assert.equal(narrowed.length, 1);
+  assert.equal(narrowed[0]!.backend, OPENCLI_BACKEND);
+});
+
 // ── Plans ──
 
 test('search declares OpenCLI first, xhs-cli second, both cookie tier', async () => {
@@ -215,7 +225,16 @@ test('opencli get_post and get_comments pass the request URL when supplied', () 
 test('opencli get_notifications maps feedVariant to the closed --type enum', () => {
   const base = request({ action: 'get_notifications' });
   assert.deepEqual(opencliArgvFor('get_notifications', { ...base, feedVariant: 'likes' }, 20), ['xiaohongshu', 'notifications', '--type', 'likes', '--limit', '20', '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_notifications', { ...base, feedVariant: 'bogus' }, 20), ['xiaohongshu', 'notifications', '--limit', '20', '-f', 'json']);
+  // Unknown values reject instead of silently dropping the --type flag.
+  assert.throws(
+    () => opencliArgvFor('get_notifications', { ...base, feedVariant: 'bogus' }, 20),
+    (error: unknown) => error instanceof SocialError && error.code === 'invalid_request',
+  );
+  // The contract validator rejects them before argv building too.
+  assert.throws(
+    () => validateSocialRequest({ platform: 'xiaohongshu', action: 'get_notifications', feedVariant: 'bogus' }),
+    (error: unknown) => error instanceof SocialError && error.code === 'invalid_request',
+  );
 });
 
 test('opencli get_comments includeReplies adds --with-replies', () => {

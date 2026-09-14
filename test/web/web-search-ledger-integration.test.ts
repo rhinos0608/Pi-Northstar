@@ -93,6 +93,38 @@ test('second identical search suppresses without a paid call', async () => {
   assert.equal((client as unknown as { calls: unknown[] }).calls.length, 1);
 });
 
+test('suppressed repeat returns cached responseId + age with retrieve guidance', async () => {
+  const client = stubClient(() => ({
+    content: [{ type: 'text', text: 'fresh evidence' }],
+    details: { query: 'q', results: [], responseId: 'resp-cached-007' },
+  }));
+  const ledger = new WebSearchLedger();
+  const execute = createWebSearchExecute(client, ENV, ledger);
+  await execute('call-1', { query: 'latest OpenAI news' }, undefined);
+  const second = await execute('call-2', { query: 'latest OpenAI news' }, undefined);
+  const details = second.details as { ledger?: string; responseId?: string; ageMs?: number; ageSec?: number };
+  assert.equal(details.ledger, 'suppressed');
+  assert.equal(details.responseId, 'resp-cached-007');
+  assert.ok(typeof details.ageMs === 'number', 'suppressed details carry ageMs');
+  const text = (second.content as Array<{ text: string }>)[0]!.text;
+  assert.ok(text.includes('resp-cached-007'), 'suppressed text names the reusable pointer');
+  assert.ok(text.includes('retrieve'), 'suppressed text guides freshness-policy reuse');
+  assert.equal((client as unknown as { calls: unknown[] }).calls.length, 1);
+});
+
+test('suppressed without a cached pointer falls back to static text', async () => {
+  const client = stubClient(() => ({ ok: true }));
+  const ledger = new WebSearchLedger();
+  const execute = createWebSearchExecute(client, ENV, ledger);
+  await execute('call-1', { query: 'pointerless query' }, undefined);
+  const second = await execute('call-2', { query: 'pointerless query' }, undefined);
+  const details = second.details as { ledger?: string; responseId?: string };
+  assert.equal(details.ledger, 'suppressed');
+  assert.equal(details.responseId, undefined);
+  const text = (second.content as Array<{ text: string }>)[0]!.text;
+  assert.ok(text.includes('Refine the query'), 'fallback text preserved when no pointer');
+});
+
 test('non-retryable failure blocks the repeat without another backend call', async () => {
   const failing = stubClient(() => {
     throw new Error('invalid_response: backend returned malformed JSON');

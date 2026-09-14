@@ -187,7 +187,13 @@ export interface CliCorpusHit {
 
 /** Parent-side mirror of webSearchCached: stash web_search hits so a later
  *  retrieve / source_check resolves without spawning a child. Best-effort:
- *  returns the result unchanged when there is nothing worth caching. */
+ *  returns the result unchanged when there is nothing worth caching.
+ *
+ *  Always repopulates: the child stamps its own (child-process-local) store
+ *  id, which dies with the child and is unresolvable from the parent store.
+ *  The parent stores the hits locally and replaces the id so every surfaced
+ *  responseId (including ledger suppression pointers) resolves via
+ *  tryServeCliCorpusAction. */
 export function populateCliCorpus(
   store: WebAccessContentStore,
   name: string,
@@ -196,7 +202,7 @@ export function populateCliCorpus(
   try {
     if (name !== 'web_search') return result;
     const details = (result as { details?: { query?: unknown; results?: Array<CliCorpusHit & { source?: unknown }>; responseId?: unknown } }).details;
-    if (!details || typeof details.query !== 'string' || !Array.isArray(details.results) || details.responseId !== undefined) {
+    if (!details || typeof details.query !== 'string' || !Array.isArray(details.results)) {
       return result;
     }
     const trimmed = details.query.trim();

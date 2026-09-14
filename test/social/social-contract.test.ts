@@ -188,6 +188,51 @@ test('empty selector strings are rejected, not silently dropped', () => {
   socialError('invalid_request', () => validateSocialRequest({ platform: 'twitter', action: 'get_post', postId: '' }));
 });
 
+test('aux fields are honored per platform/action with closed vocabularies', () => {
+  // Reddit search accepts its full sort set and forwards the time range.
+  const redditSearch = validateSocialRequest({
+    platform: 'reddit', action: 'search', query: 'rust', sort: 'comments', timeRange: 'week',
+  });
+  assert.equal(redditSearch.request.sort, 'comments');
+  assert.equal(redditSearch.request.timeRange, 'week');
+  // Unsupported sort values reject instead of disappearing downstream.
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'reddit', action: 'search', query: 'rust', sort: 'bogus',
+  }));
+  // rdt-only community sorts are outside the cross-backend intersection.
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'reddit', action: 'get_community_posts', community: 'rust', sort: 'best',
+  }));
+  // Fields no backend honors for the action reject.
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'reddit', action: 'get_post', postId: 'abc123', sort: 'hot',
+  }));
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'twitter', action: 'search', query: 'pi', sort: 'bogus',
+  }));
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'twitter', action: 'search', query: 'pi', timeRange: 'last week',
+  }));
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'twitter', action: 'get_profile', user: 'naval', feedVariant: 'following',
+  }));
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'v2ex', action: 'get_topic', topic: '123', sort: 'hot',
+  }));
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'facebook', action: 'get_feed', feedVariant: 'top',
+  }));
+  // includeReplies must be boolean where honored.
+  socialError('invalid_request', () => validateSocialRequest({
+    platform: 'reddit', action: 'get_thread', postId: 'abc123',
+    includeReplies: 'yes' as unknown as boolean,
+  }));
+  const thread = validateSocialRequest({
+    platform: 'reddit', action: 'get_thread', postId: 'abc123', includeReplies: false,
+  });
+  assert.equal(thread.request.includeReplies, false);
+});
+
 test('unsupported platform is invalid_request', () => {
   socialError('invalid_request', () => validateSocialRequest({ platform: 'gab', action: 'search', query: 'x' }));
 });
@@ -703,7 +748,7 @@ test('social-entity-contract owns entity types, validators, and rendering', () =
   assert.equal(socialEntityContract.parseSocialDate, parseSocialDate);
 });
 
-test('facade re-exports the full 64-export surface without drift', () => {
+test('facade re-exports the full 66-export surface without drift', () => {
   const coreOwned: readonly (keyof typeof facade)[] = [
     'SOCIAL_PLATFORMS', 'SOCIAL_ACTIONS', 'SOCIAL_ENTITY_KINDS', 'SOCIAL_CANONICAL_ACTIONS',
     'SocialError', 'isSocialPlatform', 'isSocialAction', 'canonicalActionsFor',
@@ -727,11 +772,11 @@ test('facade re-exports the full 64-export surface without drift', () => {
       `facade.${name} drifts from social-entity-contract`,
     );
   }
-  // 28 runtime values: 8 consts + 19 functions + SocialError.
+  // 30 runtime values: 9 consts + 20 functions + SocialError.
   const runtimeNames = [
-    'DEFAULT_SOCIAL_LIMIT', 'MAX_SELECTOR_LENGTH', 'SOCIAL_ACTIONS', 'SOCIAL_CANONICAL_ACTIONS', 'SOCIAL_ENTITY_KINDS',
-    'SOCIAL_MAX_CURSOR_LENGTH', 'SOCIAL_MAX_LIMIT', 'SOCIAL_PLATFORMS',
-    'SocialError', 'backendSupportsAction', 'canonicalActionsFor', 'decodeSocialCursor',
+    'DEFAULT_SOCIAL_LIMIT', 'MAX_SELECTOR_LENGTH', 'SOCIAL_ACTIONS', 'SOCIAL_CANONICAL_ACTIONS', 'SOCIAL_DATE_RE',
+    'SOCIAL_ENTITY_KINDS', 'SOCIAL_MAX_CURSOR_LENGTH', 'SOCIAL_MAX_LIMIT', 'SOCIAL_PLATFORMS',
+    'SocialError', 'auxSpecFor', 'backendSupportsAction', 'canonicalActionsFor', 'decodeSocialCursor',
     'encodeSocialCursor', 'extractSelectorsFromUrl', 'isAdvertisedAction', 'isSocialAction',
     'isSocialPlatform', 'parseSocialDate', 'renderSocialEntity', 'renderSocialPage',
     'resolveSocialAction', 'resolveSocialLimit', 'selectorSpecFor', 'socialCursorFingerprint',

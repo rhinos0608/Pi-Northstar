@@ -239,15 +239,19 @@ const OPENCLI_ARGV: Readonly<Partial<Record<SocialAction, (request: SocialReques
   get_user_posts: (request, limit) => ['xiaohongshu', 'user', requireXhsUser(request), '--limit', String(limit), '-f', 'json'],
   get_feed: (_request, limit) => ['xiaohongshu', 'feed', '--limit', String(limit), '-f', 'json'],
   get_saved: (_request, limit) => ['xiaohongshu', 'saved', '--limit', String(limit), '-f', 'json'],
-  // Notification type is a closed enum; unknown feedVariant values are omitted.
-  get_notifications: (request, limit) => [
-    'xiaohongshu', 'notifications',
-    ...(request.feedVariant === 'mentions' || request.feedVariant === 'likes' || request.feedVariant === 'connections'
-      ? ['--type', request.feedVariant]
-      : []),
-    '--limit', String(limit),
-    '-f', 'json',
-  ],
+  // Notification type is a closed enum; unknown feedVariant values reject.
+  get_notifications: (request, limit) => {
+    if (request.feedVariant !== undefined
+      && request.feedVariant !== 'mentions' && request.feedVariant !== 'likes' && request.feedVariant !== 'connections') {
+      throw new SocialError('invalid_request', `xiaohongshu get_notifications invalid feedVariant "${request.feedVariant}", expected one of: mentions, likes, connections`, { platform: 'xiaohongshu', backend: 'opencli-xiaohongshu' });
+    }
+    return [
+      'xiaohongshu', 'notifications',
+      ...(request.feedVariant !== undefined ? ['--type', request.feedVariant] : []),
+      '--limit', String(limit),
+      '-f', 'json',
+    ];
+  },
 };
 
 /** xhs-cli subcommands the worker may ever spawn. `read --comments` covers
@@ -261,7 +265,13 @@ const XHS_CLI_READ_SUBCOMMANDS: ReadonlySet<string> = new Set([
 const XHS_ARGV: Readonly<Partial<Record<SocialAction, (request: SocialRequest, limit: number) => readonly string[]>>> = {
   search: (request) => ['search', requireXhsQuery(request), '--json'],
   get_post: (request) => ['read', requireXhsNoteId(request), '--json'],
-  get_comments: (request) => ['read', requireXhsNoteId(request), '--comments', '--json'],
+  get_comments: (request) => {
+    // xhs-cli read --comments has no reply control: skip so OpenCLI serves includeReplies.
+    if (request.includeReplies === false) {
+      throw new SocialError('unsupported_action', 'xhs-cli get_comments cannot exclude replies', { platform: 'xiaohongshu', backend: 'xhs-cli' });
+    }
+    return ['read', requireXhsNoteId(request), '--comments', '--json'];
+  },
   get_profile: (request) => ['user', requireXhsUser(request), '--json'],
   get_user_posts: (request) => ['user-posts', requireXhsUser(request), '--json'],
   get_followers: (request) => ['followers', requireXhsUser(request), '--json'],
@@ -345,7 +355,15 @@ export function createXiaohongshuWorker(options: XiaohongshuWorkerOptions = {}):
       if (opencliArgs !== undefined) {
         plans.push(plan(OPENCLI_BACKEND, opencliCommand, opencliArgs, opencliEnv));
       }
-      const xhsArgs = xhsCliArgvFor(request.action, request, request.limit);
+      // A backend that cannot honor a validated field opts out so a capable
+      // backend still serves it; genuine input errors propagate.
+      let xhsArgs: readonly string[] | undefined;
+      try {
+        xhsArgs = xhsCliArgvFor(request.action, request, request.limit);
+      } catch (error) {
+        if (error instanceof SocialError && error.code === 'unsupported_action') xhsArgs = undefined;
+        else throw error;
+      }
       if (xhsArgs !== undefined) {
         if (!XHS_CLI_READ_SUBCOMMANDS.has(xhsArgs[0]!)) {
           throw new SocialError('invalid_request', `refusing to spawn xhs subcommand`, { platform: 'xiaohongshu' });

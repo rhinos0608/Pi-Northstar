@@ -289,6 +289,20 @@ test('backends without a mapping for the action are skipped, not fatal', async (
   assert.deepEqual(plans.map((plan) => plan.backend), ['reddit-cookie']);
 });
 
+test('feed variants skip backends that cannot honor them instead of mis-serving', async () => {
+  const worker = createRedditWorker({ env: {}, runCli: cliRecorder().runCli });
+  const plain = await worker.plans(req({ platform: 'reddit', action: 'get_feed', limit: 5 }), {});
+  assert.deepEqual(plain.map((plan) => plan.backend), ['OpenCLI', 'rdt-cli']);
+  // popular is native-only: CLI backends opt out rather than serve home/feed.
+  const popular = await worker.plans(req({ platform: 'reddit', action: 'get_feed', feedVariant: 'popular', limit: 5 }), {});
+  assert.deepEqual(popular.map((plan) => plan.backend), []);
+  const all = await worker.plans(req({ platform: 'reddit', action: 'get_feed', feedVariant: 'all', limit: 5 }), {});
+  assert.deepEqual(all.map((plan) => plan.backend), ['rdt-cli']);
+  // rdt trending is always popular: hot opts it out, OpenCLI serves.
+  const hot = await worker.plans(req({ platform: 'reddit', action: 'get_trending', feedVariant: 'hot', limit: 5 }), {});
+  assert.deepEqual(hot.map((plan) => plan.backend), ['OpenCLI']);
+});
+
 // ── Cursor pinning ──
 
 function cursorFor(request: SocialRequest, backend: string, after = 't3_abc123'): string {

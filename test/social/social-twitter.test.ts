@@ -189,6 +189,14 @@ test('plans omit backends that cannot serve the action', async () => {
   assert.deepEqual(plans.map((plan) => plan.backend), ['opencli-twitter']);
 });
 
+test('search timeRange skips OpenCLI instead of dropping the date bound', async () => {
+  const worker = new SocialTwitterWorker();
+  const plain = await worker.plans(request('search', { query: 'pi' }), {});
+  assert.deepEqual(plain.map((plan) => plan.backend), ['twitter-cli', 'opencli-twitter']);
+  const dated = await worker.plans(request('search', { query: 'pi', timeRange: '2026-01-01' }), {});
+  assert.deepEqual(dated.map((plan) => plan.backend), ['twitter-cli']);
+});
+
 // ── Closed argv mapping ──
 
 test('twitter-cli argv comes from the closed mapping', () => {

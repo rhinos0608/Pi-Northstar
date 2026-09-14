@@ -176,6 +176,20 @@ test('CLI parent store round-trips web_search into retrieve; unknown id throws',
   assert.equal(tryServeCliCorpusAction(store, { url: 'https://e.com/' }), undefined);
 });
 
+test('CLI parent replaces child-store responseId so surfaced ids resolve locally', () => {
+  const store = createWebAccessContentStore();
+  const result = populateCliCorpus(store, 'web_search', {
+    content: [{ type: 'text', text: 'hits' }],
+    details: { query: 'q', results: [{ title: 't', url: 'https://e.com/', snippet: 's', backend: 'brave' }], responseId: 'child-store-id' },
+  });
+  const responseId = (result.details as { responseId: string }).responseId;
+  assert.ok(typeof responseId === 'string');
+  assert.notEqual(responseId, 'child-store-id');
+  const served = tryServeCliCorpusAction(store, { action: 'retrieve', responseId });
+  assert.ok(served !== undefined);
+  assert.throws(() => tryServeCliCorpusAction(store, { action: 'retrieve', responseId: 'child-store-id' }), /No stored results/);
+});
+
 test('CLI env allowlist forwards the bridge session token', () => {
   const env = buildCliEnvironment({ PATH: '/bin', PI_SEARCH_CHROME_BRIDGE_TOKEN: 'tok-abc' });
   assert.equal(env.PI_SEARCH_CHROME_BRIDGE_TOKEN, 'tok-abc');

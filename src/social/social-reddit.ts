@@ -525,7 +525,12 @@ interface NativeRoute {
 type NativeRouteBuilder = (request: SocialRequest) => NativeRoute;
 
 function nativeSearchRoute(request: SocialRequest): NativeRoute {
-  const params: Record<string, string> = { q: requireQuery(request), sort: request.sort ?? 'relevance', type: 'link', limit: String(request.limit) };
+  const sort = request.sort ?? 'relevance';
+  if (!OPENCLI_SEARCH_SORTS.has(sort)) {
+    throw new SocialError('invalid_request', `Reddit search invalid sort "${sort}", expected one of: relevance, hot, top, new, comments`, { platform: 'reddit' });
+  }
+  const params: Record<string, string> = { q: requireQuery(request), sort, type: 'link', limit: String(request.limit) };
+  if (request.timeRange !== undefined) params.t = request.timeRange;
   return { path: '/search.json', params };
 }
 
@@ -567,7 +572,10 @@ function nativeCommunityRoute(request: SocialRequest): NativeRoute {
 }
 
 function nativeCommunityPostsRoute(request: SocialRequest): NativeRoute {
-  const sort = request.sort !== undefined && NATIVE_COMMUNITY_SORTS.has(request.sort) ? request.sort : 'hot';
+  const sort = request.sort ?? 'hot';
+  if (!NATIVE_COMMUNITY_SORTS.has(sort)) {
+    throw new SocialError('invalid_request', `Reddit community posts invalid sort "${sort}", expected one of: hot, new, top, rising, controversial`, { platform: 'reddit' });
+  }
   return { path: `/r/${encodeURIComponent(requireCommunity(request))}/${sort}.json`, params: {} };
 }
 
@@ -687,7 +695,12 @@ type CliArgBuilder = (request: SocialRequest, n: string) => string[];
 
 function openCliSearchArgs(request: SocialRequest, n: string): string[] {
   const args = ['reddit', 'search', requireCliPositional(requireQuery(request), 'query', 'reddit'), '--limit', n];
-  if (request.sort !== undefined && OPENCLI_SEARCH_SORTS.has(request.sort)) args.push('--sort', request.sort);
+  if (request.sort !== undefined) {
+    if (!OPENCLI_SEARCH_SORTS.has(request.sort)) {
+      throw new SocialError('invalid_request', `Reddit search invalid sort "${request.sort}", expected one of: relevance, hot, top, new, comments`, { platform: 'reddit', backend: 'OpenCLI' });
+    }
+    args.push('--sort', request.sort);
+  }
   if (request.timeRange !== undefined) args.push('--time', request.timeRange);
   return [...args, '-f', 'json'];
 }
@@ -701,9 +714,6 @@ function openCliThreadArgs(request: SocialRequest, n: string): string[] {
   ];
 }
 
-function openCliThreadNoDepthArgs(request: SocialRequest, n: string): string[] {
-  return ['reddit', 'read', stripFullname(requirePostId(request), 't3'), '--limit', n, '-f', 'json'];
-}
 
 function openCliTrendingArgs(request: SocialRequest, n: string): string[] {
   if (request.feedVariant === 'hot') return ['reddit', 'hot', '--limit', n, '-f', 'json'];
@@ -711,10 +721,13 @@ function openCliTrendingArgs(request: SocialRequest, n: string): string[] {
 }
 
 function openCliCommunityPostsArgs(request: SocialRequest, n: string): string[] {
+  if (request.sort !== undefined && !OPENCLI_COMMUNITY_SORTS.has(request.sort)) {
+    throw new SocialError('invalid_request', `Reddit community posts invalid sort "${request.sort}", expected one of: hot, new, top, rising`, { platform: 'reddit', backend: 'OpenCLI' });
+  }
   return [
     'reddit', 'subreddit', requireCommunity(request),
     '--limit', n,
-    ...(request.sort !== undefined && OPENCLI_COMMUNITY_SORTS.has(request.sort) ? ['--sort', request.sort] : []),
+    ...(request.sort !== undefined ? ['--sort', request.sort] : []),
     '-f', 'json',
   ];
 }
@@ -723,11 +736,17 @@ const OPENCLI_ARG_BUILDERS: Partial<Record<SocialRequest['action'], CliArgBuilde
   search: openCliSearchArgs,
   get_post: (request) => ['reddit', 'read', stripFullname(requirePostId(request), 't3'), '--limit', '1', '-f', 'json'],
   get_thread: openCliThreadArgs,
-  get_comments: openCliThreadNoDepthArgs,
+  get_comments: openCliThreadArgs,
   get_profile: (request) => ['reddit', 'user', requireUser(request), '-f', 'json'],
   get_user_posts: (request, n) => ['reddit', 'user-posts', requireUser(request), '--limit', n, '-f', 'json'],
   get_user_comments: (request, n) => ['reddit', 'user-comments', requireUser(request), '--limit', n, '-f', 'json'],
-  get_feed: (_request, n) => ['reddit', 'home', '--limit', n, '-f', 'json'],
+  get_feed: (request, n) => {
+    // OpenCLI home honors no feed variant: skip so rdt/native serves it.
+    if (request.feedVariant !== undefined) {
+      throw new SocialError('unsupported_action', `OpenCLI has no Reddit feed variant "${request.feedVariant}"`, { platform: 'reddit', backend: 'OpenCLI' });
+    }
+    return ['reddit', 'home', '--limit', n, '-f', 'json'];
+  },
   get_saved: (_request, n) => ['reddit', 'saved', '--limit', n, '-f', 'json'],
   get_trending: openCliTrendingArgs,
   get_community: (request) => ['reddit', 'subreddit-info', requireCommunity(request), '-f', 'json'],
@@ -752,7 +771,12 @@ type RdtArgBuilder = (request: SocialRequest, ctx: RdtArgContext) => string[];
 function rdtSearchArgs(request: SocialRequest, ctx: RdtArgContext): string[] {
   const args = ['search', requireCliPositional(requireQuery(request), 'query', 'reddit'), '-n', ctx.n];
   if (request.community !== undefined && REDDIT_NAME_RE.test(request.community)) args.push('-r', request.community);
-  if (request.sort !== undefined && RDT_SEARCH_SORTS.has(request.sort)) args.push('-s', request.sort);
+  if (request.sort !== undefined) {
+    if (!RDT_SEARCH_SORTS.has(request.sort)) {
+      throw new SocialError('invalid_request', `Reddit search invalid sort "${request.sort}", expected one of: relevance, hot, top, new, comments`, { platform: 'reddit', backend: 'rdt-cli' });
+    }
+    args.push('-s', request.sort);
+  }
   if (request.timeRange !== undefined) args.push('-t', request.timeRange);
   return [...args, ...ctx.afterArgs, '--json'];
 }
@@ -763,13 +787,20 @@ function rdtReadArgs(request: SocialRequest, ctx: RdtArgContext): string[] {
 
 function rdtFeedArgs(request: SocialRequest, ctx: RdtArgContext): string[] {
   if (request.feedVariant === 'all') return ['all', '-n', ctx.n, ...ctx.afterArgs, '--json'];
+  // rdt feed honors no other variant: skip so native serves popular.
+  if (request.feedVariant !== undefined) {
+    throw new SocialError('unsupported_action', `rdt-cli has no Reddit feed variant "${request.feedVariant}"`, { platform: 'reddit', backend: 'rdt-cli' });
+  }
   return ['feed', '-n', ctx.n, ...ctx.afterArgs, '--json'];
 }
 
 function rdtCommunityPostsArgs(request: SocialRequest, ctx: RdtArgContext): string[] {
+  if (request.sort !== undefined && !RDT_SUB_SORTS.has(request.sort)) {
+    throw new SocialError('invalid_request', `Reddit community posts invalid sort "${request.sort}", expected one of: hot, new, top, rising, controversial, best`, { platform: 'reddit', backend: 'rdt-cli' });
+  }
   return [
     'sub', requireCommunity(request), '-n', ctx.n,
-    ...(request.sort !== undefined && RDT_SUB_SORTS.has(request.sort) ? ['-s', request.sort] : []),
+    ...(request.sort !== undefined ? ['-s', request.sort] : []),
     ...ctx.afterArgs, '--json',
   ];
 }
@@ -784,7 +815,13 @@ const RDT_ARG_BUILDERS: Partial<Record<SocialRequest['action'], RdtArgBuilder>> 
   get_user_comments: (request, ctx) => ['user-comments', requireUser(request), '-n', ctx.n, ...ctx.afterArgs, '--json'],
   get_feed: rdtFeedArgs,
   get_saved: (_request, ctx) => ['saved', '-n', ctx.n, ...ctx.afterArgs, '--json'],
-  get_trending: (_request, ctx) => ['popular', '-n', ctx.n, ...ctx.afterArgs, '--json'],
+  get_trending: (request, ctx) => {
+    // rdt popular honors no variant: skip so OpenCLI/native serves hot.
+    if (request.feedVariant !== undefined) {
+      throw new SocialError('unsupported_action', `rdt-cli has no Reddit trending variant "${request.feedVariant}"`, { platform: 'reddit', backend: 'rdt-cli' });
+    }
+    return ['popular', '-n', ctx.n, ...ctx.afterArgs, '--json'];
+  },
   get_community: (request) => ['sub-info', requireCommunity(request), '--json'],
   get_community_posts: rdtCommunityPostsArgs,
 };

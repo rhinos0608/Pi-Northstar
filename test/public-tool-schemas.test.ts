@@ -162,6 +162,29 @@ test('social schema rejects missing selectors, cross-action fields, and overflow
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', bogus: 1 }), false);
 });
 
+test('social schema advertises aux fields only where honored, with closed vocabularies', () => {
+  const schema = buildSocialParameters();
+  // Honored fields with valid values pass.
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', sort: 'latest' }), true);
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', timeRange: '2026-01-01' }), true);
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_feed', feedVariant: 'following' }), true);
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'search', query: 'x', sort: 'comments', timeRange: 'week' }), true);
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_thread', postId: 'a', includeReplies: false }), true);
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_community_posts', community: 'rust', sort: 'rising' }), true);
+  // Out-of-vocab values reject at the schema.
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', sort: 'bogus' }), false);
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', timeRange: 'last week' }), false);
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'search', query: 'x', sort: 'bogus' }), false);
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_community_posts', community: 'rust', sort: 'best' }), false);
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_feed', feedVariant: 'top' }), false);
+  // Unhonored fields are not advertised per action.
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile', user: 'ada', sort: 'top' }), false);
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_post', postId: 'a', sort: 'hot' }), false);
+  assert.equal(Value.Check(schema, { platform: 'v2ex', action: 'get_topic', topic: '1', sort: 'hot' }), false);
+  assert.equal(Value.Check(schema, { platform: 'facebook', action: 'get_feed', feedVariant: 'top' }), false);
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_thread', postId: 'a', includeReplies: 'yes' }), false);
+});
+
 test('browser semanticAction accepts closed locators/verbs with nth-index and fill-value rules', () => {
   const schema = buildBrowserParameters();
   assert.equal(Value.Check(schema, { action: 'semanticAction', semanticAction: { locator: 'role', query: 'Sign in', verb: 'click' } }), true);

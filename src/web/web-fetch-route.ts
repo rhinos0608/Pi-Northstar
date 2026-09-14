@@ -175,13 +175,15 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
   return trimmed === '' ? undefined : trimmed;
 }
 
-function hasNonEmptyString(record: Record<string, unknown>, key: string): boolean {
-  const value: unknown = record[key];
-  return typeof value === 'string' && value.trim() !== '';
-}
-
 function hasUrls(record: Record<string, unknown>): boolean {
   return record['urls'] !== undefined;
+}
+
+/** Key-presence check: an empty/non-string url key still counts as present,
+ *  so `{url:'', urls:[...]}` rejects as both-set instead of silently
+ *  routing to multi-read. */
+function hasUrlKey(record: Record<string, unknown>): boolean {
+  return record['url'] !== undefined;
 }
 
 function requireUrls(record: Record<string, unknown>, mode: string): string[] {
@@ -230,7 +232,7 @@ export function buildFetchRoute(params: FetchRouteParams): FetchRoute {
     case 'read': {
       const maxChars = optionalNumber(record, 'maxChars');
       if (hasUrls(record)) {
-        if (hasNonEmptyString(record, 'url')) throw new Error('read accepts either url or urls[1..8], not both');
+        if (hasUrlKey(record)) throw new Error('read accepts either url or urls[1..8], not both');
         const urls = requireUrls(record, 'read');
         return buildMultiReadFetchRoute({ urls, ...(maxChars !== undefined ? { maxChars } : {}) });
       }
@@ -247,7 +249,7 @@ export function buildFetchRoute(params: FetchRouteParams): FetchRoute {
         const maxPages = optionalNumber(record, 'maxPages');
         const maxChars = optionalNumber(record, 'maxChars');
         if (hasUrls(source)) {
-          if (hasNonEmptyString(source, 'url'))
+          if (hasUrlKey(source))
             throw new Error('crawl source accepts either url or urls[1..8], not both');
           if (source['followLinks'] !== undefined)
             throw new Error('crawl followLinks needs a single source url');

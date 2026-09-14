@@ -124,13 +124,17 @@ function normalizeTweetId(raw: string, field: 'postId' | 'commentId'): string {
 
 export function twitterCliArgs(request: SocialRequest): string[] {
   const limit = String(request.limit);
-  const since = request.timeRange !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(request.timeRange)
-    ? ['--since', request.timeRange]
-    : [];
+  if (request.timeRange !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(request.timeRange)) {
+    throw new SocialError('invalid_request', `twitter search invalid timeRange "${request.timeRange}", expected YYYY-MM-DD`, { platform: 'twitter', backend: 'twitter-cli' });
+  }
+  const since = request.timeRange !== undefined ? ['--since', request.timeRange] : [];
   switch (request.action) {
     case 'search': {
       const query = requireCliPositional(request.query, 'query', 'twitter');
-      const type = request.sort === 'top' || request.sort === 'latest' ? ['-t', request.sort] : [];
+      if (request.sort !== undefined && request.sort !== 'top' && request.sort !== 'latest') {
+        throw new SocialError('invalid_request', `twitter search invalid sort "${request.sort}", expected one of: top, latest`, { platform: 'twitter', backend: 'twitter-cli' });
+      }
+      const type = request.sort !== undefined ? ['-t', request.sort] : [];
       return ['search', query, '-n', limit, ...type, ...since, '--json'];
     }
     case 'get_post':
@@ -149,9 +153,10 @@ export function twitterCliArgs(request: SocialRequest): string[] {
     case 'get_following':
       return ['following', normalizeHandle(request.user!), '-n', limit, '--json'];
     case 'get_feed': {
-      const type = request.feedVariant === 'for-you' || request.feedVariant === 'following'
-        ? ['-t', request.feedVariant]
-        : [];
+      if (request.feedVariant !== undefined && request.feedVariant !== 'for-you' && request.feedVariant !== 'following') {
+        throw new SocialError('invalid_request', `twitter get_feed invalid feedVariant "${request.feedVariant}", expected one of: for-you, following`, { platform: 'twitter', backend: 'twitter-cli' });
+      }
+      const type = request.feedVariant !== undefined ? ['-t', request.feedVariant] : [];
       return ['feed', '-n', limit, ...type, '--json'];
     }
     case 'get_saved':
@@ -168,7 +173,15 @@ export function openCliTwitterArgs(request: SocialRequest): string[] {
   switch (request.action) {
     case 'search': {
       const query = requireCliPositional(request.query, 'query', 'twitter');
-      const product = request.sort === 'top' || request.sort === 'live' ? ['--product', request.sort] : [];
+      if (request.sort !== undefined && request.sort !== 'top' && request.sort !== 'latest' && request.sort !== 'live') {
+        throw new SocialError('invalid_request', `twitter search invalid sort "${request.sort}", expected one of: top, latest`, { platform: 'twitter', backend: 'opencli-twitter' });
+      }
+      // OpenCLI search forwards no date bound: skip so twitter-cli serves timeRange.
+      if (request.timeRange !== undefined) {
+        throw new SocialError('unsupported_action', 'OpenCLI twitter search has no timeRange filter', { platform: 'twitter', backend: 'opencli-twitter' });
+      }
+      // OpenCLI names the recency product `live`; the contract's `latest` maps to it.
+      const product = request.sort === 'top' ? ['--product', 'top'] : request.sort !== undefined ? ['--product', 'live'] : [];
       return ['twitter', 'search', query, '--limit', limit, ...product, '-f', 'json'];
     }
     case 'get_post':
@@ -186,9 +199,10 @@ export function openCliTwitterArgs(request: SocialRequest): string[] {
     case 'get_following':
       return ['twitter', 'following', normalizeHandle(request.user!), '--limit', limit, '-f', 'json'];
     case 'get_feed': {
-      const type = request.feedVariant === 'for-you' || request.feedVariant === 'following'
-        ? ['--type', request.feedVariant]
-        : [];
+      if (request.feedVariant !== undefined && request.feedVariant !== 'for-you' && request.feedVariant !== 'following') {
+        throw new SocialError('invalid_request', `twitter get_feed invalid feedVariant "${request.feedVariant}", expected one of: for-you, following`, { platform: 'twitter', backend: 'opencli-twitter' });
+      }
+      const type = request.feedVariant !== undefined ? ['--type', request.feedVariant] : [];
       return ['twitter', 'timeline', '--limit', limit, ...type, '-f', 'json'];
     }
     case 'get_trending':
@@ -335,7 +349,15 @@ export class SocialTwitterWorker implements SocialPlatformWorker {
     const plans: SocialBackendPlan[] = [];
     for (const capability of [TWITTER_CLI_CAPABILITY, OPENCLI_CAPABILITY]) {
       if (!capability.operations.some((operation) => operation.action === request.action)) continue;
-      const args = capability === TWITTER_CLI_CAPABILITY ? twitterCliArgs(request) : openCliTwitterArgs(request);
+      // A backend that cannot honor a validated field opts out (unsupported_action)
+      // so a capable backend still serves it; genuine input errors propagate.
+      let args: string[];
+      try {
+        args = capability === TWITTER_CLI_CAPABILITY ? twitterCliArgs(request) : openCliTwitterArgs(request);
+      } catch (error) {
+        if (error instanceof SocialError && error.code === 'unsupported_action') continue;
+        throw error;
+      }
       const self = this;
       plans.push({
         backend: capability.name,

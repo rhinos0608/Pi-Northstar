@@ -46,7 +46,7 @@ export interface WebSearchLedgerConfig {
 export type LedgerBeginResult =
   | { status: 'run'; key: string }
   | { status: 'coalesced'; key: string; promise: Promise<unknown> }
-  | { status: 'suppressed' }
+  | { status: 'suppressed'; responseId?: string; ageMs: number }
   | { status: 'blocked' };
 
 export interface LedgerDebugEntry {
@@ -66,6 +66,9 @@ interface CompletedEntry {
   bigrams: Set<string>;
   optionsKey: string;
   successAt: number | undefined;
+  /** Opaque cached responseId for retrieve/source_check reuse. Never bodies,
+   *  errors, query text, or secrets — a short opaque store pointer only. */
+  responseId: string | undefined;
   failureCount: number;
   lastFailureAt: number | undefined;
   lastCode: LedgerFailureCode | undefined;
@@ -148,6 +151,40 @@ function abortError(): Error {
   return Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
 }
 
+/** Opaque pointer bound: short store ids only (responseId), never bodies. */
+const MAX_STORED_RESPONSE_ID_CHARS = 256;
+
+/** Opaque id bound check: short store ids only. */
+function asResponseId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_STORED_RESPONSE_ID_CHARS) return undefined;
+  return trimmed;
+}
+
+/** Extract the opaque cached responseId from a leader result, if present.
+ *  Reads `details.responseId` (direct AgentToolResult) or the nested
+ *  `details.details.responseId` (raw backend payload via callSearchMcpTool).
+ *  Never result bodies, errors, or secrets. */
+function extractResponseId(result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) return undefined;
+  const details = (result as { details?: unknown }).details;
+  if (typeof details !== 'object' || details === null) return undefined;
+  const direct = asResponseId((details as { responseId?: unknown }).responseId);
+  if (direct !== undefined) return direct;
+  const nested = (details as { details?: unknown }).details;
+  if (typeof nested !== 'object' || nested === null) return undefined;
+  return asResponseId((nested as { responseId?: unknown }).responseId);
+}
+
+/** Build the suppressed terminal from a live success entry: cached pointer + age. */
+function suppressedOf(entry: CompletedEntry, now: number): LedgerBeginResult {
+  const ageMs = now - (entry.successAt ?? now);
+  return entry.responseId === undefined
+    ? { status: 'suppressed', ageMs }
+    : { status: 'suppressed', responseId: entry.responseId, ageMs };
+}
+
 export class WebSearchLedger {
   private readonly clock: () => number;
   private readonly maxEntries: number;
@@ -186,13 +223,14 @@ export class WebSearchLedger {
     }
 
     if (existing !== undefined) this.touch(key, existing);
-    if (single && this.findFuzzySuccess(normalized[0]!, optionsKey, now) !== undefined) {
-      return { status: 'suppressed' };
+    if (single) {
+      const fuzzy = this.findFuzzySuccess(normalized[0]!, optionsKey, now);
+      if (fuzzy !== undefined) return suppressedOf(fuzzy, now);
     }
     // Batch entries suppress only on exact canonical match (checked above via
     // `existing`); near-duplicate batches intentionally fall through to run.
     if (!single && existing?.successAt !== undefined && now - existing.successAt < SUCCESS_SUPPRESS_MS) {
-      return { status: 'suppressed' };
+      return suppressedOf(existing, now);
     }
 
     if (this.activeLocked() >= MAX_LEDGER_ACTIVE_SEARCHES) {
@@ -244,6 +282,7 @@ export class WebSearchLedger {
       bigrams: context?.bigrams ?? prior?.bigrams ?? new Set<string>(),
       optionsKey: context?.optionsKey ?? prior?.optionsKey ?? '',
       successAt: now,
+      responseId: extractResponseId(result),
       failureCount: 0,
       // Success clears failure metadata: a retained lastFailureAt /
       // lastRetryable would keep isBlocked() true and forbid the retry
@@ -277,6 +316,7 @@ export class WebSearchLedger {
       bigrams: prior?.bigrams ?? context?.bigrams ?? new Set<string>(),
       optionsKey: prior?.optionsKey ?? context?.optionsKey ?? '',
       successAt: undefined,
+      responseId: undefined,
       failureCount,
       lastFailureAt: now,
       lastCode: info.code,
