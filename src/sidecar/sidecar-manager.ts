@@ -104,9 +104,13 @@ export class SidecarManager {
     this._error = undefined;
     const generation = ++this.startGeneration;
 
-    this._startPromise = (async (): Promise<void> => {
-      // Capture the promise reference for cleanup
-      const currentPromise = this._startPromise;
+    // The finally below must compare against the promise THIS start() call
+    // creates. Reading this._startPromise inside the executor would capture
+    // the previous generation's promise (assignment happens after the IIFE
+    // is created), so the comparison could never match and stale promises
+    // would leak. A local binding compared after assignment is exact.
+    let pending!: Promise<void>;
+    pending = (async (): Promise<void> => {
       const cancelled = (): boolean => generation !== this.startGeneration || this._status === 'stopped';
       // A stale generation owns only its own child: detach its exit listener
       // and drop the process ref when it is still ours. Shared state
@@ -224,11 +228,12 @@ export class SidecarManager {
         }
         throw err;
       } finally {
-        if (this._startPromise === currentPromise) {
+        if (this._startPromise === pending) {
           this._startPromise = undefined;
         }
       }
     })();
+    this._startPromise = pending;
     // Suppress unhandled rejection: errors propagate via return value and are handled by caller
     this._startPromise.catch(() => {});
     return this._startPromise;

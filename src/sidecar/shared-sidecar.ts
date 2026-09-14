@@ -33,8 +33,11 @@ let refCount = 0;
 let factory: (env?: SharedSidecarEnv) => SidecarManager = (env) => new SidecarManager(resolveLocalManagerOptions(env));
 let hookInstalled = false;
 
-/** Bounded wait for signal-driven cleanup before explicit exit. */
-const SIGNAL_CLEANUP_TIMEOUT_MS = 2000;
+/** Bounded wait for signal-driven cleanup before explicit exit. Covers
+ *  SidecarManager.stop()'s SIGKILL grace (5s) plus its exit-wait safety net:
+ *  a shorter bound would process.exit() after SIGTERM but before the SIGKILL
+ *  timer fires, orphaning the child. */
+const SIGNAL_CLEANUP_TIMEOUT_MS = 7000;
 
 function onProcessExit(): void {
   // 'exit' handlers run synchronously: stop() issues SIGTERM synchronously
@@ -118,15 +121,20 @@ export async function acquireEmbeddingSidecar(env?: SharedSidecarEnv): Promise<A
     return { baseUrl: external, external: true, release: () => undefined };
   }
   singleton ??= factory(env);
-  // Rejects on startup failure (e.g. Python without Torch) — refcount is
-  // only incremented on success so callers fall back to BM25 with nothing
-  // to release.
-  await singleton.ensureRunning();
+  // Capture the instance before the startup await: a concurrent
+  // shutdownSharedSidecar() during ensureRunning() clears the module
+  // singleton, so re-reading it after the await could dereference a stale
+  // or undefined manager. Reject stale acquisition instead.
+  const candidate = singleton;
+  await candidate.ensureRunning();
+  if (singleton !== candidate) {
+    throw new Error('shared sidecar changed during startup; retry acquisition');
+  }
   refCount += 1;
   installShutdownHook();
   let released = false;
   return {
-    baseUrl: singleton.getBaseUrl(),
+    baseUrl: candidate.getBaseUrl(),
     external: false,
     release: () => {
       if (released) return;

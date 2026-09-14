@@ -401,6 +401,29 @@ test('stop() then replacement start() during pending stop keeps the new child', 
   assert.equal(mgr.health().status, 'stopped');
 });
 
+test('start→stop→start clears settled promise and restarts cleanly', async () => {
+  const mgr = createManager({ _fetch: okFetch() }) as any;
+  await mgr.start();
+  assert.equal(mgr.health().status, 'running');
+  assert.equal(mgr._startPromise, undefined, 'settled start promise must be cleared');
+
+  const firstChild = currentChild!;
+  const stopping = mgr.stop();
+  firstChild.emit('exit', 0, 'SIGTERM');
+  await stopping;
+  assert.equal(mgr.health().status, 'stopped');
+  assert.equal(mgr._startPromise, undefined, 'no stale promise after stop');
+
+  await mgr.start();
+  assert.equal(mgr.health().status, 'running');
+  assert.equal(mgr._startPromise, undefined, 'settled restart promise must be cleared');
+  assert.equal(spawnRecords.length, 2, 'restart must spawn a fresh child');
+
+  const cleanup = mgr.stop();
+  currentChild!.emit('exit', 0, 'SIGTERM');
+  await cleanup;
+});
+
 // ---------------------------------------------------------------------------
 // getBaseUrl()
 // ---------------------------------------------------------------------------
