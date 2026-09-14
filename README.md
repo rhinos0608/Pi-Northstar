@@ -19,17 +19,20 @@ Underneath the nine tools is a small set of shared services — result fusion/ra
 
 ### Thin adapters (the nine tools)
 
-Each public tool validates input, calls into the shared services above, and shapes the result for the model — `src/native-tools.ts` (`web_search`/`fetch`), `src/github.ts`, `src/reach-tools.ts` (`social`/`media`), `src/browser-tools.ts` + `src/agent-browser.ts` (`browser`), `src/desktop-tools.ts` (`desktop`). Adding a search provider or social platform is a fetch call plus a descriptor entry, not a new pipeline.
+Nine is enforced ceiling: `MAX_PUBLIC_TOOLS = 9` in `src/capabilities.ts`, fail-closed via `assertPublicToolBudget` on every `pi.registerTool` call. Registered surface includes `web_search`, `fetch`, always-registered `agent_poll`, optional `desktop`, `github`, and expansion tools `social`, optional `kg`, `graph`, and `browser`. YouTube/Bilibili/RSS remain `media`-family acquisition backends (`publicTool: 'internal-acquisition'` in `src/capabilities.ts`): callable through CLI/native dispatch and internal fetch URL routing, but not through a `pi.registerTool` model-tool entry.
+
+Each public tool validates input, calls into the shared services above, and shapes the result for the model. Adding a search provider or social platform is a fetch call plus a descriptor entry, not a new pipeline.
 
 ## What you get
 
 | Tool | What it does |
 |---|---|
-| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). Exactly one of `query` or `queries[1..8]`: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional `includeContent`/`recency`/`domains` refine plain search; `yearFrom` is honored everywhere and intersects with `recency` (later bound wins). Cursors are single-query research-only. `mode: "agent"` returns a provider-generated research report as the tool text (untrusted evidence) with `details.report` carrying provider plus validated/capped sources (Tavily Research first provider; RRF/fusion bypassed; single query only; incompatible with `knowledge` and research categories). No provider selection input: backends are operator-owned (`PI_SEARCH_WEB_BACKENDS`). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
-| `fetch` | Canonical action `read` without a `query` (full readable text of one URL); canonical action `crawl` with a `query` (crawls pages, returns ranked relevant chunks). `maxChars` ≤ 50000 is honored on both paths (default 30000); crawl takes `topK` ≤ 20 and `maxPages` ≤ 25. `siteMap: true` lists discovered same-origin URLs under `url` (optional `query` ranks, `maxPages` caps at default 10/max 25; rejects `searchQuery`/`followLinks`/`topK`/`maxChars`). `urls[1..8]` takes sequential readable reads (no `followLinks`/`siteMap`); with `query`, each URL returns ranked passage-chunks. `action: retrieve`/`source_check` serve the bounded memory corpus only (no network; unknown `responseId` throws with re-run guidance). Out-of-range input is rejected, never silently clamped. |
-| `github` | Canonical actions `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits`, `workflows`, `runs` (REST API only — GraphQL not offered). `workflows`/`runs` are GitHub Actions, read-only (no dispatch/trigger). `GITHUB_TOKEN` or `GH_TOKEN` optional for public reads (harder rate limits without a token); unauthenticated `/search/code` is heavily rate-limited. `list_dir` and `code_search` legacy spellings rejected, never clamped. Results are normalized entities. |
+| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). `category: "video"` is provider-neutral pass-through: `CATEGORY_HINTS` has no video entry, so normal provider dispatch receives the query unchanged; no dedicated video provider is selected. For actual YouTube/Bilibili metadata, subtitles, or transcripts, native URL fetch recognizes media URLs and routes to the internal media backends (see `media`). Exactly one of `query` or `queries[1..8]`: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional `includeContent`/`recency`/`domains` refine plain search; `yearFrom` is honored everywhere and intersects with `recency` (later bound wins). Cursors are single-query research-only. `mode: "agent"` creates a parent-owned agent job and returns a job pointer — poll it with `agent_poll` for the byte-stable snapshot (single query only; incompatible with `knowledge` and research/academic categories; report text is untrusted evidence). The standalone report leg streams one opaque Tavily Research POST inside job execution (provider identity never leaves the module); when a leaf runtime is negotiated the report leg runs there instead with opaque fallback — see [Leaf-runtime RPC](#leaf-runtime-rpc-agent-mode-agent-report-leg). No provider selection input: backends are operator-owned (`PI_SEARCH_WEB_BACKENDS`). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
+| `fetch` | Mode-free five-branch presence union (matches the registered schema in `src/index.ts:411` + `src/web/web-fetch-route.ts`; legacy `mode`/`action`/`source`/`searchQuery`/`followLinks`/`maxDepth` keys reject before dispatch): `{url, query?, topK?, maxChars?}` single-URL read (`query` ranks via the read-query path); `{urls[1..8], query?, topK?, maxChars?}` per-URL reads in input order with per-URL isolation; `{url, siteMap:true, query?, maxPages?}` discovered same-origin URLs (`topK`/`maxChars` rejected on this branch); `{responseId, sourceIds?, offset?, limit?, findText?}` cached-corpus slice only, no network; `{responseId, claims[1..20], sourceIds?}` cached claim verification only, no network. `topK` ≤ 20; `maxChars` ≤ 50000; `maxPages` ≤ 25 (sitemap only). HTTP(S)/GitHub-asset URLs only. Out-of-range input is rejected, never silently clamped. |
+| `github` | Canonical actions `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits`, `workflows`, `runs` (REST API only — GraphQL not offered). `workflows`/`runs` are GitHub Actions, read-only (no dispatch/trigger). `GITHUB_TOKEN` or `GH_TOKEN` optional for public reads (harder rate limits without a token); unauthenticated `/search/code` is heavily rate-limited. `list_dir` and `code_search` legacy spellings rejected, never clamped. Results are normalized entities. `repo`/`tree` are clone-first with REST fallback (see clone-backend paragraph below); every other action is REST-only. |\n| `media` (CLI/native) | Not a registered model tool. `callNativeTool()` dispatches `media` through `callReachTool()`; CLI callers can use `npm run cli -- call media ...`, and internal fetch routing sends recognized media URLs to `video`/`feeds`. Backends provide YouTube and Bilibili metadata/search/details/subtitles/transcripts plus RSS/Atom feed reading, subject to each channel's capability and credentials. |
 | `social` | Read-only lookup over canonical actions only (unknown/legacy spellings rejected before dispatch). Available: Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram (no verified post-detail adapter, no download; `get_post`/`get_thread`/`get_comments` unadvertised on Instagram), LinkedIn (read actions via verified OpenCLI Chrome session). Xueqiu/Xiaoyuzhou are absent — not available or planned providers. |
-| `media` | YouTube (official Data API for search/details/hot; keyless unofficial transcript) and Bilibili search, metadata, details, and subtitles. RSS/Atom feed reading. |
+| `agent_poll` | Polls a parent-owned agent job created by `web_search` `mode: "agent"`. Params `{jobId, owner?}` — returns the byte-stable canonical snapshot (`running`/`ready`/`failed`); unknown, expired, and foreign-owner jobIds all close identically with a static pointer (never lists jobs, never leaks other owners' jobs). Always registered, startup-side, alongside the other eight tools. |
+| `kg` | Diffbot knowledge graph — `search` (entity-returning DQL), `enhance` (Person/Organization enrichment), `analyze_text` (structure from text you hold consent to share). Enters model context only when `DIFFBOT_TOKEN` is set; without it the schema is absent, not an erroring stub (see below). |
 | `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. While `/chrome authorize` grants are live, the same `browser` tool routes allowlisted actions to the user-Chromium companion over the pinned bridge (`PI_SEARCH_CHROME_EXTENSION_ID`, 127.0.0.1:17319); revoke/expiry returns to the isolated backend. |
 | `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
 | `graph` | Native graph access: `query` executes provider-native DQL (`language: 'dql'`, `pageSize` 1..100 default 10, opaque cursor) or SPARQL SELECT/ASK (`language: 'sparql'`, one bounded response, no cursor) with provider-faithful JSON plus shape (`rows`/`facets`/`aggregate`/`scalar`/`object`); `probe` checks cardinality of countable queries; `schema` discovers ontology types/fields (DQL uses 24-hour cache, stale fallback marked `partial`). Registers when `DIFFBOT_TOKEN` or `GRAPH_SPARQL_ENDPOINT` is set (see below); `kg` stays Diffbot-only. |
@@ -186,10 +189,10 @@ redirect endpoint, token storage, schema field, or tool.
 social({ platform: 'reddit', action: 'search', query: 'self-hosting', limit: 10 })
 social({ platform: 'reddit', action: 'get_post', url: 'https://www.reddit.com/r/example/comments/POST_ID/' })
 
-media({ platform: 'youtube', action: 'search', query: 'WebAssembly GC' }) // requires YOUTUBE_API_KEY; no web fallback
-media({ platform: 'youtube', action: 'details', url: 'https://youtu.be/VIDEO_ID' }) // Data API first when YOUTUBE_API_KEY is set (limited fields); keyless oEmbed only when keyless or after Data API failure
-media({ platform: 'youtube', action: 'hot' }) // requires YOUTUBE_API_KEY; no web fallback
-media({ platform: 'youtube', action: 'transcript', url: 'https://youtu.be/VIDEO_ID' }) // keyless unofficial adapter; may break; never yt-dlp
+npm run cli -- call media '{"platform":"youtube","action":"search","query":"WebAssembly GC"}' # requires YOUTUBE_API_KEY; no web fallback
+npm run cli -- call media '{"platform":"youtube","action":"details","url":"https://youtu.be/VIDEO_ID"}' # Data API first; keyless oEmbed fallback for details
+npm run cli -- call media '{"platform":"youtube","action":"hot"}' # requires YOUTUBE_API_KEY; no web fallback
+npm run cli -- call media '{"platform":"youtube","action":"transcript","url":"https://youtu.be/VIDEO_ID"}' # keyless unofficial adapter; may break; never yt-dlp
 ```
 
 Inspect `details.backend` and `details.northstar`: social results carry the
@@ -222,11 +225,16 @@ Setting `DIFFBOT_TOKEN` routes paid traffic to Diffbot endpoints. Read this befo
 
 Image/PDF/video understanding sends content off-machine. Read this before setting any `PI_VISION_*`, `GEMINI_*`, `GOOGLE_*`, or Vertex vision variable.
 
-- **What leaves the machine.** Every vision call sends the admitted image/PDF/video bytes plus the OCR/description text derived from them to the operator-configured destination: the `PI_VISION_OPENAI_COMPAT_BASE_URL` endpoint (loopback or cloud), Google (`GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` Developer API or `GOOGLE_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` Vertex), or the Gemini web session (`PI_VISION_GEMINI_WEB_ENABLED=1`). Do not submit content you are not authorized to share.
-- **Explicit opt-in only.** Nothing leaves the machine until the operator configures a destination: unconfigured tiers are skipped and pipelines degrade to native evidence with warnings. `gemini-web` is additionally gated behind the exact value `PI_VISION_GEMINI_WEB_ENABLED=1` (disabled default, last resort) and `vision-private-gate` behind `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`.
+- **What leaves the machine.** Every vision call sends the admitted image/PDF/video bytes plus the OCR/description text derived from them to the operator-configured destination: the `PI_VISION_OPENAI_COMPAT_BASE_URL` endpoint (loopback or cloud; requires at least one exact model ID in `PI_VISION_OPENAI_COMPAT_MODEL`), Google Gemini (requires the exact opt-in `PI_VISION_GEMINI_ENABLED=1` plus `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` Developer API or `GOOGLE_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` Vertex), or the Gemini web session (`PI_VISION_GEMINI_WEB_ENABLED=1`). Do not submit content you are not authorized to share.
+- **Explicit opt-in only.** Nothing leaves the machine until the operator configures a destination: unconfigured tiers are skipped and pipelines degrade to native evidence with warnings. Every gate is the exact value `'1'` — absent or any other value is off. `gemini-web` is additionally last resort, and `vision-private-gate` behind `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`.
 - **Private GitHub content needs the independent flag.** Public transfer is authorized by configuring the destination endpoint/credential, but private or authenticated GitHub content additionally requires the exact value `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`. Without it, private content never reaches any cloud vision endpoint — calls degrade to native evidence with warnings.
-- **Synthetic probe first.** Each exact model ID is probe-gated with a tiny synthetic image before any user content is sent; text-only / non-vision models reject fail-closed and never receive user bytes.
-- **Policy/auth failure never broadens eligibility.** A failure drops the failed tier (fail-closed subset); it never unlocks a tier the operator did not configure.
+- **Synthetic probe first.** Each exact model ID is probe-gated with a tiny randomized synthetic image (shape + color drawn fresh per call and kept out of the prompt) before any user content is sent; the answer passes only when it names exactly the expected shape and exactly the expected color — enumerating the vocabulary fails. Text-only / non-vision models reject fail-closed and never receive user bytes.
+- **Policy/auth failure never broadens eligibility.** A failure drops the failed tier (fail-closed subset); it never unlocks a tier the operator did not configure. One configured destination never authorizes another (per-destination transfer check).
+
+### `media` channels vs `src/media-vision/` — two distinct things, don't conflate them
+
+- **`media`-family acquisition backends** (`src/media/media.ts`, `src/capabilities.ts` media family: YouTube/Bilibili/RSS) fetch platform metadata, subtitles, and feeds. They have no public tool surface (`publicTool: 'internal-acquisition'`) and never send content to vision endpoints.
+- **`src/media-vision/` multimodal pipeline** (`pipeline-image.ts`, `pipeline-pdf.ts`, `pipeline-video.ts`, `probe.ts`, `eligibility.ts`, `transfer-policy.ts`) is what understands image/PDF/video bytes — gated by the transfer policy and synthetic probe above, with per-destination opt-in. It is the only path that transmits content off-machine.
 
 ## Quick start
 
@@ -266,13 +274,13 @@ pi -e ./src/index.ts
 
 ### About that `npm install`
 
-Requires Node.js ≥ 24. The floor comes from the `browser` tool chain, not the core tools: the optional `agent-browser` npm dependency declares `engines: { node: ">=24.0.0" }`, and `package.json` (`engines: { node: ">=24.0.0" }`) plus CI (`node-version: 24` in `.github/workflows/ci.yml`) pin the whole package to it. The core tools (`web_search`, `fetch`, `github`, `social`, `media`) use portable APIs behind the `node --import tsx` loader (which only needs Node ≥ 20.6), so there is no newer-`URL`/`fetch`-API reason you must be on 24 for them — but 24 is the only tested/supported runtime, so upgrade rather than polyfill. `web_search`, `fetch`, `github`, `social`, and `media` have no native dependency — `npm install` (or `npm install --omit=optional`) is enough to use them. `browser` is the one tool backed by a native binary: `agent-browser` (~86 MB) is an **optional** npm dependency, so `npm install` downloads it by default, but nothing else in the package needs it. Skip it with:
+Requires Node.js ≥ 24. The floor comes from the `browser` tool chain, not the core tools: the optional `agent-browser` npm dependency declares `engines: { node: ">=24.0.0" }`, and `package.json` (`engines: { node: ">=24.0.0" }`) plus CI (`node-version: 24` in `.github/workflows/ci.yml`) pin the whole package to it. The core tools (`web_search`, `fetch`, `github`, `social`) use portable APIs behind the `node --import tsx` loader (which only needs Node ≥ 20.6), so there is no newer-`URL`/`fetch`-API reason you must be on 24 for them — but 24 is the only tested/supported runtime, so upgrade rather than polyfill. `web_search`, `fetch`, `github`, and `social` have no native dependency — `npm install` (or `npm install --omit=optional`) is enough to use them. `browser` is the one tool backed by a native binary: `agent-browser` (~86 MB) is an **optional** npm dependency, so `npm install` downloads it by default, but nothing else in the package needs it. Skip it with:
 
 ```bash
 npm install --omit=optional
 ```
 
-Skipping it leaves the other five tools unaffected; `browser` is not registered until an agent-browser binary is available — see [Browser automation](#browser-automation) to install it separately or point at an existing one.
+Skipping it leaves the other core tools unaffected; `browser` is not registered until an agent-browser binary is available — see [Browser automation](#browser-automation) to install it separately or point at an existing one.
 
 `desktop` is separate again: it drives a native Cua Driver binary that was never an npm dependency at all, downloaded and put on `$PATH` by hand. It is not registered until `PI_SEARCH_DESKTOP_AUTOMATION=1` — see [Desktop automation](#desktop-automation).
 
@@ -420,38 +428,17 @@ When you call `fetch` with a `query` parameter, Pi-Northstar performs **hybrid s
 5. **Embedding ranking** — vector similarity via embedding sidecar (if configured)
 6. **RRF fusion** — merges BM25 and embedding rankings into final results
 
-#### Site-wide crawling with `followLinks`
+#### Fetch contract
 
-Set `followLinks: true` to crawl the entire site starting from `url`. The tool performs a bounded BFS across same-domain pages, extracts and indexes all content, then returns only the passages most relevant to your `query`.
+`fetch` uses a mode-free five-branch presence union:
 
-```
-fetch({ request: { mode: "crawl", source: { type: "url", url: "https://example.com", followLinks: true }, query: "pricing tiers" } })
-```
+- `{url, query?, topK?, maxChars?}` reads one URL; query ranks relevant passages.
+- `{urls[1..8], query?, topK?, maxChars?}` reads URLs in input order with per-URL isolation.
+- `{url, siteMap:true, query?, maxPages?}` discovers same-origin URLs from a sitemap.
+- `{responseId, sourceIds?, offset?, limit?, findText?}` slices cached corpus only; no network.
+- `{responseId, claims[1..20], sourceIds?}` verifies cached claims only; no network.
 
-- **`followLinks` requires both `url` and `query`** — site-wide crawls always use semantic packing; raw page dumps are not supported
-- **Same-domain only** — external links are ignored; subdomains (`sub.example.com`) are excluded
-- **`maxPages`** — controls total pages crawled (default 10, max 25)
-- **`maxDepth`** — hardcoded at 3 levels deep, preventing runaway crawls
-- **URL dedup** — fragments, tracking params, trailing slashes normalized before enqueue
-- **Non-HTML content** — skipped automatically (PDFs, images, archives)
-- **Graceful degradation** — link extraction uses Scrapling's CSS selector engine when available; falls back to regex-based extraction from raw HTML
-- **Output** — limited to the most relevant `topK` chunks (default 8) via the same BM25+embedding RRF pipeline
-
-Every layer degrades gracefully: no Python → plain HTTP fetch, no sidecar → BM25-only, no backends → DuckDuckGo fallback.
-
-```
-fetch({ request: { mode: "crawl", source: { type: "search", searchQuery: "React 18 concurrent rendering" }, query: "How does React concurrent rendering work?" } })
-```
-
-- `query` — what you want to find in the crawled pages
-- `searchQuery` — what to search the web for (required with `query` when `url` omitted; no default — `query` alone does not discover)
-- `topK` — how many chunks to return (default 8, max 20)
-- `maxPages` — how many pages to crawl (default 10, max 25)
-- `maxChars` — output budget honored on both fetch paths (`read` and `crawl`), default 30000, max 50000
-
-Out-of-range `limit`/`topK`/`maxPages`/`maxChars` values are rejected, never silently clamped.
-
-Without a `query`, `fetch` (canonical `read`) returns the full readable text of a URL (plain extraction, no semantic processing).
+`topK` max 20, `maxChars` max 50000, sitemap `maxPages` max 25. Bounds reject rather than clamp. Use `web_search` to discover URLs, then fetch with URL and optional query. Without query, single-URL fetch returns full readable text.
 
 ### 2. Embedding sidecar (semantic search)
 
@@ -467,6 +454,8 @@ export EMBEDDING_SIDECAR_DIMENSIONS="768"            # Embedding vector dimensio
 ```
 
 When `EMBEDDING_SIDECAR_BASE_URL` is set, `fetch` with query automatically uses BM25 + embedding RRF fusion for ranking. No Python process is spawned — it talks directly to your external embedding service.
+
+Local sidecar stdin-token auth (nothing to configure): the spawned Python sidecar mints a fresh 256-bit token per start and delivers it over the child's stdin pipe only — never argv, env, or logs — and delivery failure is a startup failure (never runs unauthenticated). `EMBEDDING_SIDECAR_API_TOKEN` is only for external sidecars (Bearer auth on the `EMBEDDING_SIDECAR_BASE_URL` health check). Long-lived clients re-read the token per request, so a sidecar restart minting a new token doesn't break them.
 
 #### Local Python sidecar (alternative)
 
@@ -511,6 +500,10 @@ github({ request: { action: "releases", repository: "owner/repo" } })
 
 `GITHUB_TOKEN` or `GH_TOKEN` is optional: public reads work keyless with harder rate limits. Unauthenticated `/search/code` is heavily rate-limited; `issues`/`pulls`/`releases`/`commits` work keyless for public repos.
 
+Clone backend (`repo`/`tree`): when `gh`/`git` binaries are available these actions may be served from an ephemeral local clone instead of REST — `gh` first (isolated: empty HOME/GH_CONFIG_DIR, never carries the token), then `git` with the token delivered only through an ephemeral 0700 credential helper (never argv/env; redacted from output). Fixed argv with `shell: false`, deny-by-default child env, hooks/LFS smudge/submodules/file-protocol disabled, refs/paths/symlinks validated, random 0700 root removed unconditionally, no anonymous retry after an authenticated failure. Live cap: the clone runs under a 350 MiB `maxRepoBytes` ceiling enforced during the run plus a post-clone scan (operator overrides lower-only — above-default values reject, never clamp); a brief overshoot window (poll interval + SIGTERM grace) can exceed the ceiling before the abort lands, so the post-clone scan stays the final safeguard. Token hygiene: `GITHUB_TOKEN` ?? `GH_TOKEN`; tokens with control characters reject before any spawn.
+
+Where clones run and what falls back: each clone gets a random 0700 root that is removed unconditionally (success, failure, timeout, abort). Dispatch preference lives in `GITHUB_BACKEND_PREFERENCE` (`src/github/github-contract.ts:833`): `repo`/`tree` are clone-first with `github-api` REST fallback, `file` stays REST-first, and every other action is REST-only. In `callGithubTool` (`src/github/github-domain.ts:1381`) REST fallback (with a backend warning) applies only when clone execution is unavailable or fails with `upstream_error`/`malformed_upstream` — `invalid_request` (bad slug) and `authentication_required` (token-carrying git auth failure) surface directly with no anonymous retry and no silent REST substitution.
+
 ## CLI
 
 The CLI is a thin JSON-in/JSON-out wrapper — useful for testing and scripting:
@@ -520,13 +513,27 @@ npm run cli -- status
 npm run cli -- config
 npm run cli -- call web_search '{"query":"pi agent extensions"}'
 npm run cli -- call fetch '{"url":"https://example.com"}'
-npm run cli -- call fetch '{"query":"error handling patterns","searchQuery":"Rust error handling best practices"}'
+npm run cli -- call fetch '{"url":"https://example.com","query":"error handling patterns"}'
 npm run cli -- call social '{"platform":"reddit","action":"get_community_posts","community":"python"}'
 npm run cli -- call media '{"platform":"rss","url":"https://example.com/feed.xml"}'
 npm run cli -- call reach_setup '{"action":"plan"}'
 ```
 
 All CLI output is JSON: `{ "ok": true, "data": { "content": [...] } }`.
+
+### Least-privilege child environments (CLI/MCP)
+
+CLI children get a nonsecret base config plus per-tool-family credentials only (`buildCliEnvironment` in `src/cli/cli-backend.ts`) — a `web_search` child never carries GitHub/Reddit/graph secrets and vice versa; unknown tools get base config only. MCP server children (`SEARCH_MCP_COMMAND`, `src/process/mcp-client.ts`) are deny-by-default: only listed provider credentials, benign client config, and names in the explicit `SEARCH_MCP_FORWARD_ENV_JSON` allowlist forward — there is no `SEARCH_MCP_*` wildcard, and the forward list rejects secret-like names (`TOKEN`/`KEY`/`SECRET`/`PASSWORD`/`AUTH`/`BEARER`/`COOKIE`/…) and non-benign `SEARCH_MCP_*` internals. Native/media/git children (`buildNativeChildEnvironment`) and Python children (`buildPythonChildEnvironment`) take minimal OS-spawn allowlists only — no tokens, keys, cookies, proxy URLs, or interpreter/linker overrides — with fixed argv arrays and `shell: false`.
+
+### Leaf-runtime RPC (agent `mode: "agent"` report leg)
+
+Set `PI_NORTHSTAR_LEAF_MODEL` to the exact `provider/model` id (no fuzzy resolution, no thinking suffix, no fallback). Absent/blank means standalone agents (default). When set, the extension registers a `LeafRuntimeClient` over the in-process event bus, and each agent job runs a fresh `negotiate` for that exact model (`refreshReady()` per job) — only a success switches the report leg to `leaf-runtime`; every other path (no provider, model unset, refresh failure) runs the standalone core with a recorded safe reason, and leaf failures fall back to the opaque leg with a safe-code warning. Provider-opacity: the client resolves to `{ text }` only — run/provider/model/token metadata never leaves the module, and job snapshots carry transport + safe reason only, never provider/model identity. RPC errors are fixed safe messages (never provider exception text); out-of-range timeouts, prompts, and output tokens reject, never clamp. (owning contract is `src/runtime/runtime-rpc-protocol.ts`, client `src/runtime/leaf-runtime-client.ts`, wiring `src/web/agent/agent-jobs.ts`, seam `src/web/agent/agent-rpc.ts`; optional variable is listed in `.env.example`.)
+
+_Note: leaf-runtime, sidecar-auth, GitHub-clone, and vision-gate hardening is under active review-round fixes — the above reflects code verified at read time._
+
+### pi-subagents composition (co-installed extension)
+
+When the pi-subagents extension is co-installed, the agent report leg above may run on its leaf runtime instead of the standalone core. The seam is the in-process event bus `subagents:runtime:v1` (ready event `subagents:runtime:v1:ready`, per-request `subagents:runtime:v1:request`, per-request replies; methods `negotiate`/`start`/`status`/`result`/`cancelAndSettle`): each agent job sends a fresh `negotiate` for the exact configured model and only a success switches that job's report leg to `leaf-runtime` — every other path stays standalone with a recorded safe reason, and leaf-leg failures fall back to the opaque leg with a safe-code warning. Outputs stay provider-opaque (`{ text }` only; snapshots carry transport + safe reason, never provider/model identity). Trust boundary: the bus is an in-process seam for trusted co-installed extension modules only (provider registered via `setLeafRuntimeProvider`), not an authenticated channel. Operator knob is `PI_NORTHSTAR_LEAF_MODEL` alone; the wire contract is owned by pi-subagents (`src/api/runtime-rpc.ts` is ground truth — our `src/runtime/runtime-rpc-protocol.ts` is a verbatim copy) and gate state (whether a leaf runtime is present, which host versions are verified) is owned by that extension. Wiring: `src/runtime/leaf-runtime-client.ts`, `src/web/agent/agent-jobs.ts` (`negotiateLeafTransport`), seam `src/web/agent/agent-rpc.ts`.
 
 ## Slash commands
 
@@ -640,6 +647,10 @@ browser({ action: "evaluate", expression: "document.title" })
 
 agent-browser is the browser backend. It provides reliability checks, snapshot refs, and session management.
 
+### Chrome companion path
+
+When `PI_SEARCH_CHROME_EXTENSION_ID` is configured and a `/chrome authorize` grant is live, browser allowlisted actions route through the user-Chromium companion. The bridge listens only on literal `127.0.0.1:17319`, pins `Origin` to `chrome-extension://<extension-id>`, and requires the operator-provisioned `PI_SEARCH_CHROME_PAIRING_SECRET` on every companion request; Origin alone does not pair. A short-lived grant is renewed roughly every 30 seconds over the bridge. Selection uses the Chromium OS-default sole match or explicit `/chrome authorize <family>` choice; same-family ambiguity fails closed. Sensitive/unsupported actions stay on the isolated backend or are denied by policy. Revoke, expiry, bridge failure, or shutdown falls back to the isolated backend.
+
 ### Security
 
 - Public user-controlled fetch/browser URLs accept only HTTP(S), reject credentials, private/reserved literals, localhost, metadata, and Docker hostnames; browser sessions also run system-DNS preflight and frozen domain allowlisting (defense-in-depth, not complete SSRF containment)
@@ -648,7 +659,7 @@ agent-browser is the browser backend. It provides reliability checks, snapshot r
 - `evaluate`, `set_cookies`, and `batch` are disabled by default; enable with `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`
 - Cookies return metadata only (name, domain, path, expiry, flags) — values are never exposed
 - Error messages sanitized: token/password/secret/authorization patterns stripped (≤2000 chars)
-- External tool text (`web_search`, `fetch`, `github`, `social`, `media`, `browser`) is framed as untrusted evidence with a per-result fence token and heuristic injection flags; visible content is never redacted, and framing does not authorize actions or secret access
+- External tool text (`web_search`, `fetch`, `github`, `social`, `kg`, `graph`, `browser`, `desktop`, `agent_poll` — exactly `EXTERNAL_TOOL_NAMES` in `src/core/untrusted-content.ts`) is framed as untrusted evidence with a per-result fence token and heuristic injection flags; visible content is never redacted, and framing does not authorize actions or secret access
 - Security enforcement is external through containerization and other extensions
 
 ### Loopback-only debug mode
