@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
 import { callNativeTool } from '../native-tools.js';
+import { unwrapUntrustedText } from '../core/untrusted-content.js';
 import { DEFAULT_SEARCH_MCP_COMMAND, buildServerParameters } from '../process/mcp-client.js';
 import type { BackendCallResult } from '../backend.js';
 import { SocialError } from '../social/social-contract.js';
@@ -45,10 +46,26 @@ async function callResult(toolName: string | undefined, rawArgs: string | undefi
   if (!parsed.ok) return parsed;
   try {
     const data = await callNativeTool(toolName, parsed.data as Record<string, unknown>, { env });
-    return { ok: true, data };
+    // Strip fences this child issued: framing tokens are process-local, so a
+    // wrapped child payload would earn a second fence from the parent
+    // tool_result hook. The parent hook owns framing (single fence).
+    return { ok: true, data: stripOwnUntrustedFences(data) };
   } catch (error) {
     return cliToolError(error);
   }
+}
+
+/** Map BackendCallResult text items through unwrapUntrustedText (child seam). */
+function stripOwnUntrustedFences(data: BackendCallResult): BackendCallResult {
+  if (!Array.isArray((data as { content?: unknown }).content)) return data;
+  const content = (data.content as unknown[]).map((item) =>
+    typeof item === 'object' && item !== null &&
+    (item as { type?: unknown }).type === 'text' &&
+    typeof (item as { text?: unknown }).text === 'string'
+      ? { ...item, text: unwrapUntrustedText((item as { text: string }).text) }
+      : item,
+  );
+  return { ...data, content };
 }
 
 /** Map tool failures to the CLI envelope. SocialError codes pass through

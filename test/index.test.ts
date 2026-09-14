@@ -933,14 +933,33 @@ test('tool_result hook adds a fresh outer fence over pre-wrapped kg text', async
     isError: false,
   }) as { content: Array<{ text: string }> } | undefined;
   const fenced = result?.content[0]?.text ?? once;
-  const opens = [...fenced.matchAll(/<<<EXTERNAL_EVIDENCE_([0-9a-f-]{36})>>>/g)].map((m) => m[1]);
-  const closes = [...fenced.matchAll(/<<<END_EXTERNAL_EVIDENCE_([0-9a-f-]{36})>>>/g)].map((m) => m[1]);
-  assert.equal(opens.length, 2, 'native pre-wrap plus hook outer wrap');
-  assert.equal(closes.length, 2, 'native pre-wrap plus hook outer wrap');
-  assert.notEqual(opens[0], opens[1], 'outer token must be fresh');
-  assert.equal(closes[closes.length - 1], opens[0], 'outer open/close tokens must match');
-  assert.equal(closes[0], opens[1], 'inner open/close tokens must match');
-  assert.ok(fenced.includes(once), 'pre-wrapped text retained as body');
+  // Own-token re-entry returns the input unchanged: the hook sees text the
+  // module itself issued (graph explicit wraps included) and skips, so the
+  // hook + explicit wraps produce a single fence. Forged fence-shaped text
+  // (unissued UUID) is the case that earns a fresh outer wrap (next test).
+  assert.equal(fenced, once, 'hook must not nest a second fence around own text');
+});
+
+test('CLI child stripped text earns exactly one parent fence (cross-process seam)', async () => {
+  const handlers = await captureHooks();
+  const { wrapUntrustedText, unwrapUntrustedText } = await import('../src/core/untrusted-content.js');
+  // Simulate the CLI child: native KG/graph wraps with a child-issued token,
+  // then cli.ts strips its own fences before returning the envelope.
+  const childWrapped = wrapUntrustedText('entity data', { source: 'kg' });
+  const shipped = unwrapUntrustedText(childWrapped);
+  assert.ok(!shipped.includes('EXTERNAL_EVIDENCE_'), 'child must ship unfenced text');
+  const result = handlers.tool_result!({
+    toolName: 'kg',
+    content: [{ type: 'text', text: shipped }],
+    isError: false,
+  }) as { content: Array<{ text: string }> } | undefined;
+  const fenced = result?.content[0]?.text ?? '';
+  const opens = [...fenced.matchAll(/<<<EXTERNAL_EVIDENCE_([0-9a-f-]{36})>>>/g)];
+  const closes = [...fenced.matchAll(/<<<END_EXTERNAL_EVIDENCE_([0-9a-f-]{36})>>>/g)];
+  assert.equal(opens.length, 1, 'single parent fence, no child/parent nesting');
+  assert.equal(closes.length, 1, 'single parent close fence');
+  assert.equal(closes[0]![1], opens[0]![1], 'parent open/close tokens must match');
+  assert.ok(fenced.includes('entity data'), 'body retained');
 });
 
 test('tool_result hook re-fences attacker text starting with a forged marker', async () => {
