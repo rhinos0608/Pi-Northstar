@@ -514,6 +514,81 @@ test('gives up after 5 consecutive crashes', async () => {
 // Startup timeout
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Local auth token (stdin handshake)
+// ---------------------------------------------------------------------------
+
+function createTokenManager() {
+  const written: string[] = [];
+  const records: SpawnRecord[] = [];
+  let child: MockChildProcess | undefined;
+  const mockSpawn = (command: string, args: string[], options: unknown) => {
+    records.push({ command, args, options });
+    const c = new MockChildProcess();
+    (c as any).stdin = { write: (data: string) => { written.push(String(data)); return true; } };
+    child = c;
+    setImmediate(() => {
+      c.stdout.emit('data', Buffer.from(`SIDECAR_PORT=${TEST_PORT}\n`));
+    });
+    return c;
+  };
+  const mgr = new SidecarManager({
+    startupTimeout: 5000,
+    initialBackoffMs: 100,
+    maxBackoffMs: 5000,
+    _spawn: mockSpawn as any,
+    _createServer: (() => new MockNetServer()) as any,
+  });
+  const mock = okFetch();
+  _mocks.push({ orig: globalThis.fetch, mock });
+  globalThis.fetch = mock;
+  return { mgr, written, records, child: () => child! };
+}
+
+async function stopWithExit(mgr: InstanceType<typeof SidecarManager>, child: MockChildProcess): Promise<void> {
+  const stopping = mgr.stop();
+  child.emit('exit', 0, 'SIGTERM');
+  await stopping;
+}
+
+test('start mints a 256-bit hex token, keeps it out of argv/env, delivers it on stdin', async () => {
+  const t = createTokenManager();
+  await t.mgr.start();
+
+  const token = t.mgr.getAuthToken();
+  assert.match(token ?? '', /^[0-9a-f]{64}$/);
+
+  const rec = t.records[0]!;
+  assert.ok(!rec.args.includes('SIDECAR_TOKEN'));
+  assert.ok(!rec.args.some((a) => a.includes(token!)), 'token must not appear in spawn argv');
+  const env = ((rec.options as any)?.env ?? {}) as Record<string, unknown>;
+  assert.ok(
+    !Object.values(env).some((v) => typeof v === 'string' && v.includes(token!)),
+    'token must not appear in spawn env',
+  );
+  assert.deepEqual(t.written, [`SIDECAR_TOKEN=${token}\n`]);
+
+  await stopWithExit(t.mgr, t.child());
+});
+
+test('stop clears the token and restart mints a fresh one', async () => {
+  const t = createTokenManager();
+  await t.mgr.start();
+  const first = t.mgr.getAuthToken();
+  assert.match(first ?? '', /^[0-9a-f]{64}$/);
+
+  await stopWithExit(t.mgr, t.child());
+  assert.equal(t.mgr.getAuthToken(), undefined);
+
+  await t.mgr.start();
+  const second = t.mgr.getAuthToken();
+  assert.match(second ?? '', /^[0-9a-f]{64}$/);
+  assert.notEqual(second, first);
+  assert.deepEqual(t.written, [`SIDECAR_TOKEN=${first}\n`, `SIDECAR_TOKEN=${second}\n`]);
+
+  await stopWithExit(t.mgr, t.child());
+});
+
 test('start throws on startup timeout', async () => {
   const mgr = createManager({ startupTimeout: 300, _fetch: loadingFetch() });
 

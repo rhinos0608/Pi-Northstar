@@ -127,6 +127,58 @@ test('health parses health response', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// apiToken (local sidecar handshake)
+// ---------------------------------------------------------------------------
+
+test('explicit apiToken sends Authorization header', async () => {
+  let auth: string | undefined;
+  handler = (req, res) => {
+    auth = req.headers.authorization as string | undefined;
+    jsonResponse(res, { status: 'ok', model: 'm', dimensions: 1, device: 'cpu' });
+  };
+
+  const client = new EmbeddingClient({ baseUrl, apiToken: 'local-token-abc' });
+  await client.health();
+
+  assert.equal(auth, 'Bearer local-token-abc');
+});
+
+test('explicit apiToken wins over EMBEDDING_SIDECAR_API_TOKEN env', async () => {
+  const prev = process.env.EMBEDDING_SIDECAR_API_TOKEN;
+  process.env.EMBEDDING_SIDECAR_API_TOKEN = 'env-token';
+  try {
+    let auth: string | undefined;
+    handler = (req, res) => {
+      auth = req.headers.authorization as string | undefined;
+      jsonResponse(res, { status: 'ok' });
+    };
+    const client = new EmbeddingClient({ baseUrl, apiToken: 'explicit-token' });
+    await client.health();
+    assert.equal(auth, 'Bearer explicit-token');
+  } finally {
+    if (prev === undefined) delete process.env.EMBEDDING_SIDECAR_API_TOKEN;
+    else process.env.EMBEDDING_SIDECAR_API_TOKEN = prev;
+  }
+});
+
+test('no token sends no Authorization header', async () => {
+  const prev = process.env.EMBEDDING_SIDECAR_API_TOKEN;
+  delete process.env.EMBEDDING_SIDECAR_API_TOKEN;
+  try {
+    let auth: string | undefined | string[];
+    handler = (req, res) => {
+      auth = req.headers.authorization;
+      jsonResponse(res, { status: 'ok' });
+    };
+    const client = new EmbeddingClient({ baseUrl });
+    await client.health();
+    assert.equal(auth, undefined);
+  } finally {
+    if (prev !== undefined) process.env.EMBEDDING_SIDECAR_API_TOKEN = prev;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Timeout
 // ---------------------------------------------------------------------------
 

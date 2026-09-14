@@ -1,4 +1,5 @@
 import { spawn as realSpawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer as realCreateServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -59,6 +60,7 @@ export class SidecarManager {
   private readonly _spawn: typeof realSpawn;
   private readonly _createServer: typeof realCreateServer;
   private _status: SidecarStatus = 'stopped';
+  private _authToken: string | undefined;
   private _port: number | undefined;
   private _error: string | undefined;
   private process: ChildProcess | undefined;
@@ -116,6 +118,7 @@ export class SidecarManager {
       // and drop the process ref when it is still ours. Shared state
       // (_status/_port) belongs to the current generation — never touch it.
       let child: ChildProcess | undefined;
+      let authToken: string | undefined;
       const releaseStaleChild = (): void => {
         if (child !== undefined && this.process === child) this.process = undefined;
         child?.removeAllListeners('exit');
@@ -185,6 +188,17 @@ export class SidecarManager {
           throw spawnError;
         }
 
+        // Per-start 256-bit auth token, delivered ONLY via the child's stdin
+        // pipe (never argv/env — the child env is allowlisted and would strip
+        // it anyway). Written before the port-line wait so the sidecar has it
+        // before serving. Missing stdin (e.g. mocked spawns) leaves the
+        // sidecar unauthenticated; the token is still tracked for the client.
+        authToken = randomBytes(32).toString('hex');
+        this._authToken = authToken;
+        try {
+          currentChild.stdin?.write(`SIDECAR_TOKEN=${authToken}\n`);
+        } catch { /* stdin unavailable — sidecar runs unauthenticated */ }
+
         // Parse SIDECAR_PORT=<port> line from stdout
         await portLinePromise;
         // stop() raced start() while the child was booting: kill only our
@@ -210,8 +224,13 @@ export class SidecarManager {
         // replacement start() exists; when superseded, only release our child.
         if (cancelled()) {
           killStaleChild();
+          // Identity-checked: never clobber a replacement start()'s token.
+          if (authToken !== undefined && this._authToken === authToken) this._authToken = undefined;
           return;
         }
+        // Failed start owns no process — drop its token (identity-checked
+        // against a concurrent replacement start that may have minted anew).
+        if (authToken !== undefined && this._authToken === authToken) this._authToken = undefined;
         // Ensure status reflects failure (pollHealth already sets error;
         // other failures like getRandomPort or waitForPortLine do not).
         if (this._status !== 'error') {
@@ -322,8 +341,10 @@ export class SidecarManager {
   }
 
   private handleExit(_code: number | null, _signal: string | null): void {
-    // Clear process reference
+    // Clear process reference and its token: a dead process's token must not
+    // be reused. The scheduled restart mints a fresh one via start().
     this.process = undefined;
+    this._authToken = undefined;
 
     // If stop() was called, don't restart
     if (this._status === 'stopped') return;
@@ -407,6 +428,13 @@ export class SidecarManager {
     };
   }
 
+  /** Auth token minted for the current start(); undefined when stopped/
+   *  never started. Passed to EmbeddingClient via shared-sidecar — never
+   *  argv/env, never logs. */
+  getAuthToken(): string | undefined {
+    return this._authToken;
+  }
+
   getBaseUrl(): string {
     // If external sidecar URL is configured, use it
     const externalUrl = process.env.EMBEDDING_SIDECAR_BASE_URL;
@@ -436,6 +464,8 @@ export class SidecarManager {
 
   async stop(): Promise<void> {
     this._status = 'stopped';
+    // Token is per-start: cleared here so a restart after stop mints fresh.
+    this._authToken = undefined;
     // Invalidate any start() still awaiting port/spawn/health (stop-after-start race).
     this.startGeneration++;
     const stopGeneration = this.startGeneration;

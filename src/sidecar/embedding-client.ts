@@ -1,5 +1,7 @@
 export interface EmbeddingClientOptions {
   baseUrl?: string;
+  /** Explicit per-instance token (local sidecar handshake). Wins over env. */
+  apiToken?: string;
   timeout?: number;
   maxRetries?: number;
   signal?: AbortSignal;
@@ -56,7 +58,8 @@ export class EmbeddingClient {
     this.timeout = options?.timeout ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = Math.max(1, options?.maxRetries ?? DEFAULT_MAX_RETRIES);
     this.signal = options?.signal;
-    this.apiToken = process.env.EMBEDDING_SIDECAR_API_TOKEN || undefined;
+    // Explicit injection wins; existing env fallback for external sidecars unchanged.
+    this.apiToken = options?.apiToken || process.env.EMBEDDING_SIDECAR_API_TOKEN || undefined;
   }
 
   async embed(text: string): Promise<Float32Array> {

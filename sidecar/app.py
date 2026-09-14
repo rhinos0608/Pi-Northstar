@@ -1,4 +1,5 @@
 import argparse
+import hmac
 import logging
 import os
 import signal
@@ -43,6 +44,37 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="embedding-sidecar", lifespan=lifespan)
+
+# Local-auth token delivered by SidecarManager on stdin as
+# `SIDECAR_TOKEN=<token>` (never argv/env). None => standalone run,
+# server stays unauthenticated (backward compatible).
+_auth_token = None
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    # Health stays open so manager polling is unchanged.
+    if _auth_token is None or request.url.path == "/v1/health":
+        return await call_next(request)
+    received = request.headers.get("authorization", "")
+    # compare_digest raises TypeError on non-ASCII (str) inputs: treat as
+    # malformed credentials (401), never a 500.
+    if not isinstance(received, str) or not received.isascii():
+        received_valid = False
+    else:
+        received_valid = hmac.compare_digest(received, f"Bearer {_auth_token}")
+    if not received_valid:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": {
+                    "message": "unauthorized",
+                    "type": "auth_error",
+                    "code": 401,
+                }
+            },
+        )
+    return await call_next(request)
 
 
 MAX_TEXTS_PER_REQUEST = 100
@@ -182,6 +214,31 @@ async def embeddings(req: EmbeddingRequest):
     }
 
 
+def _read_stdin_token(timeout_s: float = 1.0):
+    """Read the SIDECAR_TOKEN=<token> handshake line from stdin, if piped.
+
+    Returns None for standalone runs (tty, closed stdin, or no line within
+    the timeout) so the server runs unauthenticated as before. Never logs
+    the token value."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        import select
+        ready, _, _ = select.select([sys.stdin], [], [], timeout_s)
+        if not ready:
+            return None
+        line = sys.stdin.readline()
+    except Exception:
+        return None
+    if not line:
+        return None
+    prefix = "SIDECAR_TOKEN="
+    if not line.strip().startswith(prefix):
+        return None
+    token = line.strip()[len(prefix):].strip()
+    return token or None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=int(os.environ.get("PI_SEARCH_EMBEDDING_PORT", "8765")))
@@ -189,8 +246,14 @@ def main():
     parser.add_argument("--device", type=str, default=os.environ.get("SIDECAR_DEVICE"))
     args = parser.parse_args()
 
-    global model_name_arg
+    global model_name_arg, _auth_token
     model_name_arg = args.model
+    # Manager handshake: token line on stdin enables auth; absent (standalone
+    # runs) keeps the server unauthenticated. The value itself is never logged.
+    _auth_token = _read_stdin_token()
+    logging.getLogger("sidecar").info(
+        "Sidecar auth enabled" if _auth_token else "Sidecar auth disabled (no token on stdin)"
+    )
 
     logging.basicConfig(
         level=logging.INFO,

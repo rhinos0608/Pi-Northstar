@@ -22,6 +22,9 @@ export type SharedSidecarEnv = Record<string, string | undefined>;
 export interface AcquiredSidecar {
   /** Base URL for EmbeddingClient (external URL or local singleton URL). */
   baseUrl: string;
+  /** Local-singleton auth token for EmbeddingClient; undefined on the
+   *  external path (client falls back to its existing env-based token). */
+  apiToken?: string;
   /** True when an external URL was used and no local process is involved. */
   external: boolean;
   /** Idempotent: decrements the refcount; never stops the process. */
@@ -133,8 +136,10 @@ export async function acquireEmbeddingSidecar(env?: SharedSidecarEnv): Promise<A
   refCount += 1;
   installShutdownHook();
   let released = false;
+  const apiToken = candidate.getAuthToken();
   return {
     baseUrl: candidate.getBaseUrl(),
+    ...(apiToken !== undefined ? { apiToken } : {}),
     external: false,
     release: () => {
       if (released) return;

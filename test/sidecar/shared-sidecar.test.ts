@@ -135,6 +135,26 @@ test('external EMBEDDING_SIDECAR_BASE_URL bypasses local lifecycle', async () =>
   acquired.release(); // no-op, must not throw
 });
 
+test('local acquire returns the singleton auth token', async () => {
+  const acquired = await acquireEmbeddingSidecar({});
+  try {
+    const manager = __peekSharedSidecarForTests();
+    assert.ok(manager);
+    assert.equal(typeof acquired.apiToken, 'string');
+    assert.match(acquired.apiToken!, /^[0-9a-f]{64}$/);
+    assert.equal(acquired.apiToken, manager.getAuthToken());
+  } finally {
+    acquired.release();
+  }
+});
+
+test('external path returns undefined apiToken (env fallback unchanged)', async () => {
+  const acquired = await acquireEmbeddingSidecar({ EMBEDDING_SIDECAR_BASE_URL: 'http://external:9000/' });
+  assert.equal(acquired.external, true);
+  assert.equal(acquired.apiToken, undefined);
+  acquired.release(); // no-op, must not throw
+});
+
 test('acquire failure propagates so callers fall back to BM25', async () => {
   spawnShouldFail = true;
   await assert.rejects(() => acquireEmbeddingSidecar({}), /ENOENT/);
