@@ -4,6 +4,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  isPdfCloudRenderOptIn,
+  PDF_CLOUD_RENDER_ENV_VAR,
   PDF_MAX_BYTES,
   runPdfPipeline,
 } from '../../src/media-vision/pipeline-pdf.js';
@@ -73,6 +75,37 @@ test('sparse scanned page escalates to vision as derived entry', async () => {
   const byPage = new Map(result.evidence.map((e) => [`${e.locator.page}:${e.kind}`, e.sourceKind]));
   assert.equal(byPage.get('2:pdf-text'), 'extracted');
   assert.equal(byPage.get('1:description'), 'derived');
+});
+
+test('cloud-render flag is exact-1 opt-in and stays fail-closed without a renderer', async () => {
+  assert.equal(isPdfCloudRenderOptIn({}), false);
+  assert.equal(isPdfCloudRenderOptIn({ [PDF_CLOUD_RENDER_ENV_VAR]: '0' }), false);
+  assert.equal(isPdfCloudRenderOptIn({ [PDF_CLOUD_RENDER_ENV_VAR]: 'true' }), false);
+  assert.equal(isPdfCloudRenderOptIn({ [PDF_CLOUD_RENDER_ENV_VAR]: ' 1 ' }), false);
+  assert.equal(isPdfCloudRenderOptIn({ [PDF_CLOUD_RENDER_ENV_VAR]: '1' }), true);
+  // Flag set but no renderer exists: pipeline still runs local-only with
+  // zero vision calls possible (no describePage seam can be supplied by
+  // the fetch hot path).
+  let visions = 0;
+  const result = await runPdfPipeline(new Uint8Array([1, 2, 3]), {
+    async extractor() {
+      return { totalPages: 1, pages: [''] };
+    },
+    async describePage() {
+      visions += 1;
+      return { text: 'unreachable without a renderer-backed caller' };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(visions, 1, 'explicit seam still escalates when directly supplied');
+  const localOnly = await runPdfPipeline(new Uint8Array([1, 2, 3]), {
+    async extractor() {
+      return { totalPages: 1, pages: [''] };
+    },
+  });
+  assert.equal(localOnly.ok, true);
+  if (!localOnly.ok) return;
+  assert.ok(localOnly.warnings.includes('page-1-possibly-scanned-no-vision'));
 });
 
 test('sparse page without vision seam warns instead of fabricating', async () => {

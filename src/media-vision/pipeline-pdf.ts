@@ -46,7 +46,25 @@ function pageLocator(page: number): EvidenceLocator {
  * Full PDF pipeline. Admission rejects before extraction; extractor errors
  * degrade to ok:false (caller falls back to the page reader). Vision
  * escalation applies per sparse page only.
+ *
+ * Explicit-vision entry point (NOT the fetch hot path): the live fetch PDF
+ * path (extractWebAccessPdfText) keeps its own citation-marker text policy
+ * and stays local-only by transfer posture — fetch never supplies a
+ * describePage seam, so no PDF fetch can implicitly trigger cloud vision.
+ * Cloud rendering additionally requires PI_VISION_PDF_CLOUD_RENDER=exact '1'
+ * (see isPdfCloudRenderOptIn) AND a page-image renderer, which the repo does
+ * not have yet (unpdf ships no render API, no canvas backend — plan TODO).
+ * Until a renderer exists the flag stays fail-closed: local text plus
+ * page-N-possibly-scanned-no-vision warnings.
  */
+/** Exact-'1' opt-in for sparse-page cloud rendering. Accepted as config
+ *  today but fail-closed until a page-image renderer exists (see above). */
+export const PDF_CLOUD_RENDER_ENV_VAR = 'PI_VISION_PDF_CLOUD_RENDER';
+
+export function isPdfCloudRenderOptIn(env: Record<string, string | undefined> = process.env): boolean {
+  return env[PDF_CLOUD_RENDER_ENV_VAR] === '1';
+}
+
 export async function runPdfPipeline(
   bytes: Uint8Array,
   seams: PdfVisionSeams,

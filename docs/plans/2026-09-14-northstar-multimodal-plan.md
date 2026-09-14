@@ -64,3 +64,4 @@
 
 ## Known unknowns / defaults / pivots
 - OCR engine: default = vision-provider OCR as distinct evidence kind (no separate OCR dependency). Pivot: S1 proves provider verbatim OCR unreliable → escalate, do not silently collapse OCR into description.
+- TODO (PDF page rendering): `runPdfPipeline` wires into the native PDF fetch path local-only; sparse-page cloud rendering (`describePage` seam) is designed but has no page-image source — `unpdf` ships no render API and the repo has no canvas backend (adding `node-canvas` or equivalent native dep is rejected for now). Until a render path exists, `PI_VISION_PDF_CLOUD_RENDER=1` must stay fail-closed (no seam supplied, local text + `page-N-possibly-scanned-no-vision` warnings). Options when revisited: dependency-free software rasterizer, optional peer dep behind capability check, or server-side render at the vision endpoint.
