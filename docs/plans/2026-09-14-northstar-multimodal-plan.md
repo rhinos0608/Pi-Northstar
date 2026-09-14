@@ -1,6 +1,6 @@
 # Plan D — Multimodal Providers / Routing
 
-> **For agentic workers:** Implement task-by-task. Own only listed files. Builds on Plan B (acquire/ledger/retention) + Gate 2. Spike S1 first. No commits.
+> **For agentic workers:** Implement task-by-task. Own only listed files. Builds on Plan B (acquire/ledger/retention). Task D5 lands at Gate 1 (ahead of the rest of Plan D, exempt from the Gate 2 prerequisite); tasks D0–D4 build on Gate 2. Spike S1 first. No commits.
 
 **Goal:** Image/PDF/video pipelines with deterministic eligibility ordering and transfer authorization.
 

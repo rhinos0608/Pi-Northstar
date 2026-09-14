@@ -22,9 +22,9 @@
 
 ## Dependency graph and gates
 - [ ] Gate 0 (spikes S1–S4, throwaway probe scripts, not committed): S1 genai 1.52.0 API + token-count + Vertex ADC shape vs official docs; S2 Tavily async/job surface (pivot: none → job wraps sync stream, poll serves byte-stable snapshot); S3 pi-subagents RPC handshake (pivot: none → fail-closed no-op capability record, core runs standalone); S4 ffmpeg presence + transcript sources in `src/media/media.ts` (pivot: none → metadata+transcript only with warnings).
-- [ ] Gate 1: shared seams land first — asset/budget/retention contracts (Plan B) + transfer-policy flag (Plan D §transfer) + agent-job seam interface (Plan A §seam). Plans C/D/E build on these; E is not independent.
+- [ ] Gate 1: shared seams land first — asset/budget/retention contracts (Plan B) + transfer-policy flag (Plan D Task D5 only, lands at Gate 1 ahead of rest of Plan D) + agent-job seam interface (Plan A §seam). Plans C/D-remainder/E build on these; E is not independent.
 - [ ] Gate 2 (atomic merge train A+C): Plan A (clean-break contract + job seam) and Plan C (agent runtime) merge together; A alone must not leave a dead `agent_jobs_unavailable` throw on a green gate.
-- [ ] Gate 3: Plan D (multimodal) green on top of Gate 2.
+- [ ] Gate 3: Plan D remainder (Tasks D0–D4) green on top of Gate 2 (D5 already landed at Gate 1, exempt from Gate 2 prerequisite).
 - [ ] Gate 4: Plan E (GitHub) green on top of Gates 1–2 (needs B ledger + D transfer flag).
 - [ ] Every gate: `npm run typecheck` + full `npm test` green; `git status --short` shows plan-owned files only; no staged files left.
 

@@ -11,7 +11,7 @@
 - Create: `src/web/agent/agent-contract.ts` (citation contract: every claim cites sourceIds; document contract: derived docs carry sourceKind+locator+warnings; **lexical contract: BM25 pass over `src/search/bm25.ts`**; byte-stable serialization rule: canonical JSON, identical bytes for identical job state)
 - Create: `test/web/agent/agent-contract.test.ts`
 
-**Budgets (proposed defaults, need approval — not decided):** report text 50k chars, sources ≤20, local route 30 sources / 8 fetch rounds, operator-lower-only after approval. Tests read these from the contract module so approval renames/renumbers touch one file.
+**Budgets (proposed defaults, need approval — not decided):** report text 50k UTF-8 bytes, sources ≤20, local route 30 sources / 8 fetch rounds, operator-lower-only after approval. Tests read these from the contract module so approval renames/renumbers touch one file.
 
 **Checks:**
 - `node --import tsx --test test/web/agent/agent-contract.test.ts`
