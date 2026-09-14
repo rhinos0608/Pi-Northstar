@@ -41,6 +41,8 @@ test('web_search schema mirrors internal bounds', () => {
   assert.equal(Value.Check(schema, { query: 'a', recency: 'decade' }), false);
   assert.equal(Value.Check(schema, { query: 'a', knowledge: {} }), false);
   assert.equal(Value.Check(schema, { query: 'a', knowledge: { facts: true } }), true);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'video', limit: 20 }), true);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'video', limit: 21 }), false);
 });
 
 test('web_search research continuation requires single query + exact source + cursor', () => {
@@ -206,11 +208,11 @@ test('README tool examples validate against registered schemas (no drift)', () =
   const github = buildGithubParameters();
   assert.equal(Value.Check(github, { request: { action: 'releases', repository: 'owner/repo' } }), true);
   assert.equal(Value.Check(github, { action: 'releases', repository: 'owner/repo' }), false);
-  // fetch crawl examples route via the request envelope with mode + source.
-  const crawlUrl = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'pricing tiers' });
-  assert.equal(crawlUrl.tool, 'semantic_crawl');
-  const crawlSearch = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'React 18 concurrent rendering' }, query: 'How does React concurrent rendering work?' });
-  assert.equal(crawlSearch.tool, 'semantic_crawl');
+  // fetch read-query examples route via the 5-branch union (no mode/source).
+  const readQuery = buildFetchRoute({ url: 'https://example.com', query: 'pricing tiers' });
+  assert.equal(readQuery.tool, 'agentic_browse');
+  const multiQuery = buildFetchRoute({ urls: ['https://example.com'], query: 'How does React concurrent rendering work?' });
+  assert.equal(multiQuery.tool, 'fetch');
   assert.throws(() => buildFetchRoute({ mode: 'crawl', query: 'pricing tiers' } as never));
   // graph stays flat (no envelope); pin the README forms.
   const graph = buildGraphParameters();

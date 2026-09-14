@@ -7,7 +7,7 @@ const ALWAYS_AVAILABLE_TOOL_NAMES = [
   'fetch',
   'github',
   'social',
-  'media',
+  'agent_poll',
 ] as const;
 
 // DIFFBOT-gated tools: present only when DIFFBOT_TOKEN is set.
@@ -34,6 +34,8 @@ const DISALLOWED_TOOL_NAMES = [
   'reach_setup',
   'browse',
   'semantic_crawl',
+  'agentic_browse',
+  'media',
   'video',
   'feeds',
   'research_sources',

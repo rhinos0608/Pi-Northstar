@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildBrowseArgs, buildSemanticSource, buildMediaRoute, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs } from '../src/index.js';
+import { buildBrowseArgs, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs } from '../src/index.js';
 import Value from 'typebox/value';
-import { CHANNEL_CAPABILITIES, mediaPlatforms as registryMediaPlatforms, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
+import { CHANNEL_CAPABILITIES, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
 
 function registryActionEnum(family: string): string[] {
   return [...new Set(
@@ -36,202 +36,101 @@ test('buildBrowseArgs preserves explicit maxChars', () => {
   });
 });
 
-test('buildSemanticSource prefers explicit URL', () => {
-  assert.deepEqual(buildSemanticSource(' https://example.com/page ', 'fallback query'), {
-    type: 'url',
-    url: 'https://example.com/page',
-  });
+test('media tool removed; agent_poll registered in the freed slot', async () => {
+  const defs = await captureAllTools();
+  assert.ok(!defs.media, 'media tool must not be registered');
+  assert.ok(defs.agent_poll, 'agent_poll must be registered');
+  const params = defs.agent_poll!.parameters as { properties?: Record<string, unknown> };
+  assert.ok(params.properties?.jobId, 'agent_poll must expose jobId');
 });
 
-test('buildSemanticSource uses search query when URL is absent', () => {
-  assert.deepEqual(buildSemanticSource(' ', 'topic query'), {
-    type: 'search',
-    query: 'topic query',
-    maxSeedUrls: 8,
-  });
+test('buildFetchRoute empty params throw union error', () => {
+  assert.throws(() => buildFetchRoute({} as never), /requires one of/);
 });
 
-test('buildSemanticSource requires URL or search query', () => {
-  assert.throws(() => buildSemanticSource(undefined, '  '), /Provide either url or searchQuery/);
-});
-
-test('buildMediaRoute routes rss platform to feeds tool', () => {
-  const route = buildMediaRoute({ platform: 'rss', url: 'https://example.com/feed.xml', limit: 10 });
-  assert.equal(route.tool, 'feeds');
-  assert.equal(route.args.url, 'https://example.com/feed.xml');
-  assert.equal(route.args.limit, 10);
-  assert.equal(route.timeout, 120_000);
-});
-
-test('buildMediaRoute routes feed action to feeds tool', () => {
-  const route = buildMediaRoute({ action: 'feed', url: 'https://example.com/feed.xml' });
-  assert.equal(route.tool, 'feeds');
-  assert.equal(route.args.url, 'https://example.com/feed.xml');
-  assert.equal(route.timeout, 120_000);
-});
-
-test('buildMediaRoute defaults limit to 20 for feeds', () => {
-  const route = buildMediaRoute({ platform: 'rss', url: 'https://example.com/feed.xml' });
-  assert.equal(route.args.limit, 20);
-});
-
-test('buildMediaRoute routes youtube platform to video tool', () => {
-  const route = buildMediaRoute({ platform: 'youtube', action: 'search', query: 'test' });
-  assert.equal(route.tool, 'video');
-  assert.equal(route.args.platform, 'youtube');
-  assert.equal(route.args.action, 'search');
-  assert.equal(route.args.query, 'test');
-  assert.equal(route.timeout, 300_000);
-});
-
-test('buildMediaRoute routes bilibili platform to video tool', () => {
-  const route = buildMediaRoute({ platform: 'bilibili', action: 'hot', limit: 5 });
-  assert.equal(route.tool, 'video');
-  assert.equal(route.args.platform, 'bilibili');
-  assert.equal(route.args.action, 'hot');
-  assert.equal(route.args.limit, 5);
-  assert.equal(route.timeout, 300_000);
-});
-
-test('buildMediaRoute strips rss platform from video params', () => {
-  const route = buildMediaRoute({ platform: 'rss', action: 'feed', url: 'https://example.com/feed.xml' });
-  assert.equal(route.tool, 'feeds');
-  assert.equal(route.args.platform, undefined);
-});
-
-test('buildMediaRoute includes optional fields in video params', () => {
-  const route = buildMediaRoute({ platform: 'youtube', action: 'transcript', id: 'abc123', url: 'https://youtube.com/watch?v=abc123', limit: 1 });
-  assert.equal(route.tool, 'video');
-  assert.equal(route.args.id, 'abc123');
-  assert.equal(route.args.url, 'https://youtube.com/watch?v=abc123');
-  assert.equal(route.args.limit, 1);
-});
-
-test('buildFetchRoute empty params throw discriminator error', () => {
-  assert.throws(() => buildFetchRoute({} as never), /fetch requires explicit mode/);
-});
-
-test('buildFetchRoute no-query routes to agentic_browse with maxChars default', () => {
-  const route = buildFetchRoute({ mode: 'read', url: 'https://example.com/page' });
+test('buildFetchRoute single url routes to agentic_browse read-query path', () => {
+  const route = buildFetchRoute({ url: 'https://example.com/page' });
   assert.equal(route.tool, 'agentic_browse');
   assert.equal(route.args.url, 'https://example.com/page');
   assert.equal(route.args.action, 'read');
   assert.equal(route.args.maxChars, 30000);
   assert.equal(route.timeout, 120_000);
+  const ranked = buildFetchRoute({ url: 'https://example.com/page', query: 'pricing', topK: 5, maxChars: 5000 });
+  assert.equal(ranked.tool, 'agentic_browse');
+  assert.equal(ranked.args.query, 'pricing');
+  assert.equal(ranked.args.topK, 5);
+  assert.equal(ranked.args.maxChars, 5000);
 });
 
-test('buildFetchRoute no-query honors maxChars override', () => {
-  const route = buildFetchRoute({ mode: 'read', url: 'https://example.com/page', maxChars: 5000 });
-  assert.equal(route.args.maxChars, 5000);
-});
-
-test('buildFetchRoute read urls routes multi-read with per-URL isolation', () => {
-  const route = buildFetchRoute({ mode: 'read', urls: ['https://example.com/a', 'https://example.com/b'] });
-  assert.equal(route.tool, 'fetch');
-  assert.deepEqual(route.args.urls, ['https://example.com/a', 'https://example.com/b']);
-});
-
-test('buildFetchRoute read rejects url+urls together', () => {
-  assert.throws(
-    () => buildFetchRoute({ mode: 'read', url: 'https://example.com/a', urls: ['https://example.com/b'] }),
-    /either url or urls/,
-  );
-  // Empty-string url still counts as present: fail closed, never multi-read.
-  assert.throws(
-    () => buildFetchRoute({ mode: 'read', url: '', urls: ['https://example.com/b'] }),
-    /either url or urls/,
-  );
-});
-
-test('buildFetchRoute crawl source urls routes multi-crawl', () => {
-  const route = buildFetchRoute({
-    mode: 'crawl',
-    source: { type: 'url', urls: ['https://example.com/a', 'https://example.com/b'] },
-    query: 'docs',
-  });
+test('buildFetchRoute urls routes multi with per-URL isolation, no maxPages', () => {
+  const route = buildFetchRoute({ urls: ['https://example.com/a', 'https://example.com/b'], query: 'docs' });
   assert.equal(route.tool, 'fetch');
   assert.deepEqual(route.args.urls, ['https://example.com/a', 'https://example.com/b']);
   assert.equal(route.args.query, 'docs');
+  assert.ok(!('maxPages' in route.args));
+  assert.throws(() => buildFetchRoute({ urls: ['https://example.com/a'], maxPages: 3 } as never), /maxPages/);
 });
 
-test('buildFetchRoute crawl rejects source url+urls and multi followLinks', () => {
+test('buildFetchRoute rejects url+urls together', () => {
   assert.throws(
-    () =>
-      buildFetchRoute({
-        mode: 'crawl',
-        source: { type: 'url', url: 'https://example.com/a', urls: ['https://example.com/b'] },
-        query: 'docs',
-      }),
+    () => buildFetchRoute({ url: 'https://example.com/a', urls: ['https://example.com/b'] } as never),
     /either url or urls/,
   );
-  // Empty-string url still counts as present: fail closed, never multi-crawl.
+  // Empty-string url still counts as present: fail closed, never multi.
   assert.throws(
-    () =>
-      buildFetchRoute({
-        mode: 'crawl',
-        source: { type: 'url', url: '', urls: ['https://example.com/b'] },
-        query: 'docs',
-      }),
+    () => buildFetchRoute({ url: '', urls: ['https://example.com/b'] } as never),
     /either url or urls/,
-  );
-  assert.throws(
-    () =>
-      buildFetchRoute({
-        mode: 'crawl',
-        source: { type: 'url', urls: ['https://example.com/a'], followLinks: true },
-        query: 'docs',
-      }),
-    /followLinks needs a single source url/,
   );
 });
 
-test('fetch schema enforces url/urls XOR at validation (read + crawl source)', async () => {
+test('buildFetchRoute rejects legacy crawl shapes and filesystem paths', () => {
+  assert.throws(
+    () => buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com/' }, query: 'q' } as never),
+    /no longer accepts 'mode'/,
+  );
+  assert.throws(
+    () => buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'topic' }, query: 'docs' } as never),
+    /no longer accepts 'mode'/,
+  );
+  assert.throws(
+    () => buildFetchRoute({ url: 'https://example.com/', followLinks: true } as never),
+    /no longer accepts 'followLinks'/,
+  );
+  assert.throws(() => buildFetchRoute({ url: '/etc/passwd' } as never), /asset URL/);
+});
+
+test('fetch schema enforces the 5-branch union at validation', async () => {
   const defs = await captureAllTools();
   const schema = defs.fetch!.parameters as Parameters<typeof Value.Check>[0];
-  assert.equal(Value.Check(schema, { request: { mode: 'read', url: 'https://example.com/a' } }), true);
-  assert.equal(Value.Check(schema, { request: { mode: 'read', urls: ['https://example.com/a'] } }), true);
-  assert.equal(Value.Check(schema, { request: { mode: 'read', url: 'https://example.com/a', urls: ['https://example.com/b'] } }), false);
-  assert.equal(Value.Check(schema, { request: { mode: 'read' } }), false);
-  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'q' } }), true);
-  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', urls: ['https://example.com'] }, query: 'q' } }), true);
-  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', url: 'https://example.com', urls: ['https://example.com/b'] }, query: 'q' } }), false);
-  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url' }, query: 'q' } }), false);
-  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', urls: ['https://example.com'], followLinks: true }, query: 'q' } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a' } }), true);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', query: 'q', topK: 3 } }), true);
+  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a'] } }), true);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', urls: ['https://example.com/b'] } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', siteMap: true } }), true);
+  assert.equal(Value.Check(schema, { request: { responseId: 'r1' } }), true);
+  assert.equal(Value.Check(schema, { request: { responseId: 'r1', claims: ['c'] } }), true);
+  assert.equal(Value.Check(schema, { request: { mode: 'read', url: 'https://example.com/a' } }), false);
+  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'q' } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', query: 'q', extra: 1 } }), false);
 });
 
-test('buildFetchRoute crawl_search routes to semantic_crawl with defaults', () => {
-  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'test' }, query: 'test query' });
-  assert.equal(route.tool, 'semantic_crawl');
-  assert.equal(route.args.query, 'test query');
-  assert.equal((route.args.source as { query: string }).query, 'test');
-  assert.equal(route.args.topK, 8);
-  assert.equal(route.args.maxPages, 10);
-  assert.equal(route.args.maxDepth, 0);
-  assert.equal(route.timeout, 300_000);
-});
-
-test('buildFetchRoute crawl_url sets maxDepth 1', () => {
-  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com/page' }, query: 'test query' });
-  assert.equal((route.args.source as { type: string }).type, 'url');
-  assert.equal(route.args.maxDepth, 1);
-});
 
 test('buildFetchRoute siteMap routes to fetch with sitemap args', () => {
-  const route = buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
+  const route = buildFetchRoute({ url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
   assert.equal(route.tool, 'fetch');
   assert.deepEqual(route.args, { url: 'https://example.com/docs/', siteMap: true, query: 'api', maxPages: 5 });
   assert.equal(route.timeout, 180_000, 'sitemap route ceiling sits above the 150s provider bound');
 });
 
 test('buildFetchRoute siteMap without query or maxPages passes through', () => {
-  const route = buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/docs/', siteMap: true });
+  const route = buildFetchRoute({ url: 'https://example.com/docs/', siteMap: true });
   assert.deepEqual(route.args, { url: 'https://example.com/docs/', siteMap: true });
 });
 
 test('buildFetchRoute siteMap rejects missing url and non-true marker', () => {
-  assert.throws(() => buildFetchRoute({ mode: 'sitemap', siteMap: true } as never), /sitemap requires url/);
-  assert.equal(buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/', siteMap: 'yes' as unknown as true } as never).args.siteMap, true);
-  assert.equal(buildFetchRoute({ mode: 'sitemap', url: 'https://example.com/page', siteMap: false as unknown as true } as never).args.siteMap, true);
+  assert.throws(() => buildFetchRoute({ siteMap: true } as never), /sitemap requires url/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', siteMap: 'yes' } as never), /siteMap:true/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/page', siteMap: false } as never), /siteMap:true/);
 });
 
 test('buildSearchRoute research category routes to research backend', () => {
@@ -298,19 +197,13 @@ test('buildSearchRoute research limit rejects above 30 with invalid_request', ()
   assert.equal(buildSearchRoute({ query: 'test', category: 'research', limit: 30 }).args.limit, 30);
 });
 
-test('buildMediaRoute handles empty params object', () => {
-  const route = buildMediaRoute({});
-  assert.equal(route.tool, 'video');
-  assert.deepEqual(route.args, {});
-  assert.equal(route.timeout, 300_000);
+test('buildFetchRoute query-only and unknown fields throw', () => {
+  assert.throws(() => buildFetchRoute({ query: '   ' } as never), /requires one of/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/page', bogus: 1 } as never), /rejects field 'bogus'/);
 });
 
-test('buildFetchRoute query without url/source/urls throws', () => {
-  assert.throws(() => buildFetchRoute({ query: '   ' } as never), /fetch requires explicit mode/);
-});
-
-test('buildFetchRoute read ignores no extra fields', () => {
-  const route = buildFetchRoute({ mode: 'read', url: 'https://example.com/page' });
+test('buildFetchRoute single read carries defaults', () => {
+  const route = buildFetchRoute({ url: 'https://example.com/page' });
   assert.equal(route.tool, 'agentic_browse');
   assert.equal(route.args.url, 'https://example.com/page');
   assert.equal(route.args.action, 'read');
@@ -333,41 +226,19 @@ test('buildSearchRoute research paper category routes to web_search', () => {
   assert.equal(route.args.category, 'research paper');
 });
 
-test('buildFetchRoute source followLinks routes to semantic_crawl with maxDepth 3', () => {
-  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs' });
-  assert.equal(route.tool, 'semantic_crawl');
-  assert.equal(route.args.followLinks, true);
-  assert.equal(route.args.maxDepth, 3);
-  assert.equal(route.args.query, 'docs');
-  assert.equal((route.args.source as { type: string }).type, 'url');
-  assert.equal((route.args.source as { url: string }).url, 'https://example.com');
-  assert.equal(route.timeout, 300_000);
+test('buildFetchRoute rejects every legacy discriminant', () => {
+  for (const key of ['mode', 'action', 'source', 'searchQuery', 'followLinks', 'maxDepth'] as const) {
+    assert.throws(
+      () => buildFetchRoute({ [key]: 'x', url: 'https://example.com/' } as never),
+      new RegExp(`no longer accepts '${key}'`),
+    );
+  }
 });
 
-test('buildFetchRoute unknown source type throws', () => {
-  assert.throws(
-    () => buildFetchRoute({ mode: 'crawl', source: { type: 'feed' }, query: 'docs' } as never),
-    /crawl source\.type must be one of: url, search/,
-  );
-});
-
-test('buildFetchRoute rejects unknown mode strings', () => {
-  assert.throws(
-    () => buildFetchRoute({ mode: 'delete', url: 'https://example.com' } as never),
-    /mode must be one of: read, crawl, sitemap, retrieve, source_check/,
-  );
-  assert.throws(() => buildFetchRoute({ mode: 42 } as never), /mode must be one of/);
-});
-
-test('buildFetchRoute passes maxChars to semantic_crawl on crawl paths', () => {
-  const queryRoute = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'topic' }, query: 'docs', maxChars: 5000 });
-  assert.equal(queryRoute.tool, 'semantic_crawl');
-  assert.equal(queryRoute.args.maxChars, 5000);
-  const followRoute = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com', followLinks: true }, query: 'docs', maxChars: 5000 });
-  assert.equal(followRoute.tool, 'semantic_crawl');
-  assert.equal(followRoute.args.maxChars, 5000);
-  const defaultRoute = buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'topic' }, query: 'docs' });
-  assert.equal(defaultRoute.args.maxChars, undefined);
+test('buildFetchRoute claim-check names offending slice fields', () => {
+  assert.throws(() => buildFetchRoute({ responseId: 'r1', claims: ['c'], offset: 2 } as never), /rejects 'offset'/);
+  assert.throws(() => buildFetchRoute({ responseId: 'r1', claims: ['c'], limit: 2 } as never), /rejects 'limit'/);
+  assert.throws(() => buildFetchRoute({ responseId: 'r1', claims: ['c'], findText: 'x' } as never), /rejects 'findText'/);
 });
 
 type WebSearchBranch = { properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string };
@@ -461,23 +332,16 @@ test('web_search schema knowledge placement', async () => {
 });
 
 
-test('buildFetchRoute crawl_url without followLinks sets maxDepth 1', () => {
-  const route = buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'test' });
-  assert.equal(route.tool, 'semantic_crawl');
-  assert.equal(route.args.followLinks, undefined);
-  assert.equal(route.args.maxDepth, 1);
+test('buildFetchRoute retrieve serves cached slice fields', () => {
+  const route = buildFetchRoute({ responseId: 'r1', sourceIds: ['s-0'], offset: 1, limit: 5 });
+  assert.equal(route.tool, 'fetch');
+  assert.equal(route.args.action, 'retrieve');
+  assert.equal(route.timeout, 60_000);
 });
 
-test('buildFetchRoute empty params throw discriminator error', () => {
-  assert.throws(() => buildFetchRoute({} as never), /fetch requires explicit mode/);
-});
-
-test('buildFetchRoute rejects unknown action and cross-branch markers', () => {
-  assert.throws(
-    () => buildFetchRoute({ mode: 'read', responseId: 'r1' } as never),
-    /read requires url/,
-  );
-  assert.equal(buildFetchRoute({ mode: 'sitemap', url: 'https://example.com', siteMap: false } as never).args.siteMap, true);
+test('buildFetchRoute rejects cross-branch markers', () => {
+  assert.throws(() => buildFetchRoute({ responseId: 'r1', maxPages: 2 } as never), /rejects field 'maxPages'/);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/', claims: ['c'] } as never), /rejects field 'url'/);
 });
 
 test('buildSearchRoute rejects blank, overlong, and unpinned research cursors', () => {
@@ -621,7 +485,7 @@ test('social schema rejects mutation verbs and legacy selectors', async () => {
   }
 });
 
-test('media schema unchanged', async () => {
+test('media tool removed; agent_poll registered with jobId schema', async () => {
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
 
@@ -642,16 +506,10 @@ test('media schema unchanged', async () => {
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
   }
 
-  assert.ok(defs.media, 'media tool must be registered');
-  const mediaProps = Object.keys((defs.media.parameters.properties ?? {})).sort();
-  assert.deepEqual(mediaProps, ['action', 'id', 'limit', 'platform', 'query', 'url']);
-  const mediaPlatform = (defs.media.parameters.properties as Record<string, { enum?: string[] }>).platform;
-  assert.deepEqual([...(mediaPlatform?.enum ?? [])].sort(), [...registryMediaPlatforms()].sort());
-  const mediaAction = (defs.media.parameters.properties as Record<string, { enum?: string[] }>).action;
-  assert.deepEqual([...(mediaAction?.enum ?? [])].sort(), registryActionEnum('media'));
-  for (const legacy of ['video', 'subtitle']) {
-    assert.equal(mediaAction?.enum?.includes(legacy), false, `media action enum must not advertise legacy alias ${legacy}`);
-  }
+  assert.ok(!defs.media, 'media tool must not be registered');
+  assert.ok(defs.agent_poll, 'agent_poll must be registered');
+  const pollProps = Object.keys((defs.agent_poll.parameters.properties ?? {})).sort();
+  assert.deepEqual(pollProps, ['jobId', 'owner']);
 });
 
 
@@ -713,7 +571,7 @@ test('tool_result hook leaves non-external tools untouched and fences external e
 
 test('tool_result hook covers every external tool name', async () => {
   const handlers = await captureHooks();
-  for (const name of ['web_search', 'fetch', 'github', 'social', 'media', 'browser']) {
+  for (const name of ['web_search', 'fetch', 'github', 'social', 'agent_poll', 'browser']) {
     const result = handlers.tool_result!({
       toolName: name,
       content: [{ type: 'text', text: 'plain' }],
@@ -1113,20 +971,27 @@ test('guidance: web_search single-branch fields and research-only docs', async (
 });
 
 
-test('guidance: fetch states discriminated branches', async () => {
+test('guidance: fetch states the 5-branch union', async () => {
   const defs = await captureAllTools();
   const description = defs.fetch?.description ?? '';
-  assert.ok(/5 modes/i.test(description), 'fetch description must state the 5-mode surface');
-  assert.ok(!/batch_read/i.test(description), 'fetch description must not name removed batch_read');
-  assert.ok(!/batch_crawl/i.test(description), 'fetch description must not name removed batch_crawl');
-  assert.ok(/urls\[1\.\.8\]/i.test(description), 'fetch description must note multi-url read/crawl');
-  assert.ok(/per-URL isolation/i.test(description), 'read must say full readable text per URL with isolation');
-  assert.ok(/ranked chunks/i.test(description), 'crawl must say ranked chunks');
+  assert.ok(/5-branch union/i.test(description), 'fetch description must state the 5-branch union');
+  assert.ok(/Legacy mode\/action\/source\/searchQuery\/followLinks\/maxDepth rejected/i.test(description), 'fetch description must document legacy rejection');
+  assert.ok(/urls\[1\.\.8\]/i.test(description), 'fetch description must note multi-url reads');
+  assert.ok(/per-URL isolation/i.test(description), 'multi branch must promise per-URL isolation');
+  assert.ok(/claims\[1\.\.20\]/i.test(description), 'claim-check branch must name claims[1..20]');
   const params = defs.fetch!.parameters as { type?: string; properties?: Record<string, unknown> };
   assert.equal(params.type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
+  const branches = requestBranches(params as any);
+  assert.equal(branches.length, 5, 'fetch schema must be a five-branch union');
+  for (const branch of branches) {
+    assert.equal(branch.additionalProperties, false, 'every fetch branch must be closed');
+  }
   const keys = Object.keys(branchProperties(params as any));
-  for (const key of ['url', 'urls', 'source', 'query', 'siteMap', 'mode', 'responseId', 'claims']) {
-    assert.ok(keys.includes(key), `fetch schema must expose flat field ${key}`);
+  for (const key of ['url', 'urls', 'query', 'siteMap', 'responseId', 'claims']) {
+    assert.ok(keys.includes(key), `fetch schema must expose field ${key}`);
+  }
+  for (const key of ['mode', 'source', 'searchQuery', 'followLinks', 'maxDepth']) {
+    assert.ok(!keys.includes(key), `fetch schema must not expose legacy field ${key}`);
   }
 });
 
@@ -1146,11 +1011,17 @@ test('tool_result hook fences kg output as external evidence', async () => {
   assert.ok(result && result.content[0]!.text.includes('<<<EXTERNAL_EVIDENCE_'), 'kg must be fenced');
 });
 
-test('buildSearchRoute agent mode passes through with 300s timeout', () => {
-  const route = buildSearchRoute({ query: 'deep topic', mode: 'agent' });
-  assert.equal(route.tool, 'web_search');
-  assert.equal(route.args.mode, 'agent');
-  assert.equal(route.timeout, 300_000);
+test('buildSearchRoute agent mode returns a job pointer with 300s timeout', async () => {
+  const { __setAgentJobCreator } = await import('../src/web/agent/agent-job-seam.js');
+  __setAgentJobCreator(() => ({ jobId: 'job-index-1' }));
+  try {
+    const route = buildSearchRoute({ query: 'deep topic', mode: 'agent' });
+    assert.equal(route.tool, 'agent_job');
+    assert.equal(route.args.jobId, 'job-index-1');
+    assert.equal(route.timeout, 300_000);
+  } finally {
+    __setAgentJobCreator(undefined);
+  }
 });
 
 test('buildSearchRoute agent mode rejects research category and knowledge', () => {

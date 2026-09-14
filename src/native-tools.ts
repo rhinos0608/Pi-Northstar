@@ -62,12 +62,11 @@ export {
 import { validateWebRequest } from './web/web-contract.js';
 import {
   requireString,
-  semanticCrawl,
   webSearch,
   type WebToolOptions,
 } from './web/web.js';
 
-type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'github' | 'kg' | 'graph';
+type NativeToolName = 'web_search' | 'fetch' | 'browse' | 'research' | 'github' | 'kg' | 'graph';
 
 interface NativeToolOptions extends WebToolOptions {}
 
@@ -90,12 +89,8 @@ async function dispatchNativeTool(
   switch (name as NativeToolName) {
     case 'web_search':
       return webSearchCached(args, options);
-    case 'semantic_crawl':
-      return semanticCrawl(args, options);
     case 'fetch':
       return dispatchFetch(args, options);
-    case 'agentic_browse':
-      return agenticBrowse(args, options);
     case 'browse':
       return agenticBrowse({ action: 'read', ...args }, options);
     case 'research':

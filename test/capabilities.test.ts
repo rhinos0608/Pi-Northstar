@@ -509,3 +509,20 @@ test('graph registration leaves kg and web_search participation untouched', asyn
   assert.deepEqual(channelCapability('diffbot')?.actions.map((action) => action.action).sort(), ['analyze_text', 'enhance', 'search']);
   assert.deepEqual([...(backendCapability('diffbot', 'diffbot-web-search')?.actions ?? [])], ['search']);
 });
+
+test('media channels are internal-acquisition with no public tool surface', async () => {
+  const { channelCapability } = await import('../src/capabilities.js');
+  for (const id of ['rss', 'youtube', 'bilibili']) {
+    assert.equal(channelCapability(id)?.publicTool, 'internal-acquisition', `${id} must not name a public tool`);
+  }
+});
+
+test('PublicToolName is the 8-tool set plus agent_poll, media removed', async () => {
+  const mod = await import('../src/capabilities.js');
+  const names: readonly string[] = ['web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent_poll'];
+  assert.equal(names.length, 9);
+  assert.ok(!names.includes('media'));
+  assert.equal(mod.MAX_PUBLIC_TOOLS, 9);
+  mod.assertPublicToolBudget(names);
+  assert.throws(() => mod.assertPublicToolBudget([...names, 'tenth']), /budget exceeded/);
+});

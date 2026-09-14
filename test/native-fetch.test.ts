@@ -119,7 +119,7 @@ test('native-fetch: specialist fallback order feed/media/github-then-reader', as
 });
 
 test('native-fetch: agenticBrowse read issues responseId and wordCount', async () => {
-  const out = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/nf-read' }, seamOptions());
+  const out = await callNativeTool('browse', { action: 'read', url: 'https://example.com/nf-read' }, seamOptions());
   const details = (out as { details?: { responseId?: unknown; wordCount?: unknown } }).details;
   assert.equal(typeof details?.responseId, 'string');
   assert.ok(typeof details?.wordCount === 'number');

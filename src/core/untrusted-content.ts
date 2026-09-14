@@ -12,15 +12,15 @@ import { randomUUID } from 'node:crypto';
  * only invisible/control formatting is removed from the visible output.
  */
 export const EXTERNAL_TOOL_NAMES = [
-  'web_search',
   'fetch',
   'github',
+  'graph',
+  'kg',
+  'agent_poll',
   'social',
-  'media',
+  'web_search',
   'browser',
   'desktop',
-  'kg',
-  'graph',
 ] as const;
 
 export type ExternalToolName = (typeof EXTERNAL_TOOL_NAMES)[number];

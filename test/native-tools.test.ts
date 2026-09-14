@@ -24,15 +24,23 @@ test('callNativeTool fetch alias routes query-less calls to read', async () => {
   );
 });
 
-test('callNativeTool fetch and semantic_crawl reject loopback URLs before connecting', async () => {
-  // Both fetch and semantic_crawl should reject private/loopback URLs before connecting
+test('callNativeTool fetch rejects loopback URLs before connecting; semantic_crawl dispatch removed', async () => {
+  // Single-url fetch rejects private/loopback URLs before connecting.
   await assert.rejects(
-    () => callNativeTool('fetch', { source: { type: 'url', url: 'http://127.0.0.1:3000/' }, query: 'hello' }),
+    () => callNativeTool('fetch', { url: 'http://127.0.0.1:3000/' }),
     /Private\/reserved|Blocked hostname/,
   );
+  // Multi-url fetch surfaces a per-URL error entry and never rejects siblings.
+  const multi = await callNativeTool('fetch', { urls: ['http://127.0.0.1:3000/'], query: 'hello' });
+  assert.match(JSON.stringify(multi), /Private\/reserved|Blocked hostname/);
+  // semantic_crawl/agentic_browse public dispatch removed (clean break).
   await assert.rejects(
     () => callNativeTool('semantic_crawl', { source: { type: 'url', url: 'http://127.0.0.1:3000/' }, query: 'hello', maxPages: 1 }),
-    /Private\/reserved|Blocked hostname/,
+    /Unsupported native tool/,
+  );
+  await assert.rejects(
+    () => callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/' }),
+    /Unsupported native tool/,
   );
 });
 
@@ -76,7 +84,7 @@ test('social and video wrappers reject non-http URL schemes', async () => {
 
 test('native browse rejects non-http URL schemes', async () => {
   await assert.rejects(
-    () => callNativeTool('agentic_browse', { action: 'read', url: 'file:///etc/passwd' }),
+    () => callNativeTool('browse', { action: 'read', url: 'file:///etc/passwd' }),
     /Disallowed URL scheme/,
   );
 });
@@ -162,7 +170,7 @@ test('query-less read surfaces gated external summary and metadata outside sourc
     throw new Error('native fetch failed');
   };
   try {
-    const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/article' }, {
+    const result = await callNativeTool('browse', { action: 'read', url: 'https://example.com/article' }, {
       env: {
         DIFFBOT_TOKEN: 'test-token',
         PI_SEARCH_EXTERNAL_FETCH: '1',
@@ -215,7 +223,7 @@ test('query-less read surfaces gated external fetch without DIFFBOT_TOKEN', asyn
     throw new Error('native fetch failed');
   };
   try {
-    const result = await callNativeTool('agentic_browse', { action: 'read', url: 'https://example.com/article' }, {
+    const result = await callNativeTool('browse', { action: 'read', url: 'https://example.com/article' }, {
       env: {
         PI_SEARCH_EXTERNAL_FETCH: '1',
         PI_SEARCH_FETCH_BACKENDS: 'firecrawl',
@@ -300,18 +308,8 @@ test('reach_setup import cookies provider honors browser automation opt-out', as
   assert.match(JSON.stringify(result.details), /disabled/);
 });
 
-// ── followLinks BFS crawl tests live in test/web.test.ts (restored via the fetchPageText seam) ──
-
-
-
-
-
-test('followLinks requires url in semantic_crawl args', async () => {
-  await assert.rejects(
-    () => callNativeTool('fetch', { followLinks: true, query: 'test', searchQuery: 'query' }),
-    /url is required|followLinks requires/,
-  );
-});
+// Legacy crawl discriminants (followLinks/searchQuery/mode) reject at the
+// fetch contract boundary; see test/web/web-fetch-route-contract.test.ts.
 
 // ── extractLinksFromHtml unit tests (import via native-tools internal) ──
 // We test link extraction behavior through the crawl integration tests above.

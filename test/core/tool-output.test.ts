@@ -194,7 +194,7 @@ test('callNativeTool applies the context guard to oversized tool text', async ()
 
   try {
     const result = await callNativeTool(
-      'agentic_browse',
+      'browse',
       { action: 'read', url: 'https://example.com/big', maxChars: 50000 },
       { env: { PI_SEARCH_MAX_TOOL_OUTPUT_CHARS: '2000' }, lookup: async () => [{ address: '8.8.8.8', family: 4 }] },
     );

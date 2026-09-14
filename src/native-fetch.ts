@@ -14,7 +14,7 @@ import { selectWebAccessReaderKind } from './web/access/web-access-specializatio
 import { validateHttpUrl } from './core/http.js';
 import { resolvePublicHostname } from './network-policy.js';
 import { buildNorthstarResult, parseEntity } from './result-contract.js';
-import { resolveWebActionForTool, validateWebRequest } from './web/web-contract.js';
+import { validateWebRequest, WEB_ENTITY_CONTENT_MAX } from './web/web-contract.js';
 import {
   boundPageText,
   fetchReadablePage,
@@ -35,6 +35,19 @@ export function getNativeFetchStore(): ReturnType<typeof createWebAccessContentS
 
 export function snippetOf(body: string): string {
   return body.slice(0, 500);
+}
+
+/**
+ * Truncate text to a UTF-8 byte bound without splitting a code point.
+ * Cache/envelope paths bound bytes (admission accounts UTF-8), never
+ * UTF-16 code units.
+ */
+export function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
 }
 
 export function resultToSingleText(result: BackendCallResult): string {
@@ -97,14 +110,14 @@ export function cacheFetchEntries(
       queryIndex: index,
       query: trimmed,
       response: {
-        provider: 'parallel',
-        results: [{
-          title: entry.title || entry.url,
-          url: entry.url,
-          snippet: entry.snippet.slice(0, 500),
-        }],
-        inlineContent: entry.content.slice(0, WEB_ACCESS_RETRIEVAL_MAX_CHARS),
-      },
+          provider: 'parallel',
+          results: [{
+            title: entry.title || entry.url,
+            url: entry.url,
+            snippet: truncateUtf8Bytes(entry.snippet, 500),
+          }],
+          inlineContent: truncateUtf8Bytes(entry.content, WEB_ACCESS_RETRIEVAL_MAX_CHARS),
+        },
     }));
     const stored = buildWebAccessStoredEntry({ queries: [trimmed], results });
     webAccessStore.put(stored);
@@ -319,7 +332,7 @@ export async function agenticBrowse(args: Record<string, unknown>, options: Nati
     const bounded = boundPageText(page.content, maxChars);
     const content = bounded.text;
     const parsed = parseEntity(
-      { id: page.url, url: page.url, title: page.title, snippet: bounded.shown.slice(0, 8000), source: 'web' },
+      { id: page.url, url: page.url, title: page.title, snippet: truncateUtf8Bytes(bounded.shown, WEB_ENTITY_CONTENT_MAX), source: 'web' },
       { source: 'web', kind: 'article' },
     );
     // Execution-fallback markers (not quality judgments): Diffbot Analyze
@@ -389,10 +402,12 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
   if (args.format !== undefined) {
     throw new Error('format is not a supported fetch field');
   }
-  // FINAL discriminated fetch: action retrieve/source_check served from the
-  // bounded memory cache only (no network). Validation via the shared
-  // contract; unknown responseIds throw ContractError with re-run guidance.
-  if (typeof args.action === 'string') {
+  // FINAL discriminated fetch: retrieve/source_check served from the
+  // bounded memory cache only (no network). Presence-based union routing:
+  // claims selects claim-check, responseId selects retrieve. Validation via
+  // the shared contract; unknown responseIds throw ContractError with
+  // re-run guidance.
+  if (args.responseId !== undefined || args.claims !== undefined) {
     const parsed = parseWebAccessFetchRequest(args);
     if (parsed && typeof (parsed as { action?: string }).action === 'string') {
       const kind = (parsed as { action: string }).action;
@@ -476,38 +491,9 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
     const specialized = await dispatchSpecializedUrl(args.url, options);
     if (specialized) return specialized;
   }
-  // Contract-first routing: query-less fetch is read, fetch with a query
-  // is crawl. resolveWebActionForTool validates before dispatch.
-  // Crawl results populate the retrieve cache best-effort (never throws).
-  // Discriminated crawl carries the seed in source (followLinks nested for
-  // url seeds); lift it so semanticCrawl sees the top-level flag.
-  const sourceRecord = typeof args.source === 'object' && args.source !== null && !Array.isArray(args.source)
-    ? args.source as Record<string, unknown>
-    : undefined;
-  const crawlArgs = sourceRecord?.followLinks === true && args.followLinks === undefined
-    ? { ...args, followLinks: true as const }
-    : args;
-  const action = resolveWebActionForTool('fetch', crawlArgs);
-  if (action === 'read') return agenticBrowse(args, options);
-  const crawled = await semanticCrawl(crawlArgs, options);
-  const crawlLabel =
-    typeof args.query === 'string' && args.query.trim().length > 0
-      ? args.query.trim()
-      : typeof args.searchQuery === 'string'
-        ? args.searchQuery
-        : 'fetch';
-  const crawlUrl = typeof args.url === 'string'
-    ? args.url
-    : typeof sourceRecord?.url === 'string' && (sourceRecord.url as string).trim().length > 0
-      ? (sourceRecord.url as string).trim()
-      : crawlLabel;
-  const crawlBody = resultToSingleText(crawled);
-  return withFetchResponseId(crawled, cacheFetchForRetrieve({
-    query: crawlLabel,
-    title: crawlUrl,
-    url: crawlUrl,
-    snippet: snippetOf(crawlBody),
-    content: crawlBody,
-  }));
+  // Singular fetch with a query lands on agenticBrowse: resolveWebActionForTool
+  // always resolved fetch to read, so no crawl branch remains here. Multi-URL
+  // query ranking lives in the urls branch above (semanticCrawl per URL).
+  return agenticBrowse(args, options);
 }
 

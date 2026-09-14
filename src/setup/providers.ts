@@ -1,6 +1,7 @@
 import { codexConfigured } from '../web/providers/codex-search.js';
 import { channelCapability } from '../capabilities.js';
 import { resolveSparqlConfig } from './local-config.js';
+import { resolveOpenAICompatibleVisionConfig } from '../media-vision/openai-compatible.js';
 
 export interface ProviderDescriptor {
   provider: string;
@@ -80,6 +81,12 @@ export const PROVIDER_DESCRIPTOR_SOURCE: Array<Omit<ProviderDescriptor, 'availab
   { provider: 'opencli', channel: '', family: '', envKeys: ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN'], cookieDomains: [], loginFlow: 'env_var', risk: 'low', setup: 'Set OPENCLI_HOST/PORT/TOKEN for remote instance', description: 'OpenCLI backend connector' },
   { provider: 'openai', channel: '', family: '', envKeys: ['OPENAI_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set OPENAI_API_KEY for LLM features', description: 'OpenAI API key for LLM and transcription' },
   { provider: 'groq', channel: '', family: '', envKeys: ['GROQ_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set GROQ_API_KEY for fast LLM inference', description: 'Groq API key for LLM inference' },
+
+  // ── Vision / multimodal (Plan D — explicit opt-in, content leaves the machine) ──
+  { provider: 'vision-openai-compatible', channel: '', family: 'media', envKeys: ['PI_VISION_OPENAI_COMPAT_BASE_URL', 'PI_VISION_OPENAI_COMPAT_MODEL', 'PI_VISION_OPENAI_COMPAT_API_KEY'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only: setting PI_VISION_OPENAI_COMPAT_BASE_URL + PI_VISION_OPENAI_COMPAT_MODEL sends admitted image/PDF/video bytes plus OCR/description text to that operator-configured endpoint (loopback or cloud) — content leaves the machine on every vision call. Optional PI_VISION_OPENAI_COMPAT_API_KEY for keyed endpoints. Read the README vision privacy warning first', description: 'Operator-configured OpenAI-compatible vision endpoint (exact model IDs, synthetic probe-gated)' },
+  { provider: 'vision-gemini', channel: '', family: 'media', envKeys: ['GEMINI_API_KEY', 'GOOGLE_GENAI_API_KEY', 'GOOGLE_VERTEX_PROJECT', 'GOOGLE_CLOUD_PROJECT'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only: setting a Gemini key or Vertex project sends admitted image/PDF/video bytes plus OCR/description text to Google — content leaves the machine on every vision call. Read the README vision privacy warning first', description: 'Gemini Developer API or Vertex vision transport (exact configured models)' },
+  { provider: 'vision-gemini-web', channel: '', family: 'media', envKeys: ['PI_VISION_GEMINI_WEB_ENABLED'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only and last resort (disabled default): PI_VISION_GEMINI_WEB_ENABLED=1 (exact value) sends admitted image/PDF/video bytes plus OCR/description text through the Gemini web session — content leaves the machine on every vision call. Read the README vision privacy warning first', description: 'Gemini Web last-resort vision via user-Chromium lease (disabled default)' },
+  { provider: 'vision-private-gate', channel: '', family: 'media', envKeys: ['PI_VISION_PRIVATE_GITHUB_TRANSFER'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only: PI_VISION_PRIVATE_GITHUB_TRANSFER=1 (exact value) is the independent flag permitting private or authenticated GitHub content to reach any cloud vision endpoint — without it private content never leaves the machine. Read the README vision privacy warning first', description: 'Independent private-GitHub to vision transfer flag (default off)' },
 ];
 
 /** Availability derives from the canonical registry; providers without a registry channel are operational. */
@@ -122,11 +129,29 @@ export function sparqlStatus(env: Record<string, string | undefined>): { configu
   };
 }
 
+/** OpenAI-compatible vision needs base URL + model IDs; key alone never counts. */
+function visionOpenAICompatibleConfigured(env: Record<string, string | undefined>): boolean {
+  return resolveOpenAICompatibleVisionConfig(env) !== null;
+}
+
+/** Gemini Web needs the exact opt-in value; any other value stays disabled. */
+function visionGeminiWebConfigured(env: Record<string, string | undefined>): boolean {
+  return env.PI_VISION_GEMINI_WEB_ENABLED === '1';
+}
+
+/** Private-vision flag needs the exact opt-in value; any other value stays off. */
+function visionPrivateGateConfigured(env: Record<string, string | undefined>): boolean {
+  return env.PI_VISION_PRIVATE_GITHUB_TRANSFER === '1';
+}
+
 function providerConfigured(provider: string, desc: { envKeys: string[]; loginFlow: string }, env: Record<string, string | undefined>): boolean {
   if (provider === 'reddit') return redditOAuthConfigured(env);
   if (provider === 'brightdata') return brightdataConfigured(env);
   if (provider === 'ollama-search') return ollamaSearchConfigured(env);
   if (provider === 'sparql') return sparqlConfigured(env);
+  if (provider === 'vision-openai-compatible') return visionOpenAICompatibleConfigured(env);
+  if (provider === 'vision-gemini-web') return visionGeminiWebConfigured(env);
+  if (provider === 'vision-private-gate') return visionPrivateGateConfigured(env);
   const present = desc.envKeys.filter(k => typeof env[k] === 'string' && env[k]!.trim().length > 0);
   return present.length > 0 || desc.loginFlow === 'none';
 }
