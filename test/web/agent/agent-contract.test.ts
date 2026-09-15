@@ -6,7 +6,11 @@ import {
   AGENT_LOCAL_MAX_SOURCES,
   AGENT_MAX_FETCH_ROUNDS,
   AGENT_MAX_SOURCES,
+  AGENT_POLL_VISIBILITY_TTL_MS,
   AGENT_REPORT_MAX_BYTES,
+  AGENT_RESULT_RETENTION_TTL_MS,
+  AGENT_RUN_DEADLINE_MAX_MS,
+  AGENT_RUN_DEADLINE_MS,
   AGENT_WARNING_MAX_BYTES,
   canonicalJson,
   validateAgentResult,
@@ -29,7 +33,17 @@ test('evidence budgets are single-sourced proposed defaults', () => {
   assert.equal(AGENT_MAX_SOURCES, 20);
   assert.equal(AGENT_LOCAL_MAX_SOURCES, 30);
   assert.equal(AGENT_MAX_FETCH_ROUNDS, 8);
-  assert.equal(AGENT_JOB_TTL_MS, 3_600_000);
+});
+
+test('lifecycle split is single-sourced: AGENT_JOB_TTL_MS derives as the max', () => {
+  assert.equal(AGENT_RUN_DEADLINE_MS, 30 * 60 * 1000);
+  assert.equal(AGENT_RUN_DEADLINE_MAX_MS, 2 * 60 * 60 * 1000);
+  assert.equal(AGENT_RESULT_RETENTION_TTL_MS, 24 * 60 * 60 * 1000);
+  assert.equal(AGENT_POLL_VISIBILITY_TTL_MS, 5 * 60 * 1000);
+  assert.equal(
+    AGENT_JOB_TTL_MS,
+    Math.max(AGENT_RUN_DEADLINE_MS, AGENT_RESULT_RETENTION_TTL_MS, AGENT_POLL_VISIBILITY_TTL_MS),
+  );
 });
 
 test('canonical JSON is byte-stable under key reorder', () => {

@@ -15,8 +15,16 @@ export const AGENT_MAX_FETCH_ROUNDS = 8;
 export const AGENT_CLAIM_MAX_BYTES = 5_000;
 /** Warning string ceiling: UTF-8 bytes, not chars (same convention as reportText). */
 export const AGENT_WARNING_MAX_BYTES = 2_000;
-/** Job lifetime: mirrors the web-access store TTL (1h). */
-export const AGENT_JOB_TTL_MS = 3_600_000;
+/** Default execution lifetime: drive rejects past this (drive deadline). */
+export const AGENT_RUN_DEADLINE_MS = 1_800_000;
+/** Execution-lifetime cap: configured deadlines above this reject, never clamp. */
+export const AGENT_RUN_DEADLINE_MAX_MS = 7_200_000;
+/** Terminal-result pollability after settle (ready/failed stay readable). */
+export const AGENT_RESULT_RETENTION_TTL_MS = 86_400_000;
+/** In-flight snapshot freshness without change: staleness only, never expiry. */
+export const AGENT_POLL_VISIBILITY_TTL_MS = 300_000;
+/** Job lifetime: derived single source — max of the lifecycle split (run deadline, result retention, poll visibility). */
+export const AGENT_JOB_TTL_MS = Math.max(AGENT_RUN_DEADLINE_MS, AGENT_RESULT_RETENTION_TTL_MS, AGENT_POLL_VISIBILITY_TTL_MS);
 
 export interface AgentClaimV1 {
   /** Claim text (model-visible, untrusted evidence). */

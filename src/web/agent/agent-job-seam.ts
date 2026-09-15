@@ -3,6 +3,7 @@
 // agent_jobs_unavailable throw ships on the green gate.
 
 import { createAgentJobEntry, UNSUPPORTED_AGENT_JOB_FIELDS } from './agent-jobs.js';
+import type { AgentResearchEvent } from './agent-events.js';
 
 export interface AgentJobPointer {
   jobId: string;
@@ -14,12 +15,18 @@ export interface AgentJobPointer {
 export interface CreateAgentJobParams {
   query: string;
   owner?: string;
+  deadlineMs?: number;
+  signal?: AbortSignal;
+  eventSink?: (event: AgentResearchEvent) => void;
 }
 
 let creator: (params: CreateAgentJobParams) => AgentJobPointer = (params) => {
   const job = createAgentJobEntry({
     query: params.query,
     ...(params.owner !== undefined ? { owner: params.owner } : {}),
+    ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
+    ...(params.signal !== undefined ? { signal: params.signal } : {}),
+    ...(params.eventSink !== undefined ? { eventSink: params.eventSink } : {}),
   });
   return { jobId: job.jobId };
 };
@@ -32,6 +39,9 @@ export function __setAgentJobCreator(next: ((params: CreateAgentJobParams) => Ag
       const job = createAgentJobEntry({
         query: params.query,
         ...(params.owner !== undefined ? { owner: params.owner } : {}),
+        ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
+        ...(params.signal !== undefined ? { signal: params.signal } : {}),
+        ...(params.eventSink !== undefined ? { eventSink: params.eventSink } : {}),
       });
       return { jobId: job.jobId };
     });
