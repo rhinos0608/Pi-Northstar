@@ -1,6 +1,6 @@
 # Pi-Northstar
 
-Pi extension that gives your agent real-world reach — web search, page reading, GitHub, social media, video, browser automation, and desktop control. Zero-config works out of the box; API keys unlock more power.
+Pi extension that gives your agent real-world reach — web_search, fetch, github, social, kg/graph, browser, desktop, and agent_poll, with fused multi-provider search, 12-source academic research, agent reports, and opt-in media/vision acquisition. Zero-config works out of the box; API keys unlock more power.
 
 Underneath the nine tools is a small set of shared services — result fusion/ranking, layered config loading, a backend abstraction with ordered fallback, and a reliability envelope around browser and desktop mutations. Each tool is a thin adapter over these services; see [Architecture](#architecture) for what's actually worth evaluating here.
 
