@@ -19,6 +19,19 @@ export interface AgentRpcRecord {
   /** v1 transports: standalone, or leaf-runtime via the registered provider. */
   transport: AgentTransport;
   reason: string;
+  /**
+   * Negotiated leaf output modes (record-level only; snapshots carry
+   * transport + reason only). Absent when nothing negotiated them.
+   */
+  outputModes?: readonly string[];
+  /**
+   * Negotiated v2 correlation capability (record-level only). Absent means
+   * v1-only: consumers compose v1 correlation forever.
+   */
+  correlationV2?: {
+    ownerPattern: string;
+    roles: readonly string[];
+  };
 }
 
 export interface AgentRpcNegotiationInput {
@@ -26,10 +39,30 @@ export interface AgentRpcNegotiationInput {
   endpoint?: string;
 }
 
+/** Negotiated leaf capabilities surfaced by providers that negotiate (LeafRuntimeClient). */
+export interface LeafNegotiatedCapabilities {
+  outputModes: readonly string[];
+  correlationV2?: {
+    ownerPattern: string;
+    roles: readonly string[];
+  };
+}
+
 /** Minimal leaf provider surface. Satisfied structurally by LeafRuntimeClient. */
 export interface LeafRuntimeProvider {
   refreshReady(): Promise<boolean>;
-  runLeaf(prompt: string, opts?: { maxOutputTokens?: number; timeoutMs?: number }): Promise<{ text: string }>;
+  runLeaf(
+    prompt: string,
+    opts?: {
+      maxOutputTokens?: number;
+      timeoutMs?: number;
+      outputSchema?: Record<string, unknown>;
+      role?: string;
+      stage?: string;
+    },
+  ): Promise<{ text: string }>;
+  /** Optional negotiated capabilities; absence means v1-only/text. */
+  getNegotiatedCapabilities?(): LeafNegotiatedCapabilities | undefined;
 }
 
 let leafProvider: LeafRuntimeProvider | undefined;

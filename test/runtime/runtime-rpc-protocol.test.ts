@@ -126,3 +126,84 @@ test('validateReply requires method on success; error may omit it', () => {
   const errNoMethod = { version: 1, requestId: 'req-1', success: false, error: { code: 'timeout', message: 'anything' } };
   assert.equal(validateReply(errNoMethod, 'req-1', 'negotiate').ok, true);
 });
+
+test('correlation v2: compose/validate round-trip; v1 shape unchanged', async () => {
+  const protocol = await import('../../src/runtime/runtime-rpc-protocol.js');
+  const { buildCorrelationV2, validateCorrelation, validateRequest } = protocol;
+  const v2 = buildCorrelationV2({
+    owner: 'northstar',
+    correlationId: 'corr-2',
+    queryIndex: 3,
+    role: 'coverage_planner',
+    stage: 'agent-plan',
+    attempt: 1,
+  });
+  assert.deepEqual(v2, {
+    correlationVersion: 2,
+    owner: 'northstar',
+    correlationId: 'corr-2',
+    queryIndex: 3,
+    role: 'coverage_planner',
+    stage: 'agent-plan',
+    attempt: 1,
+  });
+  assert.equal(validateCorrelation(v2).ok, true);
+  const start = validateRequest({
+    version: 1,
+    requestId: 'req-1',
+    method: 'start',
+    params: { modelId: 'prov/model', prompt: 'hi', maxOutputTokens: 16, timeoutMs: 1000, correlation: v2 },
+  });
+  assert.equal(start.ok, true);
+  // v1 without correlationVersion still validates exactly as before.
+  assert.equal(validateCorrelation(CORRELATION).ok, true);
+  assert.equal(validateCorrelation({ ...CORRELATION, correlationVersion: 1 }).ok, true);
+});
+
+test('correlation v2 rejects bad owner/role/version/extra keys; other fields share v1 rules', async () => {
+  const protocol = await import('../../src/runtime/runtime-rpc-protocol.js');
+  const { buildCorrelationV2, validateCorrelation } = protocol;
+  const base = buildCorrelationV2({
+    owner: 'northstar',
+    correlationId: 'c',
+    queryIndex: 0,
+    role: 'researcher',
+    stage: 's',
+    attempt: 0,
+  });
+  assert.equal(validateCorrelation({ ...base, owner: 'Northstar' }).ok, false);
+  assert.equal(validateCorrelation({ ...base, owner: 'ab' }).ok, false);
+  assert.equal(validateCorrelation({ ...base, role: 'Evil Role' }).ok, false);
+  assert.equal(validateCorrelation({ ...base, role: '' }).ok, false);
+  assert.equal(validateCorrelation({ ...base, correlationVersion: 3 }).ok, false);
+  assert.equal(validateCorrelation({ ...base, extra: 1 }).ok, false);
+  const { correlationVersion: _dropped, ...noVersion } = { ...base, role: 'custom_role' };
+  void _dropped;
+  assert.equal(validateCorrelation(noVersion).ok, false);
+  assert.equal(validateCorrelation({ ...base, queryIndex: -1 }).ok, false);
+  assert.equal(validateCorrelation({ ...base, attempt: 1001 }).ok, false);
+  assert.equal(validateCorrelation({ ...base, stage: '' }).ok, false);
+  assert.equal(validateCorrelation({ ...base, correlationId: '' }).ok, false);
+});
+
+test('parseNegotiateCapabilities: absent means v1-only; present surfaces modes + v2', async () => {
+  const protocol = await import('../../src/runtime/runtime-rpc-protocol.js');
+  const { parseNegotiateCapabilities } = protocol;
+  assert.deepEqual(parseNegotiateCapabilities(undefined), { outputModes: [] });
+  assert.deepEqual(parseNegotiateCapabilities({ compatible: true }), { outputModes: [] });
+  assert.deepEqual(parseNegotiateCapabilities({ compatible: true, capabilities: {} }), { outputModes: [] });
+  assert.deepEqual(
+    parseNegotiateCapabilities({
+      compatible: true,
+      capabilities: {
+        outputModes: ['text', 'json', 'future-mode'],
+        correlationV2: { ownerPattern: '^[a-z][a-z0-9_-]{2,31}$', roles: ['researcher'] },
+      },
+    }),
+    {
+      outputModes: ['text', 'json'],
+      correlationV2: { ownerPattern: '^[a-z][a-z0-9_-]{2,31}$', roles: ['researcher'] },
+    },
+  );
+  assert.deepEqual(parseNegotiateCapabilities({ capabilities: { correlationV2: { ownerPattern: '([', roles: ['researcher'] } } }), { outputModes: [] });
+});

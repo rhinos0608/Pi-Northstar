@@ -50,14 +50,100 @@ export const RUNTIME_RPC_BOUNDS = {
 export const RUNTIME_RPC_ROLES = ['coverage_planner', 'researcher', 'synthesizer'] as const;
 export type RuntimeRpcRole = (typeof RUNTIME_RPC_ROLES)[number];
 
+/** Pi-Atlas-owned role registry: the known v1 roles, also advertised via negotiate correlationV2. */
+export const RUNTIME_RPC_ROLE_REGISTRY: readonly RuntimeRpcRole[] = RUNTIME_RPC_ROLES;
+
+/** Supported leaf output modes. Additive: consumers use membership checks, never exact equality. */
+export const RUNTIME_RPC_OUTPUT_MODES = ['text', 'json'] as const;
+export type RuntimeOutputMode = (typeof RUNTIME_RPC_OUTPUT_MODES)[number];
+
+/** Correlation protocol versions. 1 is the closed northstar shape; 2 opens owner/role by pattern. */
+export const RUNTIME_RPC_CORRELATION_VERSIONS = [1, 2] as const;
+export type RuntimeCorrelationVersion = (typeof RUNTIME_RPC_CORRELATION_VERSIONS)[number];
+
+/** v2 owner handle: lowercase start, 3-32 chars of lowercase/digit/underscore/hyphen. */
+export const RUNTIME_RPC_CORRELATION_V2_OWNER_PATTERN = /^[a-z][a-z0-9_-]{2,31}$/;
+/** v2 role handle: lowercase start, up to 48 chars of lowercase/digit/underscore. */
+export const RUNTIME_RPC_CORRELATION_V2_ROLE_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
+
 /** Closed content-free correlation metadata. No arbitrary fields. */
 export interface RuntimeCorrelationV1 {
+  correlationVersion?: 1;
   owner: 'northstar';
   correlationId: string;
   queryIndex: number;
   role: RuntimeRpcRole;
   stage: string;
   attempt: number;
+}
+
+/**
+ * Correlation v2: same closed shape and field rules as v1, except owner and
+ * role are open handles matched by pattern (not the northstar literal / role
+ * enum). Discriminated by required correlationVersion: 2. Routing/observability
+ * metadata only, never auth.
+ */
+export interface RuntimeCorrelationV2 {
+  correlationVersion: 2;
+  owner: string;
+  correlationId: string;
+  queryIndex: number;
+  role: string;
+  stage: string;
+  attempt: number;
+}
+
+/** Correlation union discriminated by correlationVersion (absent means 1). */
+export type RuntimeCorrelation = RuntimeCorrelationV1 | RuntimeCorrelationV2;
+
+/** Pure compose helper for v2 correlation. No validation here — validate via checkCorrelation/validateCorrelation. */
+export function buildCorrelationV2(input: {
+  owner: string;
+  correlationId: string;
+  queryIndex: number;
+  role: string;
+  stage: string;
+  attempt: number;
+}): RuntimeCorrelationV2 {
+  return {
+    correlationVersion: 2,
+    owner: input.owner,
+    correlationId: input.correlationId,
+    queryIndex: input.queryIndex,
+    role: input.role,
+    stage: input.stage,
+    attempt: input.attempt,
+  };
+}
+
+/**
+ * Advertised v2 correlation support. Additive and optional: v1-only consumers
+ * ignore it. ownerPattern is the source of the v2 owner regex; roles lists
+ * the known role registry (v2 roles additionally match the role pattern).
+ */
+export interface RuntimeCorrelationV2Capability {
+  ownerPattern: string;
+  roles: readonly string[];
+}
+
+export interface RuntimeCapabilitiesV1 {
+  boundedCancellationSettlement: true;
+  leafOnlyExecution: true;
+  exactModelSelection: true;
+  maxOutputTokensEnforced: true;
+  backgroundExecution: true;
+  maxParallelRuns: number;
+  maxResultBytes: number;
+  minOutputTokens: number;
+  maxOutputTokens: number;
+  outputModes: readonly RuntimeOutputMode[];
+  correlationV2?: RuntimeCorrelationV2Capability;
+}
+
+export interface RuntimeNegotiateOk {
+  compatible: true;
+  modelId: string;
+  capabilities: RuntimeCapabilitiesV1;
 }
 
 export interface RuntimeStartV1 {
@@ -68,7 +154,7 @@ export interface RuntimeStartV1 {
   timeoutMs: number;
   /** Syntactically accepted; semantically rejected while text-only. */
   outputSchema?: Record<string, unknown>;
-  correlation: RuntimeCorrelationV1;
+  correlation: RuntimeCorrelation;
 }
 
 export type RuntimeRpcV1Request =
@@ -212,57 +298,135 @@ function checkModelId(value: unknown): Validation<string> {
   return { ok: true, value };
 }
 
-function checkCorrelation(value: unknown): Validation<RuntimeStartV1['correlation']> {
-  if (!isRecord(value)) return { ok: false, code: 'invalid_params', message: 'correlation must be an object.' };
-  const bad = exactKeys(value, ['owner', 'correlationId', 'queryIndex', 'role', 'stage', 'attempt']);
-  if (bad) return { ok: false, code: 'invalid_params', message: `Unknown correlation field: ${bad}.` };
-  if (value.owner !== 'northstar') return { ok: false, code: 'invalid_params', message: 'correlation.owner must be "northstar".' };
+function checkCorrelationId(value: unknown): Validation<string> {
   if (
-    typeof value.correlationId !== 'string' ||
-    value.correlationId.length === 0 ||
-    value.correlationId.length > RUNTIME_RPC_BOUNDS.maxCorrelationIdLength ||
-    !ASCII_PRINTABLE.test(value.correlationId)
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > RUNTIME_RPC_BOUNDS.maxCorrelationIdLength ||
+    !ASCII_PRINTABLE.test(value)
   ) {
     return { ok: false, code: 'invalid_params', message: 'correlation.correlationId must be bounded ASCII.' };
   }
+  return { ok: true, value };
+}
+
+function checkQueryIndex(value: unknown): Validation<number> {
   if (
-    typeof value.queryIndex !== 'number' ||
-    !Number.isInteger(value.queryIndex) ||
-    value.queryIndex < 0 ||
-    value.queryIndex > RUNTIME_RPC_BOUNDS.maxQueryIndex
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > RUNTIME_RPC_BOUNDS.maxQueryIndex
   ) {
     return { ok: false, code: 'invalid_params', message: 'correlation.queryIndex out of range.' };
   }
-  if (typeof value.role !== 'string' || !(RUNTIME_RPC_ROLES as readonly string[]).includes(value.role)) {
-    return { ok: false, code: 'invalid_params', message: 'correlation.role must be coverage_planner, researcher, or synthesizer.' };
-  }
+  return { ok: true, value };
+}
+
+function checkStage(value: unknown): Validation<string> {
   if (
-    typeof value.stage !== 'string' ||
-    value.stage.length === 0 ||
-    value.stage.length > RUNTIME_RPC_BOUNDS.maxStageLength ||
-    !ASCII_PRINTABLE.test(value.stage)
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > RUNTIME_RPC_BOUNDS.maxStageLength ||
+    !ASCII_PRINTABLE.test(value)
   ) {
     return { ok: false, code: 'invalid_params', message: 'correlation.stage must be bounded ASCII.' };
   }
+  return { ok: true, value };
+}
+
+function checkAttempt(value: unknown): Validation<number> {
   if (
-    typeof value.attempt !== 'number' ||
-    !Number.isInteger(value.attempt) ||
-    value.attempt < 0 ||
-    value.attempt > RUNTIME_RPC_BOUNDS.maxAttempt
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > RUNTIME_RPC_BOUNDS.maxAttempt
   ) {
     return { ok: false, code: 'invalid_params', message: 'correlation.attempt out of range.' };
   }
+  return { ok: true, value };
+}
+
+function checkCorrelationV1(value: Record<string, unknown>): Validation<RuntimeCorrelationV1> {
+  const bad = exactKeys(value, ['correlationVersion', 'owner', 'correlationId', 'queryIndex', 'role', 'stage', 'attempt']);
+  if (bad) return { ok: false, code: 'invalid_params', message: `Unknown correlation field: ${bad}.` };
+  if (value.correlationVersion !== undefined && value.correlationVersion !== 1) {
+    return { ok: false, code: 'invalid_params', message: 'correlation.correlationVersion must be 1 or 2 when present.' };
+  }
+  if (value.owner !== 'northstar') return { ok: false, code: 'invalid_params', message: 'correlation.owner must be "northstar".' };
+  const correlationId = checkCorrelationId(value.correlationId);
+  if (!correlationId.ok) return correlationId;
+  const queryIndex = checkQueryIndex(value.queryIndex);
+  if (!queryIndex.ok) return queryIndex;
+  if (typeof value.role !== 'string' || !(RUNTIME_RPC_ROLES as readonly string[]).includes(value.role)) {
+    return { ok: false, code: 'invalid_params', message: 'correlation.role must be coverage_planner, researcher, or synthesizer.' };
+  }
+  const stage = checkStage(value.stage);
+  if (!stage.ok) return stage;
+  const attempt = checkAttempt(value.attempt);
+  if (!attempt.ok) return attempt;
   return {
     ok: true,
     value: {
+      ...(value.correlationVersion === 1 ? { correlationVersion: 1 as const } : {}),
       owner: 'northstar',
-      correlationId: value.correlationId,
-      queryIndex: value.queryIndex,
-      role: value.role as RuntimeStartV1['correlation']['role'],
-      stage: value.stage,
-      attempt: value.attempt,
+      correlationId: correlationId.value,
+      queryIndex: queryIndex.value,
+      role: value.role as RuntimeCorrelationV1['role'],
+      stage: stage.value,
+      attempt: attempt.value,
     },
   };
+}
+
+function checkCorrelationV2(value: Record<string, unknown>): Validation<RuntimeCorrelationV2> {
+  const bad = exactKeys(value, ['correlationVersion', 'owner', 'correlationId', 'queryIndex', 'role', 'stage', 'attempt']);
+  if (bad) return { ok: false, code: 'invalid_params', message: `Unknown correlation field: ${bad}.` };
+  if (value.correlationVersion !== 2) {
+    return { ok: false, code: 'invalid_params', message: 'correlation.correlationVersion must be 2 for v2 correlation.' };
+  }
+  if (typeof value.owner !== 'string' || !RUNTIME_RPC_CORRELATION_V2_OWNER_PATTERN.test(value.owner)) {
+    return { ok: false, code: 'invalid_params', message: 'correlation.owner must match the v2 owner pattern.' };
+  }
+  const correlationId = checkCorrelationId(value.correlationId);
+  if (!correlationId.ok) return correlationId;
+  const queryIndex = checkQueryIndex(value.queryIndex);
+  if (!queryIndex.ok) return queryIndex;
+  if (typeof value.role !== 'string' || !RUNTIME_RPC_CORRELATION_V2_ROLE_PATTERN.test(value.role)) {
+    return { ok: false, code: 'invalid_params', message: 'correlation.role must match the v2 role pattern.' };
+  }
+  const stage = checkStage(value.stage);
+  if (!stage.ok) return stage;
+  const attempt = checkAttempt(value.attempt);
+  if (!attempt.ok) return attempt;
+  return {
+    ok: true,
+    value: {
+      correlationVersion: 2,
+      owner: value.owner,
+      correlationId: correlationId.value,
+      queryIndex: queryIndex.value,
+      role: value.role,
+      stage: stage.value,
+      attempt: attempt.value,
+    },
+  };
+}
+
+/**
+ * Correlation union validator discriminated by required correlationVersion:
+ * absent/1 runs exactly the v1 validation; 2 runs the v2 pattern validation.
+ * Any other version value rejects.
+ */
+function checkCorrelation(value: unknown): Validation<RuntimeCorrelation> {
+  if (!isRecord(value)) return { ok: false, code: 'invalid_params', message: 'correlation must be an object.' };
+  if (value.correlationVersion === undefined || value.correlationVersion === 1) return checkCorrelationV1(value);
+  if (value.correlationVersion === 2) return checkCorrelationV2(value);
+  return { ok: false, code: 'invalid_params', message: 'correlation.correlationVersion must be 1 or 2 when present.' };
+}
+
+/** Public correlation validator: same union discrimination as start-param correlation. */
+export function validateCorrelation(value: unknown): Validation<RuntimeCorrelation> {
+  return checkCorrelation(value);
 }
 
 /** outputSchema bounds: byte cap matches prompt bounds; depth/key caps mirror record-validator conventions (reject, never clamp). */
@@ -536,4 +700,55 @@ export function validateReadyPayload(raw: unknown): ReadyValidation {
     if (raw.methods[index] !== RUNTIME_RPC_METHODS[index]) return { ok: false, reason: 'ready methods mismatch' };
   }
   return { ok: true, value: { version: 1, protocol: RUNTIME_RPC_PROTOCOL, methods: [...RUNTIME_RPC_METHODS] } };
+}
+
+/** Negotiate-reply consumer view: parsed output modes + optional v2 capability. */
+export interface ParsedNegotiateCapabilities {
+  outputModes: RuntimeOutputMode[];
+  correlationV2?: RuntimeCorrelationV2Capability;
+}
+
+function parseOutputModes(value: unknown): RuntimeOutputMode[] {
+  if (!Array.isArray(value)) return [];
+  const modes: RuntimeOutputMode[] = [];
+  for (const entry of value) {
+    if (entry === 'text' || entry === 'json') {
+      if (!modes.includes(entry)) modes.push(entry);
+    }
+  }
+  return modes;
+}
+
+/**
+ * Remote advertisement metadata for v2 correlation support. ownerPattern is
+ * an opaque non-executed string from the remote reply: consumers of the
+ * parsed capability must never compile it into a RegExp or match it against
+ * local input. The single construction inside the parser below is
+ * syntax-only validation (constructibility + roles shape, never throw) and
+ * the raw string is returned verbatim.
+ */
+function parseCorrelationV2Capability(value: unknown): RuntimeCorrelationV2Capability | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.ownerPattern !== 'string' || value.ownerPattern.length === 0) return undefined;
+  try {
+    new RegExp(value.ownerPattern);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(value.roles) || value.roles.some((role) => typeof role !== 'string')) return undefined;
+  return { ownerPattern: value.ownerPattern, roles: [...(value.roles as string[])] };
+}
+
+/**
+ * Parse negotiate reply data into consumer capabilities. Unknown/missing
+ * fields drop (never throw): absence means v1-only — compose v1 forever.
+ * outputModes uses membership checks so future modes stay forward-compatible.
+ */
+export function parseNegotiateCapabilities(data: unknown): ParsedNegotiateCapabilities {
+  if (!isRecord(data)) return { outputModes: [] };
+  const capabilities = isRecord(data.capabilities) ? data.capabilities : undefined;
+  const outputModes = capabilities !== undefined ? parseOutputModes(capabilities.outputModes) : [];
+  const correlationV2 =
+    capabilities !== undefined ? parseCorrelationV2Capability(capabilities.correlationV2) : undefined;
+  return correlationV2 !== undefined ? { outputModes, correlationV2 } : { outputModes };
 }

@@ -488,3 +488,123 @@ test('dispose clears tracked cancel subscription after timeout', async () => {
     client.dispose();
   }
 });
+
+test('runLeaf forwards outputSchema in start params', async () => {
+  const bus = new FakeBus();
+  stubServer(bus);
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL, pollIntervalMs: 5 });
+  try {
+    const schema = { type: 'object', required: ['questions'] };
+    await client.runLeaf('plan now', { timeoutMs: 10_000, outputSchema: schema });
+    const start = bus.requests().find((entry) => (entry as { method: string }).method === 'start') as {
+      params: { outputSchema: unknown };
+    };
+    assert.deepEqual(start.params.outputSchema, schema);
+  } finally {
+    client.dispose();
+  }
+});
+
+test('capability absence composes v1 correlation forever', async () => {
+  const bus = new FakeBus();
+  stubServer(bus);
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL, pollIntervalMs: 5 });
+  try {
+    await client.runLeaf('hello', { timeoutMs: 10_000, role: 'coverage_planner' });
+    assert.deepEqual(client.getNegotiatedCapabilities(), { outputModes: [] });
+    assert.equal(client.supportsJsonOutput(), false);
+    assert.equal(client.supportsCorrelationV2(), false);
+    const start = bus.requests().find((entry) => (entry as { method: string }).method === 'start') as {
+      params: { correlation: Record<string, unknown> };
+    };
+    assert.equal(start.params.correlation.owner, 'northstar');
+    assert.equal(start.params.correlation.role, 'coverage_planner');
+    assert.ok(!('correlationVersion' in start.params.correlation));
+  } finally {
+    client.dispose();
+  }
+});
+
+test('negotiated correlationV2 gates v2 compose; unknown roles fall back', async () => {
+  const bus = new FakeBus();
+  bus.on(RUNTIME_RPC_REQUEST_EVENT, (raw) => {
+    const request = raw as { requestId: string; method: string; params: Record<string, unknown> };
+    const replyTo = runtimeRpcReplyEvent(request.requestId);
+    const ok = (data: unknown): void => {
+      bus.emit(replyTo, { version: 1, requestId: request.requestId, method: request.method, success: true, data });
+    };
+    if (request.method === 'negotiate') {
+      ok({
+        compatible: true,
+        modelId: MODEL,
+        capabilities: {
+          outputModes: ['text', 'json'],
+          correlationV2: { ownerPattern: '^[a-z][a-z0-9_-]{2,31}$', roles: ['coverage_planner'] },
+        },
+      });
+    } else if (request.method === 'start') {
+      ok({ runId: 'runtime_v2run1', state: 'running' });
+    } else if (request.method === 'status') {
+      ok({ runId: 'runtime_v2run1', state: 'completed', startedAt: 1, updatedAt: 2 });
+    } else if (request.method === 'result') {
+      ok({ runId: 'runtime_v2run1', state: 'completed', output: 'v2 text', outputTokens: 2, truncated: false });
+    }
+  });
+  const client = new LeafRuntimeClient({ events: bus, modelId: MODEL, pollIntervalMs: 5 });
+  try {
+    await client.runLeaf('plan now', { timeoutMs: 10_000, role: 'coverage_planner', stage: 'agent-plan' });
+    assert.equal(client.supportsJsonOutput(), true);
+    assert.equal(client.supportsCorrelationV2(), true);
+    assert.deepEqual(client.getNegotiatedCapabilities().outputModes, ['text', 'json']);
+    const start = bus.requests().find((entry) => (entry as { method: string }).method === 'start') as {
+      params: { correlation: Record<string, unknown> };
+    };
+    assert.deepEqual(start.params.correlation, {
+      correlationVersion: 2,
+      owner: 'northstar',
+      correlationId: start.params.correlation.correlationId,
+      queryIndex: 0,
+      role: 'coverage_planner',
+      stage: 'agent-plan',
+      attempt: 0,
+    });
+    // Unknown role handle falls back to researcher under v2.
+    const bus2 = new FakeBus();
+    bus2.on(RUNTIME_RPC_REQUEST_EVENT, (raw) => {
+      const request = raw as { requestId: string; method: string };
+      const replyTo = runtimeRpcReplyEvent(request.requestId);
+      const ok2 = (data: unknown): void => {
+        bus2.emit(replyTo, { version: 1, requestId: request.requestId, method: request.method, success: true, data });
+      };
+      if (request.method === 'negotiate') {
+        ok2({
+          compatible: true,
+          modelId: MODEL,
+          capabilities: {
+            outputModes: ['text'],
+            correlationV2: { ownerPattern: '^[a-z][a-z0-9_-]{2,31}$', roles: ['researcher'] },
+          },
+        });
+      } else if (request.method === 'start') {
+        ok2({ runId: 'runtime_v2run2', state: 'running' });
+      } else if (request.method === 'status') {
+        ok2({ runId: 'runtime_v2run2', state: 'completed', startedAt: 1, updatedAt: 2 });
+      } else if (request.method === 'result') {
+        ok2({ runId: 'runtime_v2run2', state: 'completed', output: 'v2 text', outputTokens: 2, truncated: false });
+      }
+    });
+    const plain = new LeafRuntimeClient({ events: bus2, modelId: MODEL, pollIntervalMs: 5 });
+    try {
+      await plain.runLeaf('hi', { timeoutMs: 10_000, role: 'Evil Role' });
+      const start2 = bus2.requests().find((entry) => (entry as { method: string }).method === 'start') as {
+        params: { correlation: { correlationVersion: number; role: string } };
+      };
+      assert.equal(start2.params.correlation.correlationVersion, 2);
+      assert.equal(start2.params.correlation.role, 'researcher');
+    } finally {
+      plain.dispose();
+    }
+  } finally {
+    client.dispose();
+  }
+});

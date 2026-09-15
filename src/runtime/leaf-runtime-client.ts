@@ -6,14 +6,20 @@
 import { randomBytes } from 'node:crypto';
 import {
   RUNTIME_RPC_BOUNDS,
+  RUNTIME_RPC_CORRELATION_V2_ROLE_PATTERN,
   RUNTIME_RPC_ERROR_MESSAGES,
   RUNTIME_RPC_METHODS,
   RUNTIME_RPC_READY_EVENT,
   RUNTIME_RPC_REQUEST_EVENT,
+  RUNTIME_RPC_ROLES,
+  buildCorrelationV2,
+  parseNegotiateCapabilities,
   runtimeRpcReplyEvent,
   validateReadyPayload,
   validateReply,
   validateRequest,
+  type ParsedNegotiateCapabilities,
+  type RuntimeCorrelation,
   type RuntimeReadyPayloadV1,
   type RuntimeRpcErrorCode,
   type RuntimeRpcMethod,
@@ -38,6 +44,18 @@ export interface LeafRuntimeClientOptions {
 export interface LeafRunOptions {
   maxOutputTokens?: number;
   timeoutMs?: number;
+  /** Pass-through JSON-mode schema; forwarded verbatim in start params (protocol bounds apply). */
+  outputSchema?: Record<string, unknown>;
+  /** Correlation role hint: defaults to 'synthesizer' when absent/non-string; unknown values fall back to 'researcher' (v1 closed set, v2 pattern). Full shape enforced downstream by validateRequest. */
+  role?: string;
+  /** Correlation stage hint: non-empty string kept, else 'leaf-report'. Bounded ASCII enforced downstream by validateRequest. */
+  stage?: string;
+  /** Correlation queryIndex hint: defaults to 0. Range enforced downstream by validateRequest. */
+  queryIndex?: number;
+  /** Correlation attempt hint: defaults to 0. Range enforced downstream by validateRequest. */
+  attempt?: number;
+  /** Correlation id hint: non-empty string kept, else random id. Bounded ASCII enforced downstream by validateRequest. */
+  correlationId?: string;
 }
 
 /** Opaque leaf result: text only, no run/provider/model/token metadata. */
@@ -119,6 +137,7 @@ export class LeafRuntimeClient {
   private readonly subscriptions: Array<() => void> = [];
   private readonly cancelTimers: Array<ReturnType<typeof setTimeout>> = [];
   private ready: RuntimeReadyPayloadV1 | undefined;
+  private negotiated: ParsedNegotiateCapabilities = { outputModes: [] };
   private disposed = false;
 
   constructor(options: LeafRuntimeClientOptions) {
@@ -147,6 +166,84 @@ export class LeafRuntimeClient {
   }
 
   /**
+   * Last negotiated leaf capabilities (outputModes + optional correlationV2).
+   * Empty outputModes means v1-only/text: consumers gate json mode and v2
+   * compose on these values, never on assumptions. Defensive copy.
+   */
+  getNegotiatedCapabilities(): ParsedNegotiateCapabilities {
+    return {
+      outputModes: [...this.negotiated.outputModes],
+      ...(this.negotiated.correlationV2 !== undefined
+        ? {
+            correlationV2: {
+              ownerPattern: this.negotiated.correlationV2.ownerPattern,
+              roles: [...this.negotiated.correlationV2.roles],
+            },
+          }
+        : {}),
+    };
+  }
+
+  /** True when the negotiated reply advertised JSON output mode. */
+  supportsJsonOutput(): boolean {
+    return this.negotiated.outputModes.includes('json');
+  }
+
+  /** True when the negotiated reply advertised the v2 correlation capability. */
+  supportsCorrelationV2(): boolean {
+    return this.negotiated.correlationV2 !== undefined;
+  }
+
+  /**
+   * Per-run correlation: v2 compose gated on negotiated capability presence
+   * (absence composes v1 forever). v1 roles enforce the closed set; v2 roles
+   * enforce the pattern; anything else falls back to 'researcher'.
+   */
+  private composeCorrelation(opts?: LeafRunOptions): RuntimeCorrelation {
+    const correlationId =
+      typeof opts?.correlationId === 'string' && opts.correlationId !== ''
+        ? opts.correlationId
+        : newRequestId().slice(0, 32);
+    const stage = typeof opts?.stage === 'string' && opts.stage !== '' ? opts.stage : 'leaf-report';
+    const queryIndex = opts?.queryIndex ?? 0;
+    const attempt = opts?.attempt ?? 0;
+    const role = typeof opts?.role === 'string' ? opts.role : 'synthesizer';
+    if (this.negotiated.correlationV2 !== undefined) {
+      const v2Role = RUNTIME_RPC_CORRELATION_V2_ROLE_PATTERN.test(role) ? role : 'researcher';
+      return buildCorrelationV2({ owner: 'northstar', correlationId, queryIndex, role: v2Role, stage, attempt });
+    }
+    const v1Role = (RUNTIME_RPC_ROLES as readonly string[]).includes(role) ? role : 'researcher';
+    return {
+      owner: 'northstar',
+      correlationId,
+      queryIndex,
+      role: v1Role as (typeof RUNTIME_RPC_ROLES)[number],
+      stage,
+      attempt,
+    };
+  }
+
+  /**
+   * Shared negotiate-reply guard: resets negotiated state on incompatible or
+   * model-mismatched replies, adopts capabilities for valid replies.
+   * Returns true when the reply was adopted, false when it was rejected.
+   */
+  private adoptNegotiateData(data: unknown): boolean {
+    if (!isRecord(data) || data.compatible !== true) {
+      this.negotiated = { outputModes: [] };
+      this.ready = undefined;
+      return false;
+    }
+    if (data.modelId !== undefined && data.modelId !== this.modelId) {
+      this.negotiated = { outputModes: [] };
+      this.ready = undefined;
+      return false;
+    }
+    this.negotiated = parseNegotiateCapabilities(data);
+    return true;
+  }
+
+  /**
    * Epoch-safe readiness: sends `negotiate` with a fresh requestId for the
    * configured leaf model. True only on a success reply; every failure mode
    * (runtime_unavailable, timeout, malformed) resolves false, never throws.
@@ -155,17 +252,13 @@ export class LeafRuntimeClient {
     if (this.disposed) return false;
     try {
       const data = await this.request('negotiate', { modelId: this.modelId }, { timeoutMs: Math.min(REFRESH_TIMEOUT_MS, RUNTIME_RPC_BOUNDS.maxTimeoutMs) });
-      if (!isRecord(data) || data.compatible !== true) {
-        this.ready = undefined;
-        return false;
-      }
-      if (data.modelId !== undefined && data.modelId !== this.modelId) {
-        this.ready = undefined;
+      if (!this.adoptNegotiateData(data)) {
         return false;
       }
       this.ready = { version: 1, protocol: 'subagents:runtime:v1', methods: [...RUNTIME_RPC_METHODS] };
       return true;
     } catch {
+      this.negotiated = { outputModes: [] };
       this.ready = undefined;
       return false;
     }
@@ -277,9 +370,16 @@ export class LeafRuntimeClient {
     const deadline = Date.now() + timeoutMs;
     const remaining = (): number => Math.max(1, deadline - Date.now());
 
-    await this.request('negotiate', { modelId: this.modelId }, { timeoutMs: Math.min(remaining(), REFRESH_TIMEOUT_MS) }).catch((error) => {
-      throw error instanceof LeafRuntimeError ? error : new LeafRuntimeError('provider_error', PROVIDER_ERROR_MESSAGE);
-    });
+    await this.request('negotiate', { modelId: this.modelId }, { timeoutMs: Math.min(remaining(), REFRESH_TIMEOUT_MS) }).then(
+      (data) => {
+        if (!this.adoptNegotiateData(data)) {
+          throw new LeafRuntimeError('unsupported_capability', RUNTIME_RPC_ERROR_MESSAGES.unsupported_capability);
+        }
+      },
+      (error) => {
+        throw error instanceof LeafRuntimeError ? error : new LeafRuntimeError('provider_error', PROVIDER_ERROR_MESSAGE);
+      },
+    );
 
     const startData = await this.request(
       'start',
@@ -288,14 +388,8 @@ export class LeafRuntimeClient {
         prompt,
         maxOutputTokens,
         timeoutMs: Math.min(remaining(), RUNTIME_RPC_BOUNDS.maxTimeoutMs),
-        correlation: {
-          owner: 'northstar',
-          correlationId: newRequestId().slice(0, 32),
-          queryIndex: 0,
-          role: 'synthesizer',
-          stage: 'leaf-report',
-          attempt: 0,
-        },
+        ...(opts?.outputSchema !== undefined ? { outputSchema: opts.outputSchema } : {}),
+        correlation: this.composeCorrelation(opts),
       },
       { timeoutMs: remaining() },
     );
