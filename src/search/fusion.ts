@@ -54,8 +54,9 @@ export function rrfMerge<T>(
   });
 
   return [...scores.values()]
-    .sort((a, b) => b.score - a.score)
-    .map((value) => ({ item: value.item, rrfScore: value.score }));
+    .map((value) => ({ value, sortKey: keyFn(value.item) }))
+    .sort((a, b) => b.value.score - a.value.score || (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
+    .map(({ value }) => ({ item: value.item, rrfScore: value.score }));
 }
 
 function defaultKey<T>(item: T): string {
