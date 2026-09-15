@@ -283,9 +283,10 @@ export interface CloneKillOptions {
 }
 
 /**
- * Escalate abort → SIGTERM → SIGKILL. Kills target the whole process group
- * (negative pid) so orphaned git-remote-https grandchildren stop too; falls
- * back to a direct kill when group-kill is unavailable (win32, ESRCH).
+ * Escalate abort → SIGTERM → SIGKILL. Tries the whole process group
+ * (negative pid) so orphaned git-remote-https grandchildren stop too;
+ * falls back to a direct kill on throw (win32 EINVAL, ESRCH, EPERM).
+ * Single try-first path on all platforms — no platform sniff.
  * Returns the signals fired in order. Never throws: a gone child is success.
  */
 export async function terminateCloneChild(
@@ -300,7 +301,7 @@ export async function terminateCloneChild(
   const fired: NodeJS.Signals[] = [];
   const fire = (signal: NodeJS.Signals): void => {
     fired.push(signal);
-    if (target.pid !== undefined && process.platform !== 'win32') {
+    if (target.pid !== undefined) {
       try {
         groupKill(-target.pid, signal);
         return;
