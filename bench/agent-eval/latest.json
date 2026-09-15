@@ -1,0 +1,1373 @@
+{
+  "generatedAt": "2026-09-15T19:09:39.027Z",
+  "aggregate": {
+    "n": 14,
+    "structuralFactMatch": 0.821,
+    "reportOnlyFactMatchTotal": 1,
+    "claimCitationValidity": 1,
+    "fetchCoverageOfCitations": 1,
+    "claimSupportRate": 0.821,
+    "unsupportedProseTotal": 1,
+    "duplicateFetchRate": 0,
+    "graceful": 14,
+    "contradictionDiscovery": 0,
+    "searchCalls": 14,
+    "fetchCalls": 18,
+    "reportCalls": 14,
+    "latencyMsTotal": 6
+  },
+  "cases": [
+    {
+      "id": "cmp-acme-beta",
+      "fault": "none",
+      "structuralFactMatch": 1,
+      "factsCovered": 4,
+      "factsTotal": 4,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 2,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 2,
+      "reportCalls": 1,
+      "fetchedUrls": 2,
+      "latencyMs": 2,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "cmp-orion-vega",
+      "fault": "none",
+      "structuralFactMatch": 1,
+      "factsCovered": 3,
+      "factsTotal": 3,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 2,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 2,
+      "reportCalls": 1,
+      "fetchedUrls": 2,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "cmp-api-quotas",
+      "fault": "none",
+      "structuralFactMatch": 1,
+      "factsCovered": 2,
+      "factsTotal": 2,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 2,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 2,
+      "reportCalls": 1,
+      "fetchedUrls": 2,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "cmp-storage",
+      "fault": "none",
+      "structuralFactMatch": 1,
+      "factsCovered": 3,
+      "factsTotal": 3,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 2,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 2,
+      "reportCalls": 1,
+      "fetchedUrls": 2,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "adv-plausible-pricing",
+      "fault": "plausible_incomplete",
+      "structuralFactMatch": 0.5,
+      "factsCovered": 1,
+      "factsTotal": 2,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 0.5,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 3,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "adv-plausible-laptop",
+      "fault": "plausible_incomplete",
+      "structuralFactMatch": 1,
+      "factsCovered": 1,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "adv-plausible-api",
+      "fault": "plausible_incomplete",
+      "structuralFactMatch": 1,
+      "factsCovered": 1,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "fault-empty-search",
+      "fault": "empty_search",
+      "structuralFactMatch": 0,
+      "factsCovered": 0,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 0,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 0,
+      "reportCalls": 1,
+      "fetchedUrls": 0,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "fault-fetch-failures",
+      "fault": "fetch_failures",
+      "structuralFactMatch": 0,
+      "factsCovered": 0,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 1,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 0,
+      "unsupportedProse": 1,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 2,
+      "reportCalls": 1,
+      "fetchedUrls": 0,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "fault-report-error",
+      "fault": "report_error",
+      "structuralFactMatch": 1,
+      "factsCovered": 1,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 0,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "fault-claim-validation",
+      "fault": "claim_validation_fail",
+      "structuralFactMatch": 1,
+      "factsCovered": 1,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 2,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "fault-contradiction",
+      "fault": "contradiction",
+      "structuralFactMatch": 1,
+      "factsCovered": 1,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "adv-injection",
+      "fault": "none",
+      "structuralFactMatch": 1,
+      "factsCovered": 0,
+      "factsTotal": 0,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 1,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    },
+    {
+      "id": "fault-bad-ir",
+      "fault": "bad_ir",
+      "structuralFactMatch": 1,
+      "factsCovered": 1,
+      "factsTotal": 1,
+      "reportOnlyFactMatch": 0,
+      "claimCitationValidity": 1,
+      "fetchCoverageOfCitations": 1,
+      "claimSupportRate": 1,
+      "unsupportedProse": 0,
+      "unsupportedSentences": 1,
+      "duplicateFetchRate": 0,
+      "searchCalls": 1,
+      "fetchCalls": 1,
+      "reportCalls": 1,
+      "fetchedUrls": 1,
+      "latencyMs": 0,
+      "gracefulFailure": true,
+      "contradictionDiscovery": 0,
+      "threw": null
+    }
+  ],
+  "v2": {
+    "aggregate": {
+      "n": 14,
+      "structuralFactMatch": 0.821,
+      "claimSupportRate": 0.821,
+      "contradictionDiscoveryTotal": 1,
+      "searchesUsedTotal": 18,
+      "fetchesUsedTotal": 23,
+      "roundsTotal": 18
+    },
+    "cases": {
+      "cmp-acme-beta": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 2,
+        "rounds": 1,
+        "threw": null
+      },
+      "cmp-orion-vega": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 2,
+        "rounds": 1,
+        "threw": null
+      },
+      "cmp-api-quotas": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 2,
+        "rounds": 1,
+        "threw": null
+      },
+      "cmp-storage": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 2,
+        "rounds": 1,
+        "threw": null
+      },
+      "adv-plausible-pricing": {
+        "structuralFactMatch": 0.5,
+        "claimSupportRate": 0.5,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 2,
+        "fetchesUsed": 2,
+        "rounds": 2,
+        "threw": null
+      },
+      "adv-plausible-laptop": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 2,
+        "fetchesUsed": 2,
+        "rounds": 2,
+        "threw": null
+      },
+      "adv-plausible-api": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 2,
+        "fetchesUsed": 2,
+        "rounds": 2,
+        "threw": null
+      },
+      "fault-empty-search": {
+        "structuralFactMatch": 0,
+        "claimSupportRate": 0,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 0,
+        "rounds": 1,
+        "threw": null
+      },
+      "fault-fetch-failures": {
+        "structuralFactMatch": 0,
+        "claimSupportRate": 0,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 2,
+        "rounds": 1,
+        "threw": null
+      },
+      "fault-report-error": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 1,
+        "rounds": 1,
+        "threw": null
+      },
+      "fault-claim-validation": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 1,
+        "rounds": 1,
+        "threw": null
+      },
+      "fault-contradiction": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 1,
+        "searchesUsed": 2,
+        "fetchesUsed": 3,
+        "rounds": 2,
+        "threw": null
+      },
+      "adv-injection": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 1,
+        "rounds": 1,
+        "threw": null
+      },
+      "fault-bad-ir": {
+        "structuralFactMatch": 1,
+        "claimSupportRate": 1,
+        "contradictionDiscovery": 0,
+        "searchesUsed": 1,
+        "fetchesUsed": 1,
+        "rounds": 1,
+        "threw": null
+      }
+    }
+  },
+  "v3": {
+    "aggregate": {
+      "n": 14,
+      "structuralFactMatch": 0.857,
+      "reportOnlyFactMatchTotal": 1,
+      "claimCitationValidity": 1,
+      "unsupportedProseTotal": 1,
+      "synthUsedTotal": 11,
+      "fallbackTotal": 1,
+      "graceful": 14
+    },
+    "cases": {
+      "cmp-acme-beta": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "cmp-orion-vega": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "cmp-api-quotas": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "cmp-storage": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "adv-plausible-pricing": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "adv-plausible-laptop": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "adv-plausible-api": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "fault-empty-search": {
+        "structuralFactMatch": 0,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": false,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "fault-fetch-failures": {
+        "structuralFactMatch": 0,
+        "reportOnlyFactMatch": 1,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 1,
+        "synthUsed": false,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "fault-report-error": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "fault-claim-validation": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "fault-contradiction": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "adv-injection": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": true,
+        "fallbackUsed": false,
+        "graceful": true,
+        "threw": null
+      },
+      "fault-bad-ir": {
+        "structuralFactMatch": 1,
+        "reportOnlyFactMatch": 0,
+        "claimCitationValidity": 1,
+        "unsupportedProse": 0,
+        "synthUsed": false,
+        "fallbackUsed": true,
+        "graceful": true,
+        "threw": null
+      }
+    }
+  },
+  "v4": {
+    "aggregate": {
+      "n": 16,
+      "skipped": false,
+      "skipReason": null,
+      "seamWired": true,
+      "repairAppliedTotal": 2,
+      "repairRejectedTotal": 1
+    },
+    "cases": {
+      "cmp-acme-beta": {
+        "verdicts": [
+          "supported",
+          "supported",
+          "supported",
+          "supported"
+        ],
+        "supportedCount": 4,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 4,
+        "threw": null
+      },
+      "cmp-orion-vega": {
+        "verdicts": [
+          "supported",
+          "supported",
+          "supported"
+        ],
+        "supportedCount": 3,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 4,
+        "threw": null
+      },
+      "cmp-api-quotas": {
+        "verdicts": [
+          "supported",
+          "supported"
+        ],
+        "supportedCount": 2,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 4,
+        "threw": null
+      },
+      "cmp-storage": {
+        "verdicts": [
+          "supported",
+          "supported",
+          "supported"
+        ],
+        "supportedCount": 3,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 4,
+        "threw": null
+      },
+      "adv-plausible-pricing": {
+        "verdicts": [
+          "supported",
+          "supported"
+        ],
+        "supportedCount": 2,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 5,
+        "threw": null
+      },
+      "adv-plausible-laptop": {
+        "verdicts": [
+          "supported"
+        ],
+        "supportedCount": 1,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 5,
+        "threw": null
+      },
+      "adv-plausible-api": {
+        "verdicts": [
+          "supported"
+        ],
+        "supportedCount": 1,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 5,
+        "threw": null
+      },
+      "fault-empty-search": {
+        "verdicts": [],
+        "supportedCount": 0,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 4,
+        "threw": null
+      },
+      "fault-fetch-failures": {
+        "verdicts": [],
+        "supportedCount": 0,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 6,
+        "threw": null
+      },
+      "fault-report-error": {
+        "verdicts": [
+          "supported"
+        ],
+        "supportedCount": 1,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 5,
+        "threw": null
+      },
+      "fault-claim-validation": {
+        "verdicts": [
+          "supported"
+        ],
+        "supportedCount": 1,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 4,
+        "threw": null
+      },
+      "fault-contradiction": {
+        "verdicts": [
+          "supported"
+        ],
+        "supportedCount": 1,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 1,
+        "repairRejected": 0,
+        "repairEvents": [
+          "repair applied: 1 claims re-supported"
+        ],
+        "warnings": 5,
+        "threw": null
+      },
+      "adv-injection": {
+        "verdicts": [],
+        "supportedCount": 0,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 5,
+        "threw": null
+      },
+      "fault-bad-ir": {
+        "verdicts": [
+          "supported"
+        ],
+        "supportedCount": 1,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 0,
+        "repairEvents": [],
+        "warnings": 4,
+        "threw": null
+      },
+      "fault-repair-regression": {
+        "verdicts": [
+          "supported",
+          "supported",
+          "refuted"
+        ],
+        "supportedCount": 2,
+        "refutedCount": 1,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 0.667,
+        "hasVerification": true,
+        "repairApplied": 0,
+        "repairRejected": 1,
+        "repairEvents": [
+          "repair rejected; best version kept (no improvement)"
+        ],
+        "warnings": 4,
+        "threw": null
+      },
+      "fault-numeric-lie": {
+        "verdicts": [
+          "supported"
+        ],
+        "supportedCount": 1,
+        "refutedCount": 0,
+        "unsupportedCount": 0,
+        "verifySupportedFraction": 1,
+        "hasVerification": true,
+        "repairApplied": 1,
+        "repairRejected": 0,
+        "repairEvents": [
+          "repair applied: 1 claims re-supported"
+        ],
+        "warnings": 4,
+        "threw": null
+      }
+    },
+    "gates": [
+      {
+        "id": "cmp-acme-beta:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "cmp-orion-vega:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "cmp-api-quotas:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "cmp-storage:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "adv-plausible-pricing:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "adv-plausible-laptop:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "adv-plausible-api:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-empty-search:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-fetch-failures:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-report-error:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-claim-validation:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-contradiction:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "adv-injection:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-bad-ir:v4-support>=v3",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-contradiction:v4-repair-applied",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-repair-regression:v4-best-version-rejects",
+        "pass": true,
+        "skipped": false
+      },
+      {
+        "id": "fault-numeric-lie:v4-no-refuted-final",
+        "pass": true,
+        "skipped": false
+      }
+    ]
+  },
+  "v5": {
+    "aggregate": {
+      "cases": 16,
+      "applicable": 1,
+      "separated": 0,
+      "inconclusive": true
+    },
+    "cases": {
+      "cmp-acme-beta": {
+        "evidenceItems": 4,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "cmp-orion-vega": {
+        "evidenceItems": 5,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "cmp-api-quotas": {
+        "evidenceItems": 4,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "cmp-storage": {
+        "evidenceItems": 5,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "adv-plausible-pricing": {
+        "evidenceItems": 2,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "adv-plausible-laptop": {
+        "evidenceItems": 1,
+        "derivedConfidence": 0.35,
+        "breakdown": {
+          "independentFingerprints": 0.35,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "adv-plausible-api": {
+        "evidenceItems": 1,
+        "derivedConfidence": 0.35,
+        "breakdown": {
+          "independentFingerprints": 0.35,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "fault-empty-search": {
+        "evidenceItems": 0,
+        "derivedConfidence": 0,
+        "breakdown": {
+          "independentFingerprints": 0,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "fault-fetch-failures": {
+        "evidenceItems": 0,
+        "derivedConfidence": 0,
+        "breakdown": {
+          "independentFingerprints": 0,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "fault-report-error": {
+        "evidenceItems": 2,
+        "derivedConfidence": 0.7,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "fault-claim-validation": {
+        "evidenceItems": 2,
+        "derivedConfidence": 0.7,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "fault-contradiction": {
+        "evidenceItems": 4,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 1,
+        "supportedSlotItems": 1,
+        "refutedSlotConfidence": 0.35,
+        "supportedSlotConfidence": 0.35,
+        "ablationApplicable": true,
+        "ablationSeparated": false,
+        "ablationNote": "inconclusive: derived confidence ties across slots (value-symmetric fixtures, uniform unknown source class)"
+      },
+      "adv-injection": {
+        "evidenceItems": 4,
+        "derivedConfidence": 0.7,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "fault-bad-ir": {
+        "evidenceItems": 2,
+        "derivedConfidence": 0.7,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": 0,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 0,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": null,
+        "ablationApplicable": false,
+        "ablationSeparated": false
+      },
+      "fault-repair-regression": {
+        "evidenceItems": 4,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 2,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": 0.5499999999999999,
+        "ablationApplicable": false,
+        "ablationSeparated": false,
+        "ablationNote": "N/A: no lie-valued admitted evidence in a refuted slot (fixture corpus insufficient)"
+      },
+      "fault-numeric-lie": {
+        "evidenceItems": 4,
+        "derivedConfidence": 0.5499999999999999,
+        "breakdown": {
+          "independentFingerprints": 0.7,
+          "sourceClassBoost": 0,
+          "conflictPenalty": -0.15,
+          "verifiedBoost": 0
+        },
+        "deterministic": true,
+        "refutedSlotItems": 0,
+        "supportedSlotItems": 1,
+        "refutedSlotConfidence": null,
+        "supportedSlotConfidence": 0.35,
+        "ablationApplicable": false,
+        "ablationSeparated": false,
+        "ablationNote": "N/A: no lie-valued admitted evidence in a refuted slot (fixture corpus insufficient)"
+      }
+    },
+    "gates": [
+      {
+        "id": "cmp-acme-beta:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "cmp-orion-vega:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "cmp-api-quotas:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "cmp-storage:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "adv-plausible-pricing:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "adv-plausible-laptop:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "adv-plausible-api:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-empty-search:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-fetch-failures:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-report-error:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-claim-validation:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-contradiction:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "adv-injection:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-bad-ir:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-repair-regression:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-numeric-lie:v5-derived-computed",
+        "pass": true,
+        "skipped": false,
+        "skipReason": null
+      },
+      {
+        "id": "fault-contradiction:v5-ablation-refuted-lower",
+        "pass": false,
+        "skipped": true,
+        "skipReason": "inconclusive: derived confidence ties across slots (value-symmetric fixtures, uniform unknown source class)"
+      },
+      {
+        "id": "fault-numeric-lie:v5-ablation-refuted-lower",
+        "pass": false,
+        "skipped": true,
+        "skipReason": "N/A: no lie-valued admitted evidence in a refuted slot (fixture corpus insufficient)"
+      },
+      {
+        "id": "fault-repair-regression:v5-ablation-refuted-lower",
+        "pass": false,
+        "skipped": true,
+        "skipReason": "N/A: no lie-valued admitted evidence in a refuted slot (fixture corpus insufficient)"
+      }
+    ]
+  }
+}

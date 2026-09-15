@@ -22,7 +22,8 @@
     "cli": "node --import tsx src/cli/cli.ts",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "bench:cli-spawn": "node --import tsx bench/cli-spawn-bench.mjs"
+    "bench:cli-spawn": "node --import tsx bench/cli-spawn-bench.mjs",
+    "bench:agent-eval": "node --import tsx bench/agent-eval/run.mjs"
   },
   "dependencies": {
     "@google/genai": "1.52.0",
