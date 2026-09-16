@@ -163,7 +163,7 @@ export async function searchPubmed(
 
   let esearch: unknown;
   try {
-    esearch = await fetchResearchJson(`${PUBMED_EUTILS_BASE}/esearch.fcgi?${esearchParams}`, {}, request.signal);
+    esearch = await fetchResearchJson(`${PUBMED_EUTILS_BASE}/esearch.fcgi?${esearchParams}`, {}, request.signal, request.lookup);
   } catch (error) {
     return httpErrorEnvelope(req, source, backend, limit, error);
   }
@@ -202,7 +202,7 @@ export async function searchPubmed(
 
   let esummary: unknown;
   try {
-    esummary = await fetchResearchJson(`${PUBMED_EUTILS_BASE}/esummary.fcgi?${esummaryParams}`, {}, request.signal);
+    esummary = await fetchResearchJson(`${PUBMED_EUTILS_BASE}/esummary.fcgi?${esummaryParams}`, {}, request.signal, request.lookup);
   } catch (error) {
     return httpErrorEnvelope(req, source, backend, limit, error);
   }

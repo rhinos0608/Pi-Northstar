@@ -41,11 +41,16 @@ function mapRow(row: Record<string, unknown>): unknown {
   const url = doi
     ? `https://doi.org/${doi}`
     : researchString(row.url) ?? (paperId ? `https://www.semanticscholar.org/paper/${paperId}` : undefined);
+  const abstract = researchString(row.abstract);
   return {
     id: paperId ?? doi,
     title: typeof row.title === 'string' ? row.title : '',
     url,
     snippet: researchString(row.abstract),
+    // D5 provenance: carry the genuine upstream abstract alongside the
+    // display snippet. parseAdapterRows preserves it on the entity; it is
+    // set ONLY when the provider row actually had one (never backfilled).
+    ...(abstract !== undefined ? { abstract } : {}),
     authors: Array.isArray(row.authors) ? row.authors : undefined,
     year: row.year,
     venue: researchString(row.venue),
@@ -121,7 +126,7 @@ export async function searchSemanticScholar(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${SEMANTIC_SCHOLAR_ENDPOINT}?${params}`, headers, request.signal);
+    payload = await fetchResearchJson(`${SEMANTIC_SCHOLAR_ENDPOINT}?${params}`, headers, request.signal, request.lookup);
   } catch (error) {
     return buildAdapterEnvelope({
       request: req, source, backend, entities: [], invalid: 0,

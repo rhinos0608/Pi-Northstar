@@ -148,15 +148,24 @@ async function research(args: Record<string, unknown>, options: NativeToolOption
   if (typeof args.cursor === 'string' && args.cursor) researchPageRequest.cursor = args.cursor;
   if (options.signal) researchPageRequest.signal = options.signal;
   if (options.env) researchPageRequest.env = options.env;
+  if (options.lookup) researchPageRequest.lookup = options.lookup;
   const envelope = await searchResearchPage(researchPageRequest, { requestedAction: action });
 
   const entities = envelope.data.kind === 'entities' ? envelope.data.entities : [];
-  const results = entities.map((entity) => ({
-    title: entity.title || entity.id,
-    url: entity.url,
-    snippet: entity.snippet ?? '',
-    source: entity.source,
-  }));
+  const results = entities.map((entity) => {
+    // D5 provenance: carry a genuine upstream abstract through to the detail
+    // rows. Populated ONLY when the entity actually has one (never backfilled
+    // from snippet); abstract-less sources stay candidate-only downstream.
+    const rawAbstract = (entity as unknown as Record<string, unknown>)['abstract'];
+    const abstract = typeof rawAbstract === 'string' && rawAbstract.trim() !== '' ? rawAbstract : undefined;
+    return {
+      title: entity.title || entity.id,
+      url: entity.url,
+      snippet: entity.snippet ?? '',
+      source: entity.source,
+      ...(abstract === undefined ? {} : { abstract }),
+    };
+  });
   let text = results.length
     ? results.map((result, index) => `## ${index + 1}. ${result.title}\n${result.url}\n${result.snippet}`).join('\n\n')
     : `No research results for: ${query}`;

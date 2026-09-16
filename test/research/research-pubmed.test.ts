@@ -7,6 +7,8 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+const PUBLIC_LOOKUP = async () => [{ address: '93.184.216.34', family: 4 }];
+
 const ESEARCH = {
   esearchresult: {
     count: '25',
@@ -52,6 +54,7 @@ test('pubmed: esearch+esummary flow, field-tag filters, auth params, entity mapp
         doi: '10.1234/pm',
         venue: 'Example Journal',
         env: { NCBI_API_KEY: 'ncbi-secret-1', NCBI_EMAIL: 'team@example.com' },
+        lookup: PUBLIC_LOOKUP,
       },
       { requestedAction: 'search' },
     );
@@ -92,7 +95,7 @@ test('pubmed: esearch+esummary flow, field-tag filters, auth params, entity mapp
 
     await searchPubmed({
       query: 'CRISPR review', limit: 2, yearFrom: 2022,
-      cursor: result.pagination.nextCursor!, env: {},
+      cursor: result.pagination.nextCursor!, env: {}, lookup: PUBLIC_LOOKUP,
     });
     assert.equal(new URL(urls[2]!).searchParams.get('retstart'), '2');
     assert.doesNotMatch(JSON.stringify(result), /ncbi-secret-1/);
@@ -109,7 +112,7 @@ test('pubmed: empty idlist → empty envelope, esummary never called', async () 
     return jsonResponse({ esearchresult: { count: '0', idlist: [] } });
   };
   try {
-    const result = await searchPubmed({ query: 'q', env: {} });
+    const result = await searchPubmed({ query: 'q', env: {}, lookup: PUBLIC_LOOKUP });
     assert.equal(result.status, 'empty');
     assert.equal(urls.length, 1);
   } finally {
@@ -121,7 +124,7 @@ test('pubmed: esearchresult.error → rate_limited', async () => {
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async () => jsonResponse({ esearchresult: { error: 'API rate limit exceeded', idlist: [] } });
   try {
-    const result = await searchPubmed({ query: 'q', env: {} });
+    const result = await searchPubmed({ query: 'q', env: {}, lookup: PUBLIC_LOOKUP });
     assert.equal(result.errors[0]?.code, 'rate_limited');
     assert.equal(result.errors[0]?.retryable, true);
   } finally {
@@ -139,9 +142,9 @@ test('pubmed: malformed containers → invalid_backend_response', async () => {
       : jsonResponse({ result: { no_uids: true } });
   };
   try {
-    const first = await searchPubmed({ query: 'q', env: {} });
+    const first = await searchPubmed({ query: 'q', env: {}, lookup: PUBLIC_LOOKUP });
     assert.equal(first.errors[0]?.code, 'invalid_backend_response');
-    const second = await searchPubmed({ query: 'q', env: {} });
+    const second = await searchPubmed({ query: 'q', env: {}, lookup: PUBLIC_LOOKUP });
     assert.equal(second.errors[0]?.code, 'invalid_backend_response');
   } finally {
     globalThis.fetch = savedFetch;
@@ -152,7 +155,7 @@ test('pubmed: HTTP failure messages never contain the key-bearing URL', async ()
   const savedFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response('{}', { status: 429 });
   try {
-    const result = await searchPubmed({ query: 'q', env: { NCBI_API_KEY: 'ncbi-secret-1' } });
+    const result = await searchPubmed({ query: 'q', env: { NCBI_API_KEY: 'ncbi-secret-1' }, lookup: PUBLIC_LOOKUP });
     assert.equal(result.errors[0]?.code, 'rate_limited');
     const text = JSON.stringify(result);
     assert.doesNotMatch(text, /ncbi-secret-1/);

@@ -134,7 +134,7 @@ export async function searchDatacite(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${DATACITE_ENDPOINT}?${params}`, {}, request.signal);
+    payload = await fetchResearchJson(`${DATACITE_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     return buildAdapterEnvelope({
       request: req, source, backend, entities: [], invalid: 0,

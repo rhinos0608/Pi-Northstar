@@ -71,7 +71,7 @@ export async function searchWikipedia(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${WIKIPEDIA_ENDPOINT}?${params}`, {}, request.signal);
+    payload = await fetchResearchJson(`${WIKIPEDIA_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     return buildNorthstarResult({
       request: req,

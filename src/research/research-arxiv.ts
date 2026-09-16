@@ -117,7 +117,7 @@ export async function searchArxiv(
 
   let xml: string;
   try {
-    xml = await fetchResearchText(`${ARXIV_ENDPOINT}?${params}`, {}, request.signal);
+    xml = await fetchResearchText(`${ARXIV_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     return buildAdapterEnvelope({
       request: req, source, backend, entities: [], invalid: 0,
@@ -141,6 +141,12 @@ export async function searchArxiv(
     title: entry.title,
     url: entry.id,
     snippet: entry.summary,
+    // D5 provenance: the Atom <summary> element IS the paper abstract —
+    // carry it as the genuine upstream abstract the same way
+    // research-semantic-scholar/research-crossref do (set ONLY when the
+    // feed entry actually had one; parseAdapterRows preserves it on the
+    // entity and abstract-less rows stay candidate-only downstream).
+    abstract: entry.summary === '' ? undefined : entry.summary,
     authors: entry.authors.map((name) => ({ name })),
     year: entry.published ? Number(entry.published.slice(0, 4)) : undefined,
     publishedAt: entry.published,

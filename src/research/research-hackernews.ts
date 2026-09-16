@@ -95,7 +95,7 @@ export async function searchHackerNews(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${HACKERNEWS_ENDPOINT}?${params}`, {}, request.signal);
+    payload = await fetchResearchJson(`${HACKERNEWS_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     return buildAdapterEnvelope({
       request: req, source, backend, entities: [], invalid: 0,

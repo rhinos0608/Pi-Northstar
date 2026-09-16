@@ -58,6 +58,9 @@ function mapRow(row: Record<string, unknown>): unknown {
     title: firstString(row.title) ?? '',
     url,
     snippet: researchString(row.abstract),
+    // D5 provenance: carry the genuine upstream abstract alongside the
+    // display snippet (set ONLY when the provider row actually had one).
+    abstract: researchString(row.abstract),
     authors: authors && authors.length > 0 ? authors : undefined,
     year,
     venue: firstString(row['container-title']),
@@ -129,7 +132,7 @@ export async function searchCrossref(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${CROSSREF_ENDPOINT}?${params}`, {}, request.signal);
+    payload = await fetchResearchJson(`${CROSSREF_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     return buildAdapterEnvelope({
       request: req, source, backend, entities: [], invalid: 0,

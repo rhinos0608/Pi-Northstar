@@ -15,6 +15,7 @@
 // - No retry loops; aborts always propagate.
 
 import { fetchJsonNoRedirect, fetchText } from '../core/http.js';
+import type { DnsLookup } from '../network-policy.js';
 import { researchSourceCapability } from '../capabilities.js';
 import {
   buildNorthstarResult,
@@ -65,6 +66,8 @@ export interface ResearchAdapterRequest {
   signal?: AbortSignal;
   /** Defaults to process.env; injectable for tests. */
   env?: Record<string, string | undefined>;
+  /** DNS seam for deterministic tests / caller-owned network policy; system DNS by default. */
+  lookup?: DnsLookup;
 }
 
 export interface ResearchAdapterContext {
@@ -213,9 +216,10 @@ export async function fetchResearchJson(
   url: string,
   headers: Record<string, string>,
   signal?: AbortSignal,
+  lookup?: DnsLookup,
 ): Promise<unknown> {
   try {
-    return await fetchJsonNoRedirect(url, headers, signal);
+    return await fetchJsonNoRedirect(url, headers, signal, undefined, lookup);
   } catch (error) {
     throw toResearchHttpError(error);
   }
@@ -239,9 +243,10 @@ export async function fetchResearchText(
   url: string,
   headers: Record<string, string>,
   signal?: AbortSignal,
+  lookup?: DnsLookup,
 ): Promise<string> {
   try {
-    return await fetchText(url, headers, signal);
+    return await fetchText(url, headers, signal, undefined, lookup);
   } catch (error) {
     throw toResearchHttpError(error);
   }
@@ -275,6 +280,13 @@ export interface ParsedRows {
   invalid: number;
 }
 
+/** Provenance bound: mirrors the result-contract per-field text cap. */
+export const RESEARCH_ABSTRACT_MAX_CHARS = 8_000;
+
+function isRecordRow(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export function parseAdapterRows(
   rows: readonly unknown[],
   source: string,
@@ -293,6 +305,16 @@ export function parseAdapterRows(
     if (!validateNorthstarEntity(parsed.entity).ok) {
       invalid += 1;
       continue;
+    }
+    // D5 abstract provenance: preserve a genuine upstream abstract on the
+    // entity for the native detail rows. Set ONLY when the adapter row
+    // actually carried a non-empty abstract (never backfilled from snippet).
+    // Sources without abstracts (HN/GDELT-style) stay abstract-less, hence
+    // structurally candidate-only. The canonical validator ignores extra keys.
+    const rawAbstract = isRecordRow(row) ? row['abstract'] : undefined;
+    if (typeof rawAbstract === 'string' && rawAbstract.trim() !== '') {
+      (parsed.entity as NorthstarEntityV1 & { abstract?: string }).abstract =
+        rawAbstract.length > RESEARCH_ABSTRACT_MAX_CHARS ? rawAbstract.slice(0, RESEARCH_ABSTRACT_MAX_CHARS) : rawAbstract;
     }
     entities.push(parsed.entity);
   }

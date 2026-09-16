@@ -57,6 +57,8 @@ test('searchArxiv maps a valid Atom feed and hits the fixed official host', asyn
   assert.equal(entity.url, 'http://arxiv.org/abs/2401.00001v1');
   assert.equal(entity.title, 'Paper 1');
   assert.equal(entity.snippet, 'Summary 1');
+  // D5 provenance: the Atom <summary> element IS the paper abstract.
+  assert.equal((entity as unknown as Record<string, unknown>)['abstract'], 'Summary 1');
   assert.deepEqual(entity.authors, [{ name: 'Author 1' }]);
   assert.equal(entity.year, 2024);
   assert.equal(entity.publishedAt, '2024-01-01T00:00:00Z');
@@ -157,4 +159,22 @@ test('searchArxiv applies the submittedDate range for yearFrom', async () => {
     new URL(captured).searchParams.get('search_query'),
     'all:q AND submittedDate:[202301010000 TO 999912312359]',
   );
+});
+
+test('searchArxiv threads the Atom summary as the genuine abstract; missing summary stays abstract-less', async () => {
+  const nod = (id: number, body: string): string =>
+    `<entry><id>https://arxiv.org/abs/2601.${String(id).padStart(5, '0')}</id><title>Paper ${id}</title>${body}<author><name>Author ${id}</name></author><published>2026-01-15T00:00:00Z</published></entry>`;
+  const result = await withFetch(
+    async () => xmlResponse(feed(2, [nod(1, '<summary>Real abstract one</summary>'), nod(2, '')])),
+    () => searchArxiv({ query: 'q', env: {} }),
+  );
+  assert.equal(result.status, 'ok');
+  if (result.data.kind !== 'entities') return assert.fail('expected entities');
+  assert.equal(result.data.entities.length, 2);
+  const rows = result.data.entities as unknown as Array<Record<string, unknown>>;
+  // Genuine abstract populated only because the feed carried a summary.
+  assert.equal(rows[0]!['abstract'], 'Real abstract one');
+  assert.equal(rows[0]!['snippet'], 'Real abstract one');
+  // No summary element: no abstract key, empty snippet — candidate-only downstream.
+  assert.ok(!('abstract' in rows[1]!) || rows[1]!['abstract'] === undefined);
 });

@@ -91,7 +91,7 @@ export async function searchWikidata(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${WIKIDATA_ENDPOINT}?${params}`, {}, request.signal);
+    payload = await fetchResearchJson(`${WIKIDATA_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     return buildAdapterEnvelope({
       request: req, source, backend, entities: [], invalid: 0,

@@ -131,7 +131,7 @@ export async function searchGdelt(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${GDELT_ENDPOINT}?${params}`, {}, request.signal);
+    payload = await fetchResearchJson(`${GDELT_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     if (request.signal?.aborted) throw request.signal.reason;
     return gdeltEnvelope(req, { error: httpOutcomeError(error as Error & { status?: number; kind?: string }) }, limit);

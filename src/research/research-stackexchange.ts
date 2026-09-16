@@ -164,7 +164,7 @@ export async function searchStackExchange(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${STACK_EXCHANGE_ENDPOINT}?${params}`, {}, request.signal);
+    payload = await fetchResearchJson(`${STACK_EXCHANGE_ENDPOINT}?${params}`, {}, request.signal, request.lookup);
   } catch (error) {
     if (request.signal?.aborted) throw request.signal.reason;
     return buildAdapterEnvelope({

@@ -45,11 +45,12 @@ async function resolveOpenAlexId(
   name: string,
   headers: Record<string, string>,
   signal?: AbortSignal,
+  lookup?: ResearchAdapterRequest['lookup'],
 ): Promise<{ found: true; id: string } | { found: false; error?: unknown }> {
   const params = new URLSearchParams({ search: name, per_page: '1' });
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`https://api.openalex.org/${resource}?${params}`, headers, signal);
+    payload = await fetchResearchJson(`https://api.openalex.org/${resource}?${params}`, headers, signal, lookup);
   } catch (error) {
     return { found: false, error };
   }
@@ -120,7 +121,7 @@ export async function searchOpenAlex(
     ['sources', venue, 'primary_location.source.id'],
   ] as const) {
     if (name === undefined) continue;
-    const resolved = await resolveOpenAlexId(resource, name, headers, request.signal);
+    const resolved = await resolveOpenAlexId(resource, name, headers, request.signal, request.lookup);
     if ('error' in resolved && resolved.error !== undefined) {
       return buildAdapterEnvelope({
         request: req, source, backend, entities: [], invalid: 0,
@@ -161,7 +162,7 @@ export async function searchOpenAlex(
 
   let payload: unknown;
   try {
-    payload = await fetchResearchJson(`${OPENALEX_ENDPOINT}?${params}`, headers, request.signal);
+    payload = await fetchResearchJson(`${OPENALEX_ENDPOINT}?${params}`, headers, request.signal, request.lookup);
   } catch (error) {
     return buildAdapterEnvelope({
       request: req, source, backend, entities: [], invalid: 0,
