@@ -489,6 +489,42 @@ test('dispose clears tracked cancel subscription after timeout', async () => {
   }
 });
 
+test('negotiated jsonSchema dialect surfaces via getNegotiatedCapabilities; garbage drops', async () => {
+  const runNegotiatedFlow = async (jsonSchema: unknown): Promise<import('../../src/runtime/runtime-rpc-protocol.js').ParsedNegotiateCapabilities> => {
+    const bus = new FakeBus();
+    bus.on(RUNTIME_RPC_REQUEST_EVENT, (raw) => {
+      const request = raw as { requestId: string; method: string };
+      const replyTo = runtimeRpcReplyEvent(request.requestId);
+      if (request.method === 'negotiate') {
+        bus.emit(replyTo, {
+          version: 1,
+          requestId: request.requestId,
+          method: 'negotiate',
+          success: true,
+          data: { compatible: true, modelId: MODEL, capabilities: { outputModes: ['text', 'json'], jsonSchema } },
+        });
+      } else if (request.method === 'start') {
+        bus.emit(replyTo, { version: 1, requestId: request.requestId, method: 'start', success: true, data: { runId: 'runtime_json1', state: 'running' } });
+      } else if (request.method === 'status') {
+        bus.emit(replyTo, { version: 1, requestId: request.requestId, method: 'status', success: true, data: { runId: 'runtime_json1', state: 'completed', startedAt: 1, updatedAt: 2 } });
+      } else if (request.method === 'result') {
+        bus.emit(replyTo, { version: 1, requestId: request.requestId, method: 'result', success: true, data: { runId: 'runtime_json1', state: 'completed', output: 'ok', outputTokens: 1, truncated: false } });
+      }
+    });
+    const client = new LeafRuntimeClient({ events: bus, modelId: MODEL, pollIntervalMs: 5 });
+    try {
+      await client.runLeaf('hello', { timeoutMs: 10_000 });
+      return client.getNegotiatedCapabilities();
+    } finally {
+      client.dispose();
+    }
+  };
+  assert.deepEqual((await runNegotiatedFlow('structured-v1')).jsonSchema, 'structured-v1');
+  assert.deepEqual((await runNegotiatedFlow('flat-v1')).jsonSchema, 'flat-v1');
+  assert.deepEqual((await runNegotiatedFlow(undefined)).jsonSchema, undefined);
+  assert.deepEqual((await runNegotiatedFlow('structured-v2')).jsonSchema, undefined);
+});
+
 test('runLeaf forwards outputSchema in start params', async () => {
   const bus = new FakeBus();
   stubServer(bus);

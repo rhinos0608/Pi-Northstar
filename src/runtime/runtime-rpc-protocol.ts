@@ -126,6 +126,13 @@ export interface RuntimeCorrelationV2Capability {
   roles: readonly string[];
 }
 
+/**
+ * Negotiated JSON-schema dialect, wire-mirrored verbatim from pi-subagents
+ * src/api/runtime-rpc.ts. flat-v1 = flat-primitive-only validator semantics;
+ * structured-v1 = bounded nested subset. Absent = pre-dialect runtime.
+ */
+export type RuntimeJsonSchemaDialect = 'flat-v1' | 'structured-v1';
+
 export interface RuntimeCapabilitiesV1 {
   boundedCancellationSettlement: true;
   leafOnlyExecution: true;
@@ -138,6 +145,7 @@ export interface RuntimeCapabilitiesV1 {
   maxOutputTokens: number;
   outputModes: readonly RuntimeOutputMode[];
   correlationV2?: RuntimeCorrelationV2Capability;
+  jsonSchema?: RuntimeJsonSchemaDialect;
 }
 
 export interface RuntimeNegotiateOk {
@@ -702,10 +710,15 @@ export function validateReadyPayload(raw: unknown): ReadyValidation {
   return { ok: true, value: { version: 1, protocol: RUNTIME_RPC_PROTOCOL, methods: [...RUNTIME_RPC_METHODS] } };
 }
 
-/** Negotiate-reply consumer view: parsed output modes + optional v2 capability. */
+/**
+ * Negotiate-reply consumer view: parsed output modes + optional v2
+ * capability + optional JSON-schema dialect (wire-mirrored verbatim from
+ * pi-subagents src/api/runtime-rpc.ts).
+ */
 export interface ParsedNegotiateCapabilities {
   outputModes: RuntimeOutputMode[];
   correlationV2?: RuntimeCorrelationV2Capability;
+  jsonSchema?: RuntimeJsonSchemaDialect;
 }
 
 function parseOutputModes(value: unknown): RuntimeOutputMode[] {
@@ -740,9 +753,19 @@ function parseCorrelationV2Capability(value: unknown): RuntimeCorrelationV2Capab
 }
 
 /**
+ * Parse the wire-mirrored jsonSchema dialect: only the two literal values
+ * are accepted; anything else is treated as absent (conservative).
+ */
+function parseJsonSchemaDialect(value: unknown): RuntimeJsonSchemaDialect | undefined {
+  if (value === 'flat-v1' || value === 'structured-v1') return value;
+  return undefined;
+}
+
+/**
  * Parse negotiate reply data into consumer capabilities. Unknown/missing
  * fields drop (never throw): absence means v1-only — compose v1 forever.
  * outputModes uses membership checks so future modes stay forward-compatible.
+ * Unknown jsonSchema values drop (treated as absent, conservative).
  */
 export function parseNegotiateCapabilities(data: unknown): ParsedNegotiateCapabilities {
   if (!isRecord(data)) return { outputModes: [] };
@@ -750,5 +773,10 @@ export function parseNegotiateCapabilities(data: unknown): ParsedNegotiateCapabi
   const outputModes = capabilities !== undefined ? parseOutputModes(capabilities.outputModes) : [];
   const correlationV2 =
     capabilities !== undefined ? parseCorrelationV2Capability(capabilities.correlationV2) : undefined;
-  return correlationV2 !== undefined ? { outputModes, correlationV2 } : { outputModes };
+  const jsonSchema = capabilities !== undefined ? parseJsonSchemaDialect(capabilities.jsonSchema) : undefined;
+  return {
+    outputModes,
+    ...(correlationV2 !== undefined ? { correlationV2 } : {}),
+    ...(jsonSchema !== undefined ? { jsonSchema } : {}),
+  };
 }

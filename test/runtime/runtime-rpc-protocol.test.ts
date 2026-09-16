@@ -207,3 +207,27 @@ test('parseNegotiateCapabilities: absent means v1-only; present surfaces modes +
   );
   assert.deepEqual(parseNegotiateCapabilities({ capabilities: { correlationV2: { ownerPattern: '([', roles: ['researcher'] } } }), { outputModes: [] });
 });
+
+test('parseNegotiateCapabilities: jsonSchema dialect valid/absent/invalid', async () => {
+  const protocol = await import('../../src/runtime/runtime-rpc-protocol.js');
+  const { parseNegotiateCapabilities } = protocol;
+  // Valid literals surface verbatim.
+  for (const jsonSchema of ['flat-v1', 'structured-v1']) {
+    assert.deepEqual(
+      parseNegotiateCapabilities({ compatible: true, capabilities: { outputModes: ['text', 'json'], jsonSchema } }),
+      { outputModes: ['text', 'json'], jsonSchema },
+    );
+  }
+  // Absent stays absent (pre-dialect runtime).
+  assert.deepEqual(parseNegotiateCapabilities({ compatible: true, capabilities: { outputModes: ['text', 'json'] } }), {
+    outputModes: ['text', 'json'],
+  });
+  // Invalid values drop (conservative): never throw, never surface.
+  for (const jsonSchema of ['structured-v2', 'STRUCTURED-V1', '', 1, null, { dialect: 'structured-v1' }]) {
+    assert.deepEqual(
+      parseNegotiateCapabilities({ compatible: true, capabilities: { outputModes: ['text', 'json'], jsonSchema } }),
+      { outputModes: ['text', 'json'] },
+      `invalid jsonSchema ${JSON.stringify(jsonSchema)} must drop`,
+    );
+  }
+});

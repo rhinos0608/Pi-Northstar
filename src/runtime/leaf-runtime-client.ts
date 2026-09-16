@@ -166,9 +166,10 @@ export class LeafRuntimeClient {
   }
 
   /**
-   * Last negotiated leaf capabilities (outputModes + optional correlationV2).
-   * Empty outputModes means v1-only/text: consumers gate json mode and v2
-   * compose on these values, never on assumptions. Defensive copy.
+   * Last negotiated leaf capabilities (outputModes + optional correlationV2
+   * + optional jsonSchema dialect). Empty outputModes and absent jsonSchema
+   * mean v1-only/text: consumers gate wire-schema attachment and v2 compose
+   * on these values, never on assumptions. Defensive copy.
    */
   getNegotiatedCapabilities(): ParsedNegotiateCapabilities {
     return {
@@ -181,6 +182,7 @@ export class LeafRuntimeClient {
             },
           }
         : {}),
+      ...(this.negotiated.jsonSchema !== undefined ? { jsonSchema: this.negotiated.jsonSchema } : {}),
     };
   }
 
