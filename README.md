@@ -1,825 +1,454 @@
-# Pi-Northstar
+# Pi‑Northstar
 
-Pi extension that gives your agent real-world reach — web_search, fetch, github, social, kg/graph, browser, desktop, and agent_poll, with fused multi-provider search, 12-source academic research, agent reports, and opt-in media/vision acquisition. Zero-config works out of the box; API keys unlock more power.
+> **Give Pi a bounded path from question → evidence → action.**
 
-Underneath the nine tools is a small set of shared services — result fusion/ranking, layered config loading, a backend abstraction with ordered fallback, and a reliability envelope around browser and desktop mutations. Each tool is a thin adapter over these services; see [Architecture](#architecture) for what's actually worth evaluating here.
+Pi‑Northstar is a research and computer-use extension for Pi. It combines fused web search, exact-source research, evidence-first agent jobs, GitHub acquisition, social reads, knowledge graphs, browser automation, desktop control, and opt-in media/vision behind a deliberately small model-facing surface.
 
-## Architecture
+**Nine public tools maximum. Provider choice stays operator-owned. External content stays evidence, never authority.**
 
-### Shared services
+`Node 24+` · `MIT` · `Pi extension` · `zero-config web search`
 
-| Service | File(s) | What it does |
-|---|---|---|
-| **Fusion & ranking** | `src/fusion.ts`, `src/bm25.ts`, `src/vector-index.ts` | Reciprocal rank fusion (RRF) merges rankings from multiple search backends, or from BM25 + embedding scoring in `fetch`; URL normalization dedupes across providers before fusion. |
-| **Config loading** | `src/local-config.ts` | Merges process env, a package-local `.env` file, and an optional JSON config into one environment — process env always wins, so shell exports override everything. |
-| **Backend abstraction & fallback** | `src/backend.ts`, `src/cli-backend.ts`, `src/mcp-client.ts` | `SearchBackend` is one interface with two implementations (native CLI, default; legacy MCP client). Dispatch paths run single-attempt with ordered fallback, never automatic retry (the former `retryWithBackoff` helper in `src/retry.ts` had no production callers and was removed). |
-| **Reliability envelope — browser** | `src/browser-result.ts`, `src/session-page-state.ts`, `src/click-verification.ts`, `src/scroll-verification.ts`, `src/overlay-detection.ts` | Every result carries a structured `resultCategory`/`failureCategory`/`nextActions`; stale `@eN` refs are rejected before they reach the CLI; clicks are verified with a DOM event probe; scrolls and overlay appearances are diffed pre/post action. |
-| **Reliability envelope — desktop** | `src/desktop-contract.ts`, `src/desktop-policy.ts` | Accessibility trees are depth/node/screenshot-byte capped and redacted; mutations require a fresh `stateId` from the most recent observation and are never blindly retried after dispatch. |
-| **Output guarding** | `src/tool-output.ts` | Every tool result is truncated to a configurable character budget before it reaches the model, with head/tail preservation and a truncation marker. |
+## Why Northstar
 
-### Thin adapters (the nine tools)
-
-Nine is enforced ceiling: `MAX_PUBLIC_TOOLS = 9` in `src/capabilities.ts`, fail-closed via `assertPublicToolBudget` on every `pi.registerTool` call. Registered surface includes `web_search`, `fetch`, always-registered `agent_poll`, optional `desktop`, `github`, and expansion tools `social`, optional `kg`, `graph`, and `browser`. YouTube/Bilibili/RSS remain `media`-family acquisition backends (`publicTool: 'internal-acquisition'` in `src/capabilities.ts`): callable through CLI/native dispatch and internal fetch URL routing, but not through a `pi.registerTool` model-tool entry.
-
-Each public tool validates input, calls into the shared services above, and shapes the result for the model. Adding a search provider or social platform is a fetch call plus a descriptor entry, not a new pipeline.
-
-## What you get
-
-| Tool | What it does |
+| | What you get |
 |---|---|
-| `web_search` | Canonical action `search`. Plain web search takes `limit` 1–20; `category: "research"` takes `limit` 1–30 and dispatches the 12 exact research sources below (`source: "all"` fans out over all). `category: "video"` is provider-neutral pass-through: `CATEGORY_HINTS` has no video entry, so normal provider dispatch receives the query unchanged; no dedicated video provider is selected. For actual YouTube/Bilibili metadata, subtitles, or transcripts, native URL fetch recognizes media URLs and routes to the internal media backends (see `media`). Exactly one of `query` or `queries[1..8]`: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional `includeContent`/`recency`/`domains` refine plain search; `yearFrom` is honored everywhere and intersects with `recency` (later bound wins). Cursors are single-query research-only. `mode: "agent"` creates a parent-owned agent job and returns a job pointer — poll it with `agent_poll` for the byte-stable snapshot (single query only; incompatible with `knowledge` and research/academic categories; report text is untrusted evidence). The standalone report leg streams one opaque Tavily Research POST inside job execution (provider identity never leaves the module); when a leaf runtime is negotiated the report leg runs there instead with opaque fallback — see [Leaf-runtime RPC](#leaf-runtime-rpc-agent-mode-agent-report-leg). No provider selection input: backends are operator-owned (`PI_SEARCH_WEB_BACKENDS`). Results are normalized `article` entities with fusion details — no raw backend passthrough. Out-of-range input is rejected, never silently clamped. |
-| `fetch` | Mode-free five-branch presence union (matches the registered schema in `src/index.ts:411` + `src/web/web-fetch-route.ts`; legacy `mode`/`action`/`source`/`searchQuery`/`followLinks`/`maxDepth` keys reject before dispatch): `{url, query?, topK?, maxChars?}` single-URL read (`query` ranks via the read-query path); `{urls[1..8], query?, topK?, maxChars?}` per-URL reads in input order with per-URL isolation; `{url, siteMap:true, query?, maxPages?}` discovered same-origin URLs (`topK`/`maxChars` rejected on this branch); `{responseId, sourceIds?, offset?, limit?, findText?}` cached-corpus slice only, no network; `{responseId, claims[1..20], sourceIds?}` cached claim verification only, no network. `topK` ≤ 20; `maxChars` ≤ 50000; `maxPages` ≤ 25 (sitemap only). HTTP(S)/GitHub-asset URLs only. Out-of-range input is rejected, never silently clamped. |
-| `github` | Canonical actions `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits`, `workflows`, `runs` (REST API only — GraphQL not offered). `workflows`/`runs` are GitHub Actions, read-only (no dispatch/trigger). `GITHUB_TOKEN` or `GH_TOKEN` optional for public reads (harder rate limits without a token); unauthenticated `/search/code` is heavily rate-limited. `list_dir` and `code_search` legacy spellings rejected, never clamped. Results are normalized entities. `repo`/`tree` are clone-first with REST fallback (see clone-backend paragraph below); every other action is REST-only. |\n| `media` (CLI/native) | Not a registered model tool. `callNativeTool()` dispatches `media` through `callReachTool()`; CLI callers can use `npm run cli -- call media ...`, and internal fetch routing sends recognized media URLs to `video`/`feeds`. Backends provide YouTube and Bilibili metadata/search/details/subtitles/transcripts plus RSS/Atom feed reading, subject to each channel's capability and credentials. |
-| `social` | Read-only lookup over canonical actions only (unknown/legacy spellings rejected before dispatch). Available: Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram (no verified post-detail adapter, no download; `get_post`/`get_thread`/`get_comments` unadvertised on Instagram), LinkedIn (read actions via verified OpenCLI Chrome session). Xueqiu/Xiaoyuzhou are absent — not available or planned providers. |
-| `agent_poll` | Polls a parent-owned agent job created by `web_search` `mode: "agent"`. Params `{jobId, owner?}` — returns the byte-stable canonical snapshot (`running`/`ready`/`failed`); unknown, expired, and foreign-owner jobIds all close identically with a static pointer (never lists jobs, never leaks other owners' jobs). Always registered, startup-side, alongside the other eight tools. |
-| `kg` | Diffbot knowledge graph — `search` (entity-returning DQL), `enhance` (Person/Organization enrichment), `analyze_text` (structure from text you hold consent to share). Enters model context only when `DIFFBOT_TOKEN` is set; without it the schema is absent, not an erroring stub (see below). |
-| `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. While `/chrome authorize` grants are live, the same `browser` tool routes allowlisted actions to the user-Chromium companion over the pinned bridge (`PI_SEARCH_CHROME_EXTENSION_ID`, 127.0.0.1:17319); revoke/expiry returns to the isolated backend. |
-| `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
-| `graph` | Native graph access: `query` executes provider-native DQL (`language: 'dql'`, `pageSize` 1..100 default 10, opaque cursor) or SPARQL SELECT/ASK (`language: 'sparql'`, one bounded response, no cursor) with provider-faithful JSON plus shape (`rows`/`facets`/`aggregate`/`scalar`/`object`); `probe` checks cardinality of countable queries; `schema` discovers ontology types/fields (DQL uses 24-hour cache, stale fallback marked `partial`). Registers when `DIFFBOT_TOKEN` or `GRAPH_SPARQL_ENDPOINT` is set (see below); `kg` stays Diffbot-only. |
-
-### Knowledge graph tools (DIFFBOT_TOKEN-gated)
-
-`kg` enters model context only when `DIFFBOT_TOKEN` is set; `graph` enters when `DIFFBOT_TOKEN` or `GRAPH_SPARQL_ENDPOINT` is set — without their credential their schemas are absent (not erroring stubs). Auth resolution: explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only when all three omit it does runtime fall back to a login-shell lookup, which fails closed and never logs the token. See `.env.example` for spend caps (`DIFFBOT_SEARCH_SIZE`, `DIFFBOT_ENHANCE_SIZE`, `DIFFBOT_FALLBACK_BUDGET`) and SPARQL keys.
-
-```ts
-kg({ request: { action: 'search', language: 'dql', query: 'type:Person name:"Ada Lovelace"' } })
-kg({ request: { action: 'enhance', type: 'Organization', name: 'Acme', fields: 'basic' } })
-graph({ action: 'query', language: 'dql', query: 'type:Organization name:"Acme"' })
-graph({ action: 'schema', language: 'dql', view: 'types' })
-```
-
-Every paid call spends Diffbot credit; read [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing) before enabling.
-
-#### SPARQL graph access (operator endpoint, no Diffbot needed)
-
-Set `GRAPH_SPARQL_ENDPOINT` (http/https URL, no embedded credentials) plus optional `GRAPH_SPARQL_TOKEN` bearer auth to register `graph` with `language: 'sparql'`. Query supports SELECT/ASK only — SERVICE federation, dataset (FROM/FROM NAMED) clauses, and update forms reject before dispatch. The endpoint is operator config, never model input; redirects reject, the token travels via `Authorization` header only and is redacted from errors, and status output exposes the endpoint host only, never the token. Example: `graph({action:'query',language:'sparql',query:'SELECT * WHERE { ?s ?p ?o } LIMIT 10'})`.
-
-#### Search-attempt ledger (session memory)
-
-One in-memory ledger per extension instance (max 128 entries) coalesces in-flight duplicate searches, suppresses recent order-sensitive near-duplicates of successful searches for 30 minutes (same tokens in a different order still run), and blocks repeated failures for 10 minutes (non-retryable failures block immediately; retryable ones allow one retry). Cursor continuations bypass it, aborts never record a failure, and it stores only query hashes plus safe filter options — never result bodies, errors, or secrets. Suppressed/blocked calls return a short static pointer instead of re-dispatching.
-
-### Research sources (exact-source guarantee)
-
-Research exposes a single canonical action, `search`, over exactly 12 sources —
-there is never DuckDuckGo/generic-web substitution: `semantic_scholar`,
-`openalex`, `pubmed`, `stackoverflow`, `datacite`, `ror`, `gdelt`, `wikipedia`,
-`wikidata`, `arxiv`, `crossref`, `hackernews` (`source: "all"` fans out over
-all in registry order). Unsupported or unknown sources return an explicit safe
-error instead of substituted results. `yearFrom` is the only model-facing filter (`web_search` param, honored on plain search and intersecting with `recency`); `yearTo`/`author`/`doi`/`venue` are research-backend capabilities, not `web_search` params. An unsupported filter
-surfaces per-source rather than being silently dropped. `source` is research-only; `yearFrom` is honored on plain search and intersects with `recency` (later bound wins). Results carry a
-canonical `details.northstar` envelope (schema `pi-northstar.result` v1)
-beside the legacy `{query, source, results}` fields; per-source failures
-surface as `partial`/`error` status with `errors[]`, not silent empty results.
-Continuation `cursor` values are opaque, bound to one exact source + query +
-`yearFrom` (max 4096 chars), rejected for `source: "all"` and non-research
-categories, and never store provider URLs. `source: "all"` does not support
-pagination; a pinned source whose page is valid-empty stops cleanly with no
-further selection.
-
-### Platform terms, authorization, and routing
-
-Reddit and YouTube tool paths run only official, keyless, and degraded
-capability-declared backends — there is no generic web/archive fallback tier.
-Please read this before using cookie-based paths:
-
-- **Terms of service.** Reddit and YouTube prohibit unauthorized automated
-  access/scraping; neither platform's terms permit scraping merely because a
-  logged-in session or cookie is used. Using `social`/`media` in a way that
-  bypasses official APIs, or replaying session cookies, may violate those
-  terms and can lead to account locks, IP blocks, or other enforcement.
-- **Session cookies are bearer credentials.** A stored or exported Reddit
-  cookie can fully impersonate the logged-in account. Pi-Northstar only sends
-  cookies to fixed canonical Reddit hosts, rejects redirects, filters stored
-  cookies by host/path/expiry/secure, and never forwards cookies to external
-  CLIs, archives, search children, or scrapers — but **you** are responsible
-  for what you paste into `REDDIT_COOKIE` and for protecting cookie state
-  (`~/.pi-northstar/cookies/`, stored plaintext with `0600` perms).
-  Use throwaway/dedicated accounts for any cookie-based fallback.
-- **No web fallback tier.** There is no `PI_SEARCH_PLATFORM_WEB_FALLBACK`
-  behavior: YouTube `search`/`hot` require `YOUTUBE_API_KEY`, and `details`
-  falls back only to keyless oEmbed (limited fields, details-only — see media
-  ordering below). The social path has no archive or generic web fallback —
-  only capability-declared backends run. Cookie ingestion/login happen only
-  through explicit `/reach-setup import_cookies <provider>` or
-  `/reach-setup login <provider>`; first start and bare `/reach-setup auto`
-  never import cookies, and no environment variable triggers cookie import.
-  `/reach-setup import_cookies <provider>` remains the per-provider consent
-  path, and `PI_SEARCH_BROWSER_AUTOMATION=0` remains the kill switch for
-  explicit import/login. Xueqiu/Xiaoyuzhou are absent — not available or
-  planned providers — and LinkedIn is available via its verified OpenCLI read
-  backend, which authenticates through its own Chrome session and never
-  imports stored cookies.
-
-### Canonical social surface (Stage 2)
-
-`social` is canonical-only and read-only in practice. Registry (`src/capabilities.ts` +
-`src/social-contract.ts`) is source of truth for platforms, actions, and
-backends; unknown/legacy spellings (read/post/subreddit/note/topic/...) throw
-`unsupported_action` before dispatch. No archive or generic web fallback runs
-in the social path — only capability-declared backends run.
-
-- **Platforms:** Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram,
-  LinkedIn available (LinkedIn read actions via verified OpenCLI Chrome
-  session). Xueqiu/Xiaoyuzhou are absent — not available or planned.
-- **Canonical actions per platform:**
-  - twitter: search, get_post, get_thread, get_comments, get_comment_replies,
-    get_profile, get_user_posts, get_followers, get_following, get_feed,
-    get_trending, get_saved, get_notifications
-  - reddit: search, get_post, get_thread, get_comments, get_comment_replies,
-    get_profile, get_user_posts, get_user_comments, get_feed, get_trending,
-    get_saved, get_community, get_community_posts
-  - xiaohongshu: search, get_post, get_comments, get_profile, get_user_posts,
-    get_followers, get_following, get_feed, get_saved, get_notifications
-  - facebook: search, get_profile, get_feed, get_notifications, get_community
-  - instagram: search, get_profile, get_user_posts, get_followers,
-    get_following, get_trending, get_saved (no verified post-detail adapter;
-    no post read, no download, no mutation)
-  - v2ex: get_topic, get_thread, get_comments, get_profile, get_trending,
-    get_community, get_community_posts, get_notifications
-  - linkedin: search, get_profile, get_user_posts, get_feed
-- **Normalized envelopes:** results render from validated `social_*` entities
-  only and carry additive `details.northstar` (schema `pi-northstar.result`
-  v1, entities + pagination + per-source status). `content` never renders raw
-  backend payloads.
-- **Routing:** scoped cookie-jar/session first when action completeness is
-  equal, anonymous/keyless before optional API keys otherwise; cursor-capable
-  preferred; platform preference breaks ties; cursors pin backend (no
-  switching). `/reach-status [family] [action]` reports capability-aware
-  eligibility, active backend, and usability for the requested action.
-- **Auth is opt-in and live behavior unverified:** cookie ingestion/login only
-  through explicit `/reach-setup import_cookies <provider> [endpoint]` or
-  `/reach-setup login <provider> [port]` — never startup or env auto-import.
-  Startup and bare-auto never import cookies; no environment variable triggers
-  cookie import. `PI_SEARCH_BROWSER_AUTOMATION=0` remains
-  the kill switch for explicit import/login. Explicit Pi cookie import/login
-  supports only the current genuine consumers Reddit, Bilibili, and YouTube.
-  Twitter, Xiaohongshu, Facebook, Instagram, and LinkedIn use their
-  CLI/OpenCLI-owned
-  authenticated sessions and therefore are not Pi cookie-import targets;
-  TWITTER_AUTH_TOKEN/TWITTER_CT0 and imported Twitter/Xiaohongshu cookies do
-  not configure active Stage 2 reads. Live authenticated reads remain opt-in and
-  unverified — confirm via `/reach-status social <action>` and tool behavior,
-  never assume a provider is unlocked.
-- **Write boundary (deny-by-default, Stage 8):** `social` remains read-only in practice — no provider currently supports writes, and no write capability is available in this release. Gate lives in `src/social-write-policy.ts` / `src/social-write-contract.ts`: `PI_SEARCH_SOCIAL_WRITE` kill switch defaults off (only the exact string `'1'` enables), the per-provider write allowlist is empty, and every write-shaped request returns a denied result or a dry-run preview with zero side effects. Future adapters (OpenCLI session CLIs) require upstream verification before any action is allowlisted. Permanently forbidden: downloads, archives, destructive actions (delete/follow-at-scale), generic-web substitution. Any future write path stays user-initiated only, like explicit `/reach-setup import_cookies` / `login` — never startup/env auto.
-
-Source ordering, YouTube (`media`):
-
-1. Official YouTube Data API v3 when `YOUTUBE_API_KEY` is set (`search`,
-   `details`, `hot` — captions endpoints are OAuth-only, so the Data API
-   never serves `transcript`).
-2. Keyless `www.youtube.com/oembed` for `details` only (limited fields:
-   title, author, thumbnail — never used for `search` or `hot`).
-3. Keyless unofficial `youtube-transcript` backend for `transcript` only
-   (watch-page + timedtext adapter; degraded, may break without notice).
-`search`/`hot` without a key fail closed with an explicit error — there is no
-web-search/web-fetch fallback tier. `details` tries the Data API first when `YOUTUBE_API_KEY` is set; keyless oEmbed runs only when keyless or after Data API failure; when both are unavailable it
-fails closed.
-
-YouTube `transcript` is served only by the unofficial keyless adapter above;
-stored YouTube cookies (via explicit `/reach-setup import_cookies youtube`)
-can be attached to the watch-page fetch for consent-gated videos. Pi-Northstar
-uses no third-party transcript services, never routes automatic calls to
-`yt-dlp`, and never scrapes transcripts outside this adapter. An **OAuth management dashboard**
-for these services is future, deferred work — this release adds no dashboard,
-redirect endpoint, token storage, schema field, or tool.
-
-### Reddit and YouTube examples
-
-```ts
-social({ platform: 'reddit', action: 'search', query: 'self-hosting', limit: 10 })
-social({ platform: 'reddit', action: 'get_post', url: 'https://www.reddit.com/r/example/comments/POST_ID/' })
-
-npm run cli -- call media '{"platform":"youtube","action":"search","query":"WebAssembly GC"}' # requires YOUTUBE_API_KEY; no web fallback
-npm run cli -- call media '{"platform":"youtube","action":"details","url":"https://youtu.be/VIDEO_ID"}' # Data API first; keyless oEmbed fallback for details
-npm run cli -- call media '{"platform":"youtube","action":"hot"}' # requires YOUTUBE_API_KEY; no web fallback
-npm run cli -- call media '{"platform":"youtube","action":"transcript","url":"https://youtu.be/VIDEO_ID"}' # keyless unofficial adapter; may break; never yt-dlp
-```
-
-Inspect `details.backend` and `details.northstar`: social results carry the
-normalized `pi-northstar.result` envelope with validated entities. YouTube
-results report `youtube-data-api` (full), `youtube-oembed` (degraded,
-details-only, limited fields), or `youtube-transcript` (degraded,
-transcript-only, unofficial).
-
-## Diffbot privacy warning (read before installing)
-
-Setting `DIFFBOT_TOKEN` routes paid traffic to Diffbot endpoints. Read this before installing or enabling.
-
-- **External transmission.** Queries, page URLs, enhancement selectors, and `analyze_text` input text are sent to Diffbot over HTTPS: `llm.diffbot.com` (web search, Bearer auth), `kg.diffbot.com` (DQL search, Enhance, `?token=`), `nl.diffbot.com` (`analyze_text` POST, `?token=`), `api.diffbot.com` (Analyze-GET page fallback, `?token=`). Do not submit text you are not authorized to share.
-- **Sensitive selectors supported — you control them.** `enhance` accepts `email`/`phone` selectors when you supply them; they are transmitted as given. Submit only selectors you hold consent to process.
-- **NLP authorization guidance (advisory).** `analyze_text` (1–100000 chars, rejected outside, never clamped) can extract entities, facts, sentiment, and topics — including email/phone. Obtain user authorization before submitting sensitive text. This guidance is documented, not enforced in code.
-- **Advisory limitation.** `kg` output is framed as untrusted evidence; consent and safety notes are advisory and never authorize actions or secret access. Without `DIFFBOT_TOKEN` nothing changes: unconfigured backends are skipped silently.
-- **No logs/cache.** Token never logged; no response persistence or disk cache. Token and sensitive selectors (email/phone) redacted from errors (500-char slice). Token reaches only the in-repo Node CLI worker (`src/cli.ts` via `buildCliEnvironment`); never third-party CLIs, MCP servers, or Python children.
-- **Credit/spend controls.** Every paid call spends Diffbot credit; no automatic paid retries (retryable transport 5xx/timeout only) and no account quota probe — monitor spend in the Diffbot dashboard. `DIFFBOT_FALLBACK_BUDGET` (default 3, max 25 per fetch, 0 disables) is enforced on the Analyze fallback path and rejects out-of-range, never clamps. Operator limits are defaults/caps consumed on every `kg` call: `DIFFBOT_SEARCH_SIZE` (default 10, cap 50 per provider), `DIFFBOT_ENHANCE_SIZE` (default 1, cap 10 per provider), `DIFFBOT_NLP_MAX_CHARS` (100000 hard cap), `DIFFBOT_MAX_PROVIDERS` (default 3, cap 8). `resolveDiffbotSpend` validates once per call and rejects out-of-range before any paid call, never clamps. See `.env.example`.
-
-### What Diffbot adds
-
-- `web_search`: Diffbot joins as one more backend (`name: 'diffbot'`, source label `diffbot`); results enter RRF fusion, never primary-weighted. Request schemas unchanged.
-- `fetch`: Analyze-GET (`fields=allContent,links`) is recoverable fallback only after native/Scrapling exhaustion (network/upstream/blocked/timeout/empty); never on policy/input/abort/size/security/contract failures. Target URL validated first. Success marks envelope `degraded` (execution-path only, `qualityImpact: 'not_assessed'`).
-- `kg` tool (new, lowercase): actions `search` (entity-returning DQL, `language: 'dql'` fixed; facet/report/export/collection/crawl modes return `unsupported_option`), `enhance` (type `Person`/`Organization` + at least one selector from `id`/`name`/`url`/`email`/`phone`/`location`/`description`, plus Person-only `employer`/`title`/`school`; portable `fields`/`maxEntities`/`includeRelationships`/`includeEvidence`/`confidenceThreshold`), `analyze_text` (booleans `extractEntities`/`extractFacts`/`extractSentiment`/`extractTopics`, `language` ISO 639-1 or `auto`; mention spans bounds-checked, invalid dropped). `enhance` applies Atlas-owned `fields` projection (`basic`/`contact`/`professional`/`all`), explicit relationship predicates only (`includeRelationships: false` suppresses them, never invents), per-entity evidence statuses (`provided`/`not_requested`/`provider_unsupported`/`unavailable`), and confidence filtering that retains rows with missing confidence. Output carries aligned groups, claims, and conflicts with provider trace tags and no raw upstream payload. Output envelope `pi-northstar.knowledge-result` v1 (`ok`/`empty`/`partial`/`degraded`/`error`). Error codes: `invalid_input`, `unsupported_option`, `cursor_invalid`, `pagination_not_supported`, `transport_invalid_response`, `contract_invalid_response`, `semantic_invalid_response`, `invalid_entity`, `response_too_large`, `upstream_error`. Opaque cursors (single-provider only; explicit multi-provider fanout returns one bounded page, no cursor). Routing: providers omitted → highest-priority capable configured provider with sequential fallback on recoverable transport/contract/semantic failures only, never same-provider paid retry; explicit providers → concurrent with per-provider `unsupported_option` partitions, never silently skipped. Non-goals (excluded): account, crawl, bulk, bulk enhance, facets, reports, exports, collections, persistence/cache, adjudication, provider-native options, enhance `refresh`.
-- `graph` tool: actions `query` (`language: 'dql'` fixed, `pageSize` 1..100 default 10 sizes one transport page without rewriting query text, opaque cursor bound to query/pageSize), `probe` (1..32 countable queries, per-query `hits`, partial failures preserved), `schema` (`types`/`fields`/`search`/`describe`, no refresh control). Output envelope `pi-northstar.graph-result` v1 (`ok`/`empty`/`partial`/`error`) with provider provenance in `source`. Provider selection is internal (no `provider` input). `kg` stays the portable entity abstraction and is unchanged. Examples: `graph({action:'query',language:'dql',query:'type:Organization name:"Acme"'})`, `graph({action:'probe',language:'dql',queries:['type:Person name:"Ada"']})`, `graph({action:'schema',language:'dql',view:'types'})`. Diffbot receives DQL/schema requests when configured; no hidden calls, retries, exports, or control-plane operations. Non-goals: crawl/jobs, Ask, exports, provider-branded tools.
-- Status: native adapters landed (`src/diffbot-transport.ts`, `src/diffbot-search.ts`, `src/diffbot-extract.ts`, `src/diffbot-kg.ts`, `src/knowledge-contract.ts`); `web_search`/`kg`/registry wiring registered. No behavior without `DIFFBOT_TOKEN`.
-- Canonical docs: [overview](https://www.diffbot.com/docs/) · [authentication](https://www.diffbot.com/docs/authentication) · [Extract/Analyze](https://www.diffbot.com/docs/extract/article) · [DQL](https://www.diffbot.com/docs/dql/post) · [Enhance](https://www.diffbot.com/docs/enhance/post) · [Web Search](https://www.diffbot.com/docs/web-search/post) · [NL process text](https://www.diffbot.com/docs/natural-language/process-text).
-
-## Vision / multimodal privacy warning (read before enabling)
-
-Image/PDF/video understanding sends content off-machine. Read this before setting any `PI_VISION_*`, `GEMINI_*`, `GOOGLE_*`, or Vertex vision variable.
-
-- **What leaves the machine.** Every vision call sends the admitted image/PDF/video bytes plus the OCR/description text derived from them to the operator-configured destination: the `PI_VISION_OPENAI_COMPAT_BASE_URL` endpoint (loopback or cloud; requires at least one exact model ID in `PI_VISION_OPENAI_COMPAT_MODEL`), Google Gemini (requires the exact opt-in `PI_VISION_GEMINI_ENABLED=1` plus `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` Developer API or `GOOGLE_VERTEX_PROJECT` / `GOOGLE_CLOUD_PROJECT` Vertex), or the Gemini web session (`PI_VISION_GEMINI_WEB_ENABLED=1`). Do not submit content you are not authorized to share.
-- **Explicit opt-in only.** Nothing leaves the machine until the operator configures a destination: unconfigured tiers are skipped and pipelines degrade to native evidence with warnings. Every gate is the exact value `'1'` — absent or any other value is off. `gemini-web` is additionally last resort, and `vision-private-gate` behind `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`.
-- **Private GitHub content needs the independent flag.** Public transfer is authorized by configuring the destination endpoint/credential, but private or authenticated GitHub content additionally requires the exact value `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`. Without it, private content never reaches any cloud vision endpoint — calls degrade to native evidence with warnings.
-- **Synthetic probe first.** Each exact model ID is probe-gated with a tiny randomized synthetic image (shape + color drawn fresh per call and kept out of the prompt) before any user content is sent; the answer passes only when it names exactly the expected shape and exactly the expected color — enumerating the vocabulary fails. Text-only / non-vision models reject fail-closed and never receive user bytes.
-- **Policy/auth failure never broadens eligibility.** A failure drops the failed tier (fail-closed subset); it never unlocks a tier the operator did not configure. One configured destination never authorizes another (per-destination transfer check).
-
-### `media` channels vs `src/media-vision/` — two distinct things, don't conflate them
-
-- **`media`-family acquisition backends** (`src/media/media.ts`, `src/capabilities.ts` media family: YouTube/Bilibili/RSS) fetch platform metadata, subtitles, and feeds. They have no public tool surface (`publicTool: 'internal-acquisition'`) and never send content to vision endpoints.
-- **`src/media-vision/` multimodal pipeline** (`pipeline-image.ts`, `pipeline-pdf.ts`, `pipeline-video.ts`, `probe.ts`, `eligibility.ts`, `transfer-policy.ts`) is what understands image/PDF/video bytes — gated by the transfer policy and synthetic probe above, with per-destination opt-in. It is the only path that transmits content off-machine.
+| **Search that can disagree with itself** | Multiple providers run concurrently and merge through deterministic reciprocal-rank fusion instead of pretending one backend is the internet. |
+| **Research with source identity intact** | 12 exact academic/public-data sources, deterministic fanout, source-bound cursors, and no silent fallback to generic web. |
+| **Agent research with a code-owned spine** | `PLAN → GATHER → EVALUATE → REFINE → SYNTHESIZE → VERIFY/REPAIR`, with models proposing and code deciding what is admissible, grounded, budgeted, and shippable. |
+| **Automation with state, not vibes** | Browser refs and desktop observations expire; mutations revalidate state; unknown side-effect outcomes are not blindly retried. |
+| **Graceful degradation** | Missing models, providers, credentials, or vision tiers move results toward admitted evidence rather than fabricated equivalence. |
 
 ## Quick start
 
-Two ways to bring Pi-Northstar into `pi`:
-
-### Install as a Pi package (recommended)
+### Install as a Pi package
 
 ```bash
 pi install git:github.com/rhinos0608/Pi-Northstar
 ```
 
-This clones the repo into `~/.pi/agent/git/` (or `.pi/git/` with `-l` for a project-local install), runs `npm install`, and registers the extension in settings for you. To try it for one session without installing anything: `pi -e git:github.com/rhinos0608/Pi-Northstar`. See `pi`'s [package docs](https://github.com/earendil-works/pi) for update/remove commands.
-
-### Clone and wire up manually
+Try it for one session without installing:
 
 ```bash
-git clone https://github.com/rhinos0608/Pi-Northstar.git Pi-Northstar
+pi -e git:github.com/rhinos0608/Pi-Northstar
+```
+
+### Clone manually
+
+```bash
+git clone https://github.com/rhinos0608/Pi-Northstar.git
 cd Pi-Northstar
 npm install
-```
-
-Add it to `~/.pi/agent/settings.json` (or `.pi/settings.json` for a project-local extension):
-
-```json
-{
-  "extensions": {
-    "pi-northstar": "./src/index.ts"
-  }
-}
-```
-
-Or run it directly for a quick test:
-
-```bash
 pi -e ./src/index.ts
 ```
 
-### About that `npm install`
+Or add `./src/index.ts` as an extension in your Pi settings.
 
-Requires Node.js ≥ 24. The floor comes from the `browser` tool chain, not the core tools: the optional `agent-browser` npm dependency declares `engines: { node: ">=24.0.0" }`, and `package.json` (`engines: { node: ">=24.0.0" }`) plus CI (`node-version: 24` in `.github/workflows/ci.yml`) pin the whole package to it. The core tools (`web_search`, `fetch`, `github`, `social`) use portable APIs behind the `node --import tsx` loader (which only needs Node ≥ 20.6), so there is no newer-`URL`/`fetch`-API reason you must be on 24 for them — but 24 is the only tested/supported runtime, so upgrade rather than polyfill. `web_search`, `fetch`, `github`, and `social` have no native dependency — `npm install` (or `npm install --omit=optional`) is enough to use them. `browser` is the one tool backed by a native binary: `agent-browser` (~86 MB) is an **optional** npm dependency, so `npm install` downloads it by default, but nothing else in the package needs it. Skip it with:
+Pi‑Northstar requires **Node.js 24+**. `agent-browser` is optional, so a lean install can skip it:
 
 ```bash
 npm install --omit=optional
 ```
 
-Skipping it leaves the other core tools unaffected; `browser` is not registered until an agent-browser binary is available — see [Browser automation](#browser-automation) to install it separately or point at an existing one.
+Core search/fetch/GitHub/social paths still work. Browser registration requires an available `agent-browser` binary. Desktop is separate again: install Cua Driver `0.7.1` as `cua-driver` on `PATH`, then opt in with `PI_SEARCH_DESKTOP_AUTOMATION=1`.
 
-`desktop` is separate again: it drives a native Cua Driver binary that was never an npm dependency at all, downloaded and put on `$PATH` by hand. It is not registered until `PI_SEARCH_DESKTOP_AUTOMATION=1` — see [Desktop automation](#desktop-automation).
+Zero-config web search works through DuckDuckGo. API keys and local services add more providers, higher quotas, knowledge/graph access, authenticated platform reads, and multimodal processing.
 
-If the agent-browser download is slow or fails:
-- Check network/proxy settings: `npm config get proxy`, `npm config get https-proxy`
-- Verify internet connectivity to GitHub (where binaries are hosted)
-- Use `npm install --verbose` to see download progress
-- If stuck, try clearing npm cache: `npm cache clean --force && npm install`
+## The public surface
 
-That's it — web search works immediately via DuckDuckGo with zero configuration. If a file-backed `codex login` session is available, Pi-Northstar detects it automatically for explicit `codex` selection (merged through uniform RRF, never automatic).
+Nine is a **hard ceiling**, not a promise that all nine tools are registered in every process. `kg`, `graph`, `browser`, and `desktop` depend on configuration or local capability.
+
+| Tool | Role |
+|---|---|
+| `web_search` | Broad web discovery, exact-source research, batch search, or a parent-owned adaptive agent job. |
+| `fetch` | Single/multi URL reads, sitemap discovery, cached corpus retrieval, and cached claim checks. |
+| `github` | Read-only repository, file, tree, code/repo search, issues, pulls, releases, commits, workflows, and runs. |
+| `social` | Canonical platform-native reads for X/Twitter, Reddit, V2EX, XiaoHongShu, Facebook, Instagram, and LinkedIn. |
+| `kg` | Diffbot entity search/enhance/text analysis when `DIFFBOT_TOKEN` is configured. |
+| `graph` | Native DQL and/or operator-configured SPARQL access without hidden web composition. |
+| `browser` | Stateful live-page inspection and interaction via agent-browser or an explicitly authorized user-Chrome companion. |
+| `desktop` | Opt-in native window observation and interaction via Cua Driver. |
+| `agent_poll` | Reads the canonical snapshot of a job created by `web_search` with `mode:"agent"`. |
+
+`media` is **not** a tenth model tool. It is an internal/CLI acquisition family used by fetch specialization and native dispatch for YouTube, Bilibili, RSS, and Atom.
+
+### `web_search`
+
+The public shape is intentionally small:
+
+```text
+{ query, ...filters }
+{ queries: [1..8], ...filters }
+{ query, mode: "agent", depth?: "balanced" | "deep" }
+```
+
+Plain search accepts `limit` 1–20. `category:"research"` accepts `limit` 1–30 and uses the exact research surface described below. Research cursors require one query and one exact source. Agent mode is single-query only and rejects constraints the job runtime cannot honor end to end, including `limit`, `category`, `yearFrom`, `recency`, and `domains`.
+
+Provider selection is never a model argument. Operators own it through `PI_SEARCH_WEB_BACKENDS`.
+
+### `fetch`
+
+Fetch is a mode-free, presence-selected union. Legacy discriminants such as `mode`, `action`, `source`, `searchQuery`, `followLinks`, and `maxDepth` are rejected.
+
+```text
+{ url, query?, topK?, maxChars? }                  direct/read-query
+{ urls: [1..8], query?, topK?, maxChars? }         ordered multi-read
+{ url, siteMap: true, query?, maxPages? }          sitemap discovery
+{ responseId, sourceIds?, offset?, limit?, ... }   cached retrieval
+{ responseId, claims: [1..20], sourceIds? }        cached claim check
+```
+
+Cached `responseId` operations are **no-network operations** over captured corpus state. They do not silently reacquire mutable remote content.
+
+Specialized readers win before generic page reading: GitHub assets, media URLs, feeds, PDFs, images, authenticated pages, then ordinary pages. The generic readable-page chain is native/Scrapling first, Diffbot Analyze only for eligible recoverable failures, then explicitly gated Firecrawl/Jina external processing.
+
+Security and contract failures are terminal. Fallback can recover execution failure; it cannot route around SSRF, authentication, origin, or schema policy.
+
+Current extraction extras include:
+
+- Next.js RSC/flight rescue for thin `self.__next_f.push` pages.
+- A bounded appendix for declared `api-catalog`, `describedby`, `service-desc`, `service-doc`, and `service-meta` links.
+- Sniff-verified image MIME plus dimensions/pixels, with optional vision description kept in details rather than merged into page text.
+- GitHub issue/PR URL specialization into the existing GitHub read surface.
+- Operator-configured cookie-authenticated fetch profiles with HTTPS-only, host-scoped, same-origin rules.
+- Opt-in YouTube keyframe evidence via anonymous `yt-dlp`/`ffmpeg` plus optional configured visual synthesis.
+- Local PDF extraction with honest degradation for scanned pages; no hidden cloud PDF fallback.
+
+### `github`
+
+GitHub routing is action-specific rather than “clone or REST” globally:
+
+| Action | Preference |
+|---|---|
+| `repo`, `tree` | hardened clone → REST fallback |
+| `file` | REST → hardened clone fallback |
+| everything else | REST |
+
+Clone fallback is selective. Invalid input and authentication failures surface directly; they do not become anonymous/public retries. Clone children use private temporary roots, fixed argv with `shell:false`, disabled hooks/LFS/submodules/file protocol, bounded refs/paths, live size monitoring, and an unconditional final cleanup.
+
+### `social`
+
+Social routing is registry-backed and canonical-only. Cursors bind to the backend and request fingerprint that issued them; if that backend disappears, pagination fails instead of hopping providers.
+
+The repository contains a future write vocabulary (`create_post`, `add_comment`, `like`, `follow`), but **this release has no social write dispatch path**. Even a policy-allowed write-shaped request can only reach a dry-run preview. Modelled vocabulary is not granted authority.
+
+### `kg` and `graph`
+
+`kg` is entity-oriented Diffbot acquisition: `search`, `enhance`, and `analyze_text`. `analyze_text` sends supplied text to Diffbot, so do not pass secrets, credentials, or private personal text unless that external transfer is intended.
+
+`graph` exposes the native graph language instead of hiding search composition. DQL uses Diffbot when configured; SPARQL supports bounded SELECT/ASK through the operator-owned `GRAPH_SPARQL_ENDPOINT`. Pagination, schema discovery, and auth semantics remain language-specific. Graph results are not silently corroborated with web/fetch behind your back.
+
+## Search: fusion without provider roulette
+
+When `PI_SEARCH_WEB_BACKENDS` is absent or blank, Northstar walks the automatic preference order and selects the first **three configured** providers. The automatic order is:
+
+`tavily → exa → brave → diffbot → firecrawl → jina → searxng → ollama-search → duckduckgo`
+
+An explicit list can run up to eight configured providers concurrently. Extended explicit-list adapters include Parallel, Parallel MCP, Tinyfish, Querit, Valyu, Bocha, xAI, Mistral, Bright Data, SerpAPI, Serper, xCrawl, and Codex. Duplicate or unknown IDs reject before dispatch.
+
+Every runnable provider is dispatched once. There are no ordinary fanout retries. Results are defensively post-filtered, normalized, deduplicated by normalized URL identity, then merged with deterministic reciprocal-rank fusion. Provider completion order does not become ranking order.
+
+Provider failure and a legitimate zero-result response are different states. If at least one backend serves, other failures remain visible in result details. If every selected backend fails and none serves, the call fails instead of returning a fake empty search.
+
+A session-scoped search ledger also sits in front of paid dispatch. It can coalesce concurrent equivalents, suppress recently repeated successful work, and temporarily block repeated failures. Suppression returns a pointer to prior corpus state; it never masquerades as fresh evidence.
+
+## Research: 12 exact sources
+
+`category:"research"` routes to native research rather than generic web. `source:"all"` fans out in deterministic registry order over:
+
+1. Semantic Scholar
+2. OpenAlex
+3. PubMed
+4. Stack Overflow
+5. DataCite
+6. ROR
+7. GDELT
+8. Wikipedia
+9. Wikidata
+10. arXiv
+11. Crossref
+12. Hacker News
+
+Source-specific failures, unsupported pagination, and empty results stay distinct. A research request does not silently become generic web search.
+
+## Agent mode: adaptive research, not an opaque report call
+
+`web_search({ query, mode: "agent" })` creates a parent-owned job and returns a pointer. Read it with `agent_poll`.
+
+```text
+web_search { query, mode:"agent" }
+  → buildSearchRoute()
+  → createAgentJob()
+  → parent-owned job registry
+  → executeAgentJob()
+  → PLAN → GATHER → EVALUATE → STOP / REFINE
+                          ↓
+                 SYNTHESIZE → VERIFY / REPAIR
+  → canonical snapshot
+  → agent_poll
+```
+
+There is **no standalone report leg in the registered public agent path**. Older Tavily report modules still exist as residual/internal code, but public `web_search` agent mode is intercepted before ordinary web backend execution and enters the adaptive controller above.
+
+The controller separates proposals from authority:
+
+- Planner output is validated; invalid output falls back to a deterministic plan.
+- Candidate rows are navigation hints, not evidence.
+- Evidence enters only through route-specific admission with provenance and question linkage.
+- An evaluator can propose `answered`; code promotes a required question to grounded only when admitted linked evidence exists.
+- `shouldContinue` is advisory; code-owned stop policy decides whether another round is legal.
+- Synthesis proposes evidence-referenced IR that is validated before rendering.
+- Verification/repair is bounded, and a repair must beat the current version without regressing evidence support.
+
+When semantic machinery fails, Northstar moves **toward evidence**. It does not invent a prose fallback from ungrounded passages.
+
+### Current gather truth
+
+A job snapshots effective capabilities once. That frozen snapshot is used by planning and execution so admissibility does not wobble mid-job.
+
+Production native specialist execution currently includes **research, GitHub, and KG**, plus the web search/fetch baseline. Social and video have typed gather intents and evidence adapters, but no production specialist tool surface in this cycle. Their capability entries are therefore marked unusable for specialist planning and such intents degrade to web with an explicit warning rather than being falsely advertised as native execution.
+
+Current default policy budgets are:
+
+| Budget | Default |
+|---|---:|
+| rounds | 3 |
+| web-search attempts | 4 |
+| fetch attempts | 12 |
+| utility/model calls | 8 |
+| total gather actions | 6 |
+
+There are also per-lane caps and round-scoped fetch reserves. Budget spend is attempt-based at the dispatch boundary, so a failed provider call does not become “free.” Duplicate/rejected actions that never dispatch are not charged as executed attempts.
+
+`depth:"deep"` widens the gather profile. Without it, policy starts balanced and can deterministically narrow after a valid plan when there is one required question and no servable specialist need.
+
+### No-model mode
+
+`PI_NORTHSTAR_AGENT_STEERING=0` removes planner/evaluator/synthesizer/verifier/repair model calls while preserving acquisition. The deterministic ladder still gathers admitted evidence, applies stop rules, and returns a valid evidence-only result.
+
+This is an execution mode, not an error masquerading as success.
+
+### Optional leaf-runtime steering
+
+Set `PI_NORTHSTAR_LEAF_MODEL` to one exact `provider/model` ID to let a compatible co-installed pi-subagents runtime supply staged planner, evaluator, synthesizer, verifier, and repairer calls. No fuzzy model resolution and no thinking suffixes are accepted.
+
+Negotiation is refreshed per job. A missing/unhealthy leaf runtime leaves acquisition intact and the deterministic ladder remains available.
+
+Structured wire schemas are enabled only when the negotiated capability says `jsonSchema:"structured-v1"`. Advertising an `outputModes` entry containing `json` is **not enough**. Without `structured-v1`, steering runs as text JSON, then Northstar parses it client-side, applies the wire shape gate, and finally applies the domain validator. Structured output is still parsed and validated after the call.
+
+The event bus is trusted in-process module plumbing, not an authenticated security boundary. Correlation metadata routes and observes work; it never authorizes it. Provider/model/token internals stay out of model-visible job snapshots.
+
+## Browser: stateful authority
+
+Browser automation is registered only when configured. Public browsing and loopback debugging have deliberately different network rules.
+
+### Public browsing
+
+- Navigation gets URL, DNS, and SSRF preflight.
+- The allowed hostname set is frozen for the session; unrelated hostnames require close/new navigation rather than silent authority expansion.
+- Snapshot element refs are stateful. Navigation or invalidation makes old refs stale, and ref-targeting mutations preflight freshness.
+- Click dispatch is verified, post-click overlay appearance is detected, and scroll detects no-op outcomes.
+- `evaluate`, `set_cookies`, and `batch` require exact `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`.
+- Cookie observations expose metadata only, never cookie values.
+
+### Loopback debug mode
+
+A validated loopback navigation creates an origin-confined session bound to exact scheme + host + port. Traffic is pinned through the local proxy/DNS path and cross-origin requests are blocked. A different loopback origin requires closing first.
+
+### User Chrome companion
+
+User-Chrome is an alternate backend, not ambient privilege. The loopback bridge requires an operator-pinned extension ID, pairing secret, process-local token, and an explicit user authorization flow through `/chrome authorize`. Authorization expires/revokes; absent or unhealthy authorization falls back to isolated browser behavior.
+
+## Desktop: observe → bind → revalidate → mutate
+
+Desktop automation is opt-in with `PI_SEARCH_DESKTOP_AUTOMATION=1` and uses Cua Driver `0.7.1` from `PATH`.
+
+`observe_window` issues a `stateId` bound to PID, window ID, generation, TTL, and an accessibility-tree fingerprint. Every mutation requires a matching fresh state ID. Before dispatch, the service re-observes the target and rejects stale state.
+
+`type_text` and `press_key` require explicit human TUI confirmation. Headless execution cannot self-approve them. Click and scroll still require fresh state. If mutation transport fails after dispatch may have happened, Northstar reports `OUTCOME_UNKNOWN` rather than replaying a potentially duplicated side effect.
+
+Accessibility trees and screenshots are bounded by node/depth/byte/dimension policy. A screenshot can still contain sensitive data even though capture itself is read-only.
+
+## Internal media + vision
+
+Recognized YouTube/Bilibili/feed URLs are handled through the internal media family rather than adding more public tools. Metadata/transcript acquisition is the base path.
+
+Video frames are additive and opt-in:
+
+```text
+recognized video URL
+  → metadata / transcript
+  → optional PI_VISION_FETCH_VIDEO_FRAMES=1
+       → bounded yt-dlp / ffmpeg keyframes
+       → bounded image-description tier
+  → optional configured video synthesis
+  → fetch result with explicit warnings / degradation markers
+```
+
+Keyframes are capped and extracted without writing frame files to disk. Missing vision tiers or keyframes do not invalidate truthful metadata/transcript evidence.
+
+Configuring a cloud vision tier sends admitted image/video bytes and description context to that destination. Private/authenticated GitHub content is independently gated by `PI_VISION_PRIVATE_GITHUB_TRANSFER=1` before any cloud vision transfer.
 
 ## Configuration
 
-Set variables in your shell profile (`.zshrc`, `.bashrc`) or a package-local `.env` file. Process environment wins over `.env`. See `.env.example` for every available variable.
+Copy `.env.example` to `.env` or export variables in your shell. Process environment wins over file-loaded configuration.
 
-### API keys
+You do **not** need to configure everything. Start with nothing, then add capabilities you actually want.
 
-All optional. DuckDuckGo covers web search without any keys.
+| Goal | Useful configuration |
+|---|---|
+| More web providers | `TAVILY_API_KEY`, `EXA_API_KEY`, `BRAVE_API_KEY`, `SEARXNG_BASE_URL`, or an explicit extended provider key |
+| Select web providers | `PI_SEARCH_WEB_BACKENDS`, `PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS` |
+| External page fallback | `PI_SEARCH_EXTERNAL_FETCH=1` plus `FIRECRAWL_API_KEY` and/or `JINA_API_KEY` |
+| GitHub quota/private reads | `GITHUB_TOKEN` or `GH_TOKEN` |
+| Diffbot KG / DQL graph | `DIFFBOT_TOKEN` |
+| SPARQL graph | `GRAPH_SPARQL_ENDPOINT`, optional `GRAPH_SPARQL_TOKEN` |
+| Agent leaf steering | `PI_NORTHSTAR_LEAF_MODEL`; disable steering with exact `PI_NORTHSTAR_AGENT_STEERING=0` |
+| Sensitive browser verbs | exact `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1` |
+| Desktop automation | exact `PI_SEARCH_DESKTOP_AUTOMATION=1` plus `cua-driver` on `PATH` |
+| User-Chrome companion | `PI_SEARCH_CHROME_EXTENSION_ID`, optional stable `PI_SEARCH_CHROME_PAIRING_SECRET`, then `/chrome authorize` |
+| Video keyframes | exact `PI_VISION_FETCH_VIDEO_FRAMES=1` plus an eligible vision tier |
+| Cloud vision for private GitHub | exact `PI_VISION_PRIVATE_GITHUB_TRANSFER=1` |
+| Authenticated fetch | `PI_FETCH_AUTH_PROFILES` with provider/host-scoped profiles |
 
-```bash
-export GITHUB_TOKEN="ghp_..."           # GitHub API (or GH_TOKEN; optional — public reads work keyless with harder rate limits)
-export EXA_API_KEY="..."                # Exa semantic search
-export BRAVE_API_KEY="..."              # Brave Search API
-export TAVILY_API_KEY="..."             # Tavily AI-native search
-export YOUTUBE_API_KEY="..."            # YouTube Data API
-export REDDIT_CLIENT_ID="..."           # Reddit API
-export REDDIT_CLIENT_SECRET="..."       # Reddit API
-export REDDIT_USER_AGENT="pi-northstar/0.1"
-export SEARXNG_BASE_URL="https://..."   # Self-hosted SearXNG
-```
+See `.env.example` for the full provider matrix, privacy notes, bounds, and optional local services.
 
-Diffbot is paid and external — read [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing) before setting any `DIFFBOT_*` variable:
+### CLI vs MCP backend
 
-```bash
-export DIFFBOT_TOKEN="..."                # Diffbot APIs (off when unset; see .env.example for spend caps)
-```
+The default `SearchBackend` is a one-shot CLI child process. It pays roughly a few hundred milliseconds of Node + `tsx` startup per call in local benchmarks, but gives strong per-call credential scoping and simple process isolation.
 
-Explicit `DIFFBOT_TOKEN` from process env, `.env`, or JSON config wins; only when all three omit it does runtime fall back to a login-shell lookup, which fails closed and never logs the token.
+Set `SEARCH_BACKEND=mcp` for long-running/pool deployments where the MCP server is already managed. Public tool contracts do not change with backend choice.
 
-### Codex/ChatGPT search
+## Setup and status commands
 
-Pi-Northstar automatically checks `CODEX_ACCESS_TOKEN`, then `${CODEX_HOME:-~/.codex}/auth.json` created by `codex login`. Codex runs only when `codex` appears in an explicit `PI_SEARCH_WEB_BACKENDS` list, as one more backend merged through uniform RRF with URL-dedup — never automatic, never primary-first. Only search query is sent; conversation history and project files are not included.
+Operator credential acquisition is always user-initiated. Capability discovery may be automatic; login/cookie import is not.
 
-```bash
-export CODEX_ACCESS_TOKEN="..."       # Optional override
-export CODEX_ACCOUNT_ID="..."         # Optional account routing
-export CODEX_HOME="$HOME/.codex"       # Optional auth-file location
-```
+- `/reach-status` reports registry-backed channel availability, quality, and auth state.
+- `/reach-setup` plans/installs optional dependencies and exposes explicit login/import operations.
+- `/reach-setup import_cookies <provider>` and `/reach-setup login <provider>` are explicit credential/session actions.
+- `/chrome authorize` grants a revocable user-controlled Chrome companion lease.
 
-`PI_SEARCH_WEB_BACKENDS` is the exclusive override and is exact. If set, Codex runs only when `codex` appears in list. The legacy `SEARCH_WEB_BACKENDS` variable was removed and is no longer read.
-
-> **Limited-support notice:** This integration uses undocumented, reverse-engineered ChatGPT/Codex search endpoint. It is best-effort, not official OpenAI integration, and may change, become unavailable, or be limited by account eligibility and usage limits. Usage may be governed by OpenAI/ChatGPT terms and policies. Confirm your intended use complies with those terms before enabling or relying on it.
-
-### Backend selection
-
-```bash
-export PI_SEARCH_WEB_BACKENDS="tavily,exa,brave"  # Explicit ordered set; omit or leave blank for automatic top 3
-```
-
-Search backends in automatic preference order: `tavily`, `exa`, `brave`, `diffbot`, `firecrawl`, `jina`, `searxng`, `ollama-search`, `duckduckgo` (`duckduckgo` always configured; `codex` is explicit-only, never automatic). Selection is environment-only — there are no model-facing provider flags:
-
-- Missing or blank `PI_SEARCH_WEB_BACKENDS` dispatches the first 3 configured backends in preference order concurrently, with no replenishment.
-- An explicit list runs every runnable listed backend concurrently (max 8) in caller order; unknown IDs, duplicates, and lists over 8 reject before any call. Unavailable entries are recorded, never silently replaced.
-- Every fulfilled non-empty ranking — including Codex — merges through uniform RRF with URL-dedup; backend provenance (`backend`, per-result contributors) stays visible in results. No provider retries.
-- Provider deadline: `PI_SEARCH_WEB_PROVIDER_TIMEOUT_MS`, default `12000`, integer `1000..30000`; malformed values reject before dispatch. Caller abort cancels in-flight requests.
-- Agent report deadline: `PI_SEARCH_WEB_AGENT_TIMEOUT_MS`, default `300000`, clamped to `300000` by the 300s CLI-backend route ceiling (larger values are ineffective); malformed values reject before dispatch. `mode: "agent"` runs one streaming Tavily Research POST (`{input, model, stream: true}`, SSE `text/event-stream` consumed incrementally, no polling) under that single deadline; report text caps at 50000 chars and sources at 20 validated/deduped entries. Report model: `TAVILY_RESEARCH_MODEL`, `mini|pro|auto`, default `pro`; blank defaults, malformed values reject before fetch. No model-facing report knobs. Provider failures throw a neutral provider-attributed error immediately. MCP-server deployments forward the deadline via `SEARCH_MCP_FORWARD_ENV_JSON`.
-
-### Native AI (environment-only, default on)
-
-Provider-native summaries and answers are controlled only by `PI_SEARCH_NATIVE_SUMMARIES` and `PI_SEARCH_NATIVE_ANSWERS` (`1`/`true`/`0`/`false`, default on; anything else rejects before dispatch). There are no model-facing AI toggles. Generated text never replaces retrieval snippets: summaries carry result-URL provenance, Tavily answers carry supporting-result-set provenance (never claim citations), empty answers or answers without supporting URLs are dropped, items cap at 8000 chars / 32 per call. Firecrawl search and fetch summaries honor `PI_SEARCH_NATIVE_SUMMARIES=0` (no summary requested, none emitted). Jina emits no generated text.
-
-### Optional knowledge composition (web_search only)
-
-`web_search` accepts an optional `knowledge` object with five optional booleans — `entities`, `facts`, `topics`, `sentiment`, `enhance` — gated at runtime by `PI_SEARCH_KG_ENRICHMENT=1` plus at least one `true` flag (unknown keys, non-boolean values, or all-false reject as `invalid_request`). Rejected for `category: "research"`; standalone `kg` behavior is unchanged. Only the first 3 fused results with non-empty original snippets are analyzed (max 8000 chars each); generated text, page-fetch content, and contact selectors are never submitted. Excerpts that look like email/phone, `category:"people"`, or personal-profile URLs (e.g. LinkedIn `/in/`) are skipped without echo — detection is defense-in-depth and never proves content is non-sensitive. Optional `enhance` covers at most 3 normalized Person/Organization entities by name plus validated public homepage only, never contact selectors. Output is framed as untrusted evidence, never generated AI presented as fact.
-
-### External fetch fallback (Firecrawl/Jina, environment-gated)
-
-Setting `FIRECRAWL_API_KEY` / `JINA_API_KEY` sends queries and admitted public URLs to fixed vendor hosts only (`api.firecrawl.dev`, `s.jina.ai` / `r.jina.ai`) plus vendor-side external page processing. No cookies, browser state, or caller headers are forwarded. Do not submit URLs or text you are not authorized to share.
-
-- Fetch fallback runs only when `PI_SEARCH_EXTERNAL_FETCH=1`/`true` (default off) **and** `PI_SEARCH_FETCH_BACKENDS` names an ordered unique subset of `firecrawl,jina` (max 2; blank means no attempts; duplicates/unknown/>2 reject before any call). Attempts run sequentially in listed order, stop at the first valid non-empty page, one request per adapter, no retries.
-- Cost caps: Firecrawl search takes `min(limit,3)` with summaries on, `min(limit,10)` with summaries off (one call, never a second unsummarized call); Jina search takes `min(limit,5)`; every paid call spends vendor credit with no quota probe — monitor vendor dashboards. Fetch bounds: 1,000,000-byte vendor response max, 50,000-char retained page content, fetch provider timeout `PI_SEARCH_FETCH_PROVIDER_TIMEOUT_MS` default `15000` integer `1000..30000`.
-- Targets pass local public-URL validation plus system-DNS preflight before the vendor receives them; policy/URL/DNS/caller-abort/size/404/410 failures never reach vendors. Vendor-side redirect hops after handoff cannot be constrained locally (residual risk). External success after native exhaustion is marked `degraded` (`qualityImpact: 'not_assessed'`).
-- Research (`category: "research"`) never touches generic web providers or external fetch vendors, and external fetch never runs inside the research path.
-
-```bash
-export PI_SEARCH_BROWSER_ALLOW_SENSITIVE="1"              # Enable evaluate/set_cookies
-export PI_SEARCH_DESKTOP_AUTOMATION="1"                   # Enable desktop tool
-```
-
-### Research source keys (optional)
-
-Pi convention names, not vendor-standard names. All research sources work
-unauthenticated; these keys only raise provider quota limits.
-
-```bash
-export SEMANTIC_SCHOLAR_API_KEY="..."   # Semantic Scholar Graph API quota
-export OPENALEX_API_KEY="..."           # OpenAlex mailto pool
-export NCBI_API_KEY="..."               # PubMed E-utilities optional key
-export NCBI_EMAIL="you@example.com"     # PubMed contact (recommended)
-export STACKEXCHANGE_KEY="..."          # Stack Exchange API quota
-```
-
-### Bootstrap control
-
-```bash
-export PI_SEARCH_BOOTSTRAP="off"         # Skip startup automation
-export PI_SEARCH_AUTO_INSTALL="0"        # Skip startup installs
-export PI_SEARCH_ALLOW_INSTALL="0"       # Disable all install execution
-export PI_SEARCH_BROWSER_AUTOMATION="0"  # Disable all browser features (kill switch for explicit import/login)
-export PI_SEARCH_CHROME_EXTENSION_ID="abcdefghijklmnopqrstuvwxyzabcdef"  # Companion extension id pinning the user-Chrome bridge origin (unset = user-chrome unavailable, isolated backend only)
-```
-
-First start and bare `/reach-setup auto` never import browser cookies —
-no environment variable triggers cookie import.
-`/reach-setup import_cookies
-<provider> [endpoint]` remains the explicit per-provider consent path.
-Xueqiu/Xiaoyuzhou are absent providers. Explicit Pi cookie import/login
-supports only Reddit, Bilibili, and YouTube; Twitter, Xiaohongshu, Facebook,
-Instagram,
-and LinkedIn use their CLI/OpenCLI-owned authenticated sessions and are not
-Pi cookie-import targets.
-
-### Output & state
-
-```bash
-export PI_SEARCH_MAX_TOOL_OUTPUT_CHARS="60000"   # Truncation limit
-export PI_SEARCH_STATE_DIR="$HOME/.pi-northstar"     # State directory
-export PI_SEARCH_COOKIE_BROWSER="chrome"         # chrome, brave, or edge
-export PI_SEARCH_COOKIE_STALE_MS="43200000"      # Cookie re-import window (12h)
-export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"  # Cookie import via local CDP (explicit import_cookies only)
-```
-
-## Embedding & semantic search
-
-Pi-Northstar has two layers of semantic capability:
-
-### 1. Built-in semantic retrieval (`fetch` with query)
-
-When you call `fetch` with a `query` parameter, Pi-Northstar performs **hybrid search**:
-
-1. **URL discovery** — queries configured search backends under the environment-only selection policy above (automatic top 3 in preference order when `PI_SEARCH_WEB_BACKENDS` is absent/blank; explicit lists run all runnable entries concurrently, max 8; `codex` explicit-only); every fulfilled ranking merges through uniform RRF with URL-dedup
-2. **Page fetching** — optionally uses Scrapling (Python stealth browser) for JS-rendered pages and anti-bot bypass, falls back to plain HTTP
-3. **Chunking** — sentence-boundary-aware text splitting with overlap
-4. **BM25 ranking** — Okapi BM25 lexical scoring (TF saturation, IDF weighting, length normalization)
-5. **Embedding ranking** — vector similarity via embedding sidecar (if configured)
-6. **RRF fusion** — merges BM25 and embedding rankings into final results
-
-#### Fetch contract
-
-`fetch` uses a mode-free five-branch presence union:
-
-- `{url, query?, topK?, maxChars?}` reads one URL; query ranks relevant passages.
-- `{urls[1..8], query?, topK?, maxChars?}` reads URLs in input order with per-URL isolation.
-- `{url, siteMap:true, query?, maxPages?}` discovers same-origin URLs from a sitemap.
-- `{responseId, sourceIds?, offset?, limit?, findText?}` slices cached corpus only; no network.
-- `{responseId, claims[1..20], sourceIds?}` verifies cached claims only; no network.
-
-`topK` max 20, `maxChars` max 50000, sitemap `maxPages` max 25. Bounds reject rather than clamp. Use `web_search` to discover URLs, then fetch with URL and optional query. Without query, single-URL fetch returns full readable text.
-
-### 2. Embedding sidecar (semantic search)
-
-Pi-Northstar can connect to an embedding service for **vector-based semantic search** in `fetch`.
-
-Configure the sidecar (works with any OpenAI-compatible embedding API — LM Studio, Ollama, OpenAI, etc.):
-
-```bash
-export EMBEDDING_SIDECAR_PROVIDER="openai"          # Provider identifier
-export EMBEDDING_SIDECAR_BASE_URL="http://localhost:1234"  # Embedding service endpoint
-export EMBEDDING_SIDECAR_API_TOKEN="sk-..."         # Auth token (optional for local services)
-export EMBEDDING_SIDECAR_DIMENSIONS="768"            # Embedding vector dimensions
-```
-
-When `EMBEDDING_SIDECAR_BASE_URL` is set, `fetch` with query automatically uses BM25 + embedding RRF fusion for ranking. No Python process is spawned — it talks directly to your external embedding service.
-
-Local sidecar stdin-token auth (nothing to configure): the spawned Python sidecar mints a fresh 256-bit token per start and delivers it over the child's stdin pipe only — never argv, env, or logs — and delivery failure is a startup failure (never runs unauthenticated). `EMBEDDING_SIDECAR_API_TOKEN` is only for external sidecars (Bearer auth on the `EMBEDDING_SIDECAR_BASE_URL` health check). Long-lived clients re-read the token per request, so a sidecar restart minting a new token doesn't break them.
-
-#### Local Python sidecar (alternative)
-
-If you don't have an external embedding service, Pi-Northstar can spawn a local Python sidecar:
-
-```bash
-pip install fastapi uvicorn sentence-transformers
-export PI_SEARCH_EMBEDDING_ENABLED=1
-export PI_SEARCH_EMBEDDING_MODEL=all-MiniLM-L6-v2  # 384 dims, 22MB
-```
-
-Pi-Northstar auto-spawns the sidecar on first use and manages its lifecycle.
-
-#### Stealth browser mode (Scrapling)
-
-If the Scrapling Python package is installed, Pi-Northstar uses it **automatically** for `fetch` — no configuration needed. It provides:
-
-- JS-rendered page content (SPA, React, Angular sites)
-- Cloudflare Turnstile/Interstitial auto-solve
-- Anti-fingerprinting (canvas noise, WebRTC leak prevention, CDP detection bypass)
-- Stealth browser via Patchright
-
-```bash
-pip install "scrapling[fetchers]"
-scrapling install  # download browsers + system deps
-```
-
-Pi-Northstar auto-detects Scrapling on startup. If installed, `fetch` and `agentic_browse` use it automatically. If not installed, falls back to plain HTTP.
-
-Optional proxy:
-```bash
-export PI_SEARCH_SCRAPLING_PROXY="http://user:pass@host:port"
-```
-
-### 3. GitHub actions
-
-Canonical actions: `repo`, `file`, `tree`, `search`, `search_repos`, `trending`, `issues`, `pulls`, `releases`, `commits`, `workflows`, `runs` (REST API only — GraphQL not offered). `workflows` (list/get GitHub Actions workflows) and `runs` (list/get workflow runs, or list a run's jobs with `jobs: true`) are read-only — no `workflow_dispatch` trigger. Results are normalized entities. Out-of-range input is rejected, never clamped. `list_dir` and `code_search` legacy spellings are unsupported.
-
-```
-github({ request: { action: "releases", repository: "owner/repo" } })
-```
-
-`GITHUB_TOKEN` or `GH_TOKEN` is optional: public reads work keyless with harder rate limits. Unauthenticated `/search/code` is heavily rate-limited; `issues`/`pulls`/`releases`/`commits` work keyless for public repos.
-
-Clone backend (`repo`/`tree`): when `gh`/`git` binaries are available these actions may be served from an ephemeral local clone instead of REST — `gh` first (isolated: empty HOME/GH_CONFIG_DIR, never carries the token), then `git` with the token delivered only through an ephemeral 0700 credential helper (never argv/env; redacted from output). Fixed argv with `shell: false`, deny-by-default child env, hooks/LFS smudge/submodules/file-protocol disabled, refs/paths/symlinks validated, random 0700 root removed unconditionally, no anonymous retry after an authenticated failure. Live cap: the clone runs under a 350 MiB `maxRepoBytes` ceiling enforced during the run plus a post-clone scan (operator overrides lower-only — above-default values reject, never clamp); a brief overshoot window (poll interval + SIGTERM grace) can exceed the ceiling before the abort lands, so the post-clone scan stays the final safeguard. Token hygiene: `GITHUB_TOKEN` ?? `GH_TOKEN`; tokens with control characters reject before any spawn.
-
-Where clones run and what falls back: each clone gets a random 0700 root that is removed unconditionally (success, failure, timeout, abort). Dispatch preference lives in `GITHUB_BACKEND_PREFERENCE` (`src/github/github-contract.ts:833`): `repo`/`tree` are clone-first with `github-api` REST fallback, `file` stays REST-first, and every other action is REST-only. In `callGithubTool` (`src/github/github-domain.ts:1381`) REST fallback (with a backend warning) applies only when clone execution is unavailable or fails with `upstream_error`/`malformed_upstream` — `invalid_request` (bad slug) and `authentication_required` (token-carrying git auth failure) surface directly with no anonymous retry and no silent REST substitution.
+Startup and bare automatic setup do not silently import browser cookies or create logins just to turn a capability green.
 
 ## CLI
 
-The CLI is a thin JSON-in/JSON-out wrapper — useful for testing and scripting:
+Call the internal/native surface directly when debugging adapters:
 
 ```bash
-npm run cli -- status
-npm run cli -- config
-npm run cli -- call web_search '{"query":"pi agent extensions"}'
-npm run cli -- call fetch '{"url":"https://example.com"}'
-npm run cli -- call fetch '{"url":"https://example.com","query":"error handling patterns"}'
-npm run cli -- call social '{"platform":"reddit","action":"get_community_posts","community":"python"}'
-npm run cli -- call media '{"platform":"rss","url":"https://example.com/feed.xml"}'
-npm run cli -- call reach_setup '{"action":"plan"}'
+npm run cli -- call web_search '{"action":"search","query":"pi agent frameworks"}'
+npm run cli -- call research '{"action":"academic","query":"retrieval augmented generation","source":"arxiv"}'
+npm run cli -- call media '{"platform":"youtube","action":"details","id":"..."}'
 ```
 
-All CLI output is JSON: `{ "ok": true, "data": { "content": [...] } }`.
+Use `/reach-status` inside Pi for the operator-facing view. The CLI exposes more internal families than the model-facing nine-tool ceiling, so do not treat CLI vocabulary as public model authority.
 
-### Least-privilege child environments (CLI/MCP)
+## Security model
 
-CLI children get a nonsecret base config plus per-tool-family credentials only (`buildCliEnvironment` in `src/cli/cli-backend.ts`) — a `web_search` child never carries GitHub/Reddit/graph secrets and vice versa; unknown tools get base config only. MCP server children (`SEARCH_MCP_COMMAND`, `src/process/mcp-client.ts`) are deny-by-default: only listed provider credentials, benign client config, and names in the explicit `SEARCH_MCP_FORWARD_ENV_JSON` allowlist forward — there is no `SEARCH_MCP_*` wildcard, and the forward list rejects secret-like names (`TOKEN`/`KEY`/`SECRET`/`PASSWORD`/`AUTH`/`BEARER`/`COOKIE`/…) and non-benign `SEARCH_MCP_*` internals. Native/media/git children (`buildNativeChildEnvironment`) and Python children (`buildPythonChildEnvironment`) take minimal OS-spawn allowlists only — no tokens, keys, cookies, proxy URLs, or interpreter/linker overrides — with fixed argv arrays and `shell: false`.
+Northstar assumes remote pages, search results, provider payloads, browser pages, CLI output, and model proposals can all be hostile or wrong.
 
-### Leaf-runtime RPC (agent `mode: "agent"` report leg)
+Every external model-facing tool result is wrapped in a fresh randomized evidence fence. Dangerous invisible/control formatting is removed and suspicious patterns may be flagged, but visible text is not destructively rewritten. This framing is advisory: **it is not the permission system**.
 
-Set `PI_NORTHSTAR_LEAF_MODEL` to the exact `provider/model` id (no fuzzy resolution, no thinking suffix, no fallback). Absent/blank means standalone agents (default). When set, the extension registers a `LeafRuntimeClient` over the in-process event bus, and each agent job runs a fresh `negotiate` for that exact model (`refreshReady()` per job) — only a success switches the report leg to `leaf-runtime`; every other path (no provider, model unset, refresh failure) runs the standalone core with a recorded safe reason, and leaf failures fall back to the opaque leg with a safe-code warning. Provider-opacity: the client resolves to `{ text }` only — run/provider/model/token metadata never leaves the module, and job snapshots carry transport + safe reason only, never provider/model identity. RPC errors are fixed safe messages (never provider exception text); out-of-range timeouts, prompts, and output tokens reject, never clamp. (owning contract is `src/runtime/runtime-rpc-protocol.ts`, client `src/runtime/leaf-runtime-client.ts`, wiring `src/web/agent/agent-jobs.ts`, seam `src/web/agent/agent-rpc.ts`; optional variable is listed in `.env.example`.)
+Actual authority lives in code-owned contracts:
 
-_Note: leaf-runtime, sidecar-auth, GitHub-clone, and vision-gate hardening is under active review-round fixes — the above reflects code verified at read time._
+- Public/user-provided network targets pass application URL/DNS/SSRF policy before I/O.
+- Operator-configured infrastructure such as SearXNG/SPARQL/sidecars is a different trust class; it is not blindly treated as an untrusted public URL.
+- Authenticated fetch narrows the legal path: HTTPS only, profile/host scoped, same-origin redirects, no external page processors, opt-in caching.
+- Browser authority is session-bound; desktop authority is observation-bound.
+- GitHub authentication failure cannot silently fall back to a different visibility contract.
+- Child processes receive allowlisted, capability-scoped environments rather than ambient `process.env`.
+- CLI JSON output is head-capped; oversized output fails instead of tail-slicing into plausible-looking garbage.
+- Native subprocesses use fixed argv with `shell:false`; proxy/credential classes are excluded unless a subsystem explicitly owns a narrower exception.
 
-### pi-subagents composition (co-installed extension)
+The deployment/container network remains the outer egress boundary. Application SSRF policy is defense in depth, not a substitute for isolation.
 
-When the pi-subagents extension is co-installed, the agent report leg above may run on its leaf runtime instead of the standalone core. The seam is the in-process event bus `subagents:runtime:v1` (ready event `subagents:runtime:v1:ready`, per-request `subagents:runtime:v1:request`, per-request replies; methods `negotiate`/`start`/`status`/`result`/`cancelAndSettle`): each agent job sends a fresh `negotiate` for the exact configured model and only a success switches that job's report leg to `leaf-runtime` — every other path stays standalone with a recorded safe reason, and leaf-leg failures fall back to the opaque leg with a safe-code warning. Outputs stay provider-opaque (`{ text }` only; snapshots carry transport + safe reason, never provider/model identity). Trust boundary: the bus is an in-process seam for trusted co-installed extension modules only (provider registered via `setLeafRuntimeProvider`), not an authenticated channel. Operator knob is `PI_NORTHSTAR_LEAF_MODEL` alone; the wire contract is owned by pi-subagents (`src/api/runtime-rpc.ts` is ground truth — our `src/runtime/runtime-rpc-protocol.ts` is a verbatim copy) and gate state (whether a leaf runtime is present, which host versions are verified) is owned by that extension. Wiring: `src/runtime/leaf-runtime-client.ts`, `src/web/agent/agent-jobs.ts` (`negotiateLeafTransport`), seam `src/web/agent/agent-rpc.ts`.
+## Architecture in one screen
 
-## Slash commands
+```text
+Pi host
+  → src/index.ts
+  → public registration ceiling (≤ 9)
+  → strict route / domain contract
+  → policy + admissibility
+  → SearchBackend or native/domain runtime
+  → normalized evidence / result envelope
+  → untrusted-content framing
+  → model
+```
 
-User-facing setup and status commands (not LLM tools):
+A useful mental model is four concentric boundaries:
 
-- `/reach-status [family] [action]` — inspect channels and backends, e.g. `/reach-status social` or `/reach-status social get_post`. The optional action is validated against the canonical registry; unknown/legacy spellings are rejected.
-- `/reach-setup [action]` — `auto`, `status`, `plan`, `install_core`, `install_all`, `install_channels`, `import_cookies`, `login`
+```text
+1. Public vocabulary    small model-facing tool/action surface
+2. Domain contracts     exact shapes, capabilities, budgets, provenance
+3. Execution adapters   providers, CLI/native/MCP/browser/desktop
+4. External world       web pages, APIs, local apps, co-installed runtime
+```
 
-## Browser automation
+### Primary ownership map
 
-`browser` tool provides headless browser control via **agent-browser** (core path) with reliability checks matching [pi-agent-browser-native](https://github.com/fitchmultz/pi-agent-browser-native). A legacy CDP fallback exists but is **deprecated** — use agent-browser.
+| Concern | Owner |
+|---|---|
+| public tool ceiling + channel metadata | `src/capabilities.ts` |
+| extension composition + registration + global framing | `src/index.ts` |
+| web-search public shape | `src/web/web-search-route.ts`, `src/web/web-contract.ts` |
+| web provider policy + fanout | `src/web/web-provider-policy.ts`, `src/web/web.ts` |
+| ranking/fusion | `src/search/fusion.ts` |
+| fetch public shape | `src/web/web-fetch-route.ts`, `src/web/access/web-access-contract.ts` |
+| URL specialization/read path | `src/native-fetch.ts`, `src/web/web-page-reader.ts`, `src/web/access/*` |
+| agent jobs + public snapshot | `src/web/agent/agent-jobs.ts` |
+| agent controller | `src/web/agent/agent-core.ts` |
+| agent budgets/profile/stop | `src/web/agent/agent-policy.ts` |
+| typed gather intents + execution | `src/web/agent/agent-gather-intents.ts`, `src/web/agent/agent-gather.ts` |
+| evidence/candidate admission | `src/web/agent/agent-state.ts`, `src/web/agent/agent-acquisition.ts`, `src/web/agent/agent-candidates.ts` |
+| model/wire schemas | `src/web/agent/agent-model.ts`, `src/runtime/runtime-rpc-protocol.ts` |
+| browser policy/session authority | `src/browser/browser-policy.ts` + browser session modules |
+| desktop contract/freshness | `src/desktop/desktop-contract.ts`, `src/desktop/desktop-policy.ts`, `src/desktop/desktop-tools.ts` |
+| GitHub routing + clone boundary | `src/github/github-contract.ts`, `src/github/github-domain.ts`, `src/github/github-clone.ts` |
+| child credential isolation | `src/cli/cli-backend.ts`, `src/process/*-child-env.ts` |
+| external-content trust framing | `src/core/untrusted-content.ts` |
 
-> Privacy: optional paid backends (Diffbot) transmit queries/URLs/selectors/text externally — see [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing).
+If documentation and implementation disagree, trace from the registered/public entry point. A module merely existing in the tree does not prove the public flow reaches it.
 
-### Installation
+## Known edges, stated plainly
 
-`agent-browser` is an **optional** npm dependency (`optionalDependencies` in `package.json`), not required by any other tool. By default `npm install` downloads the native binary (~86 MB) alongside everything else, so `browser` works immediately with no extra setup:
+- **CLI startup is not free.** The default one-shot backend intentionally pays a process-start tax per tool call; use MCP for sustained pooled workloads.
+- **Clone size enforcement is polled.** A clone can briefly exceed the configured ceiling before the watcher aborts it. The final scan prevents serving an oversized completed clone, but this is not filesystem quota isolation.
+- **SSRF preflight has real residuals.** DNS rebinding, redirects, and browser debug proxy behavior still deserve deployment-level review.
+- **Untrusted-content fencing is heuristic.** It helps establish a trust boundary; it does not prove content harmless.
+- **Social/video specialist agent lanes are deferred.** Their typed intents exist, but current production agent execution does not advertise them as native specialist lanes.
+- **Legacy report code remains in the tree.** `src/web/web.ts`, `src/web/web-agent-report.ts`, and `src/web/agent/agent-report-route.ts` contain older report machinery; the registered public agent route does not use it.
+- **Vision probing is not proof of a full production model call.** A synthetic credential/model probe can pass while a later real request still fails.
+- **Loopback debugging is intentionally narrow.** It does not solve every local TLS/WSS development setup.
+
+## Development
 
 ```bash
 npm install
-# agent-browser binary downloads automatically
+npm run typecheck
+npm test
 ```
 
-If you installed with `npm install --omit=optional`, or the optional install failed for your platform, `browser` is not registered. Fix it with any of:
+Useful targeted checks while changing contracts:
 
 ```bash
-npm install agent-browser         # install just the optional dependency
-npm install -g agent-browser      # or use a system-wide install already on PATH
-export BROWSER_EXECUTABLE_PATH="/path/to/agent-browser"  # or point at a specific binary
+node --import tsx --test test/web/web-search-agent-seam.test.ts
+node --import tsx --test test/web/agent/agent-no-model.test.ts
+node --import tsx --test test/web/agent/agent-budget-truth.test.ts
+node --import tsx --test test/github/github-contract.test.ts
+node --import tsx --test test/runtime/leaf-runtime-client.test.ts
 ```
 
-Resolution order: `BROWSER_EXECUTABLE_PATH` if set (exact path, no fallback) → otherwise `node_modules/.bin/agent-browser` → `node_modules/agent-browser/bin/agent-browser.js` → first `agent-browser` found on `PATH`.
+## The invariant behind the project
 
-### Capability matrix
+> **Models propose. Code validates, admits, grounds, budgets, stops, and ships.**
 
-#### Reliability checks (Phase 1–2, implemented)
+That rule shows up everywhere: search providers propose rankings, pages provide evidence, planners propose actions, evaluators propose state changes, browser snapshots propose element identity, and desktop observations propose mutation targets. None of those proposals become authority merely because they arrived through a trusted-looking interface.
 
-| Check | What it does | Signal |
-|-------|-------------|--------|
-| **Structured result envelope** | Every result carries `resultCategory` (success/failure), `successCategory` (inspection/completed/artifact-saved), `failureCategory` (timeout/stale-ref/dispatch-unverified/overlay-blocked/etc), and `nextActions` with exact recovery steps | `details.resultCategory`, `details.failureCategory`, `details.nextActions` |
-| **Click dispatch verification** | After clicks on `@eN` refs and `role=`/`xpath=` selectors, installs a capture-phase DOM event probe; fails the result if no click event reached the page | `details.dispatchUnverified: true` |
-| **Stale ref detection** | Tracks per-session `@eN` ref snapshots; rejects mutations on stale refs before the CLI runs | `failureCategory: 'stale-ref'`, `nextActions: [snapshot refresh]` |
-| **Scroll no-op detection** | Compares pre/post viewport position; flags when scroll had no effect | `details.scrolled: false`, `details.noop: true` |
-| **Overlay blocker detection** | Counts `[role=dialog]`/`[aria-modal]` elements before/after clicks; flags when a modal appeared | `details.overlay: { appeared: true }` |
-| **Session page state** | Per-session ref snapshot tracking, tab target tracking, invalidation on "No active page", stale update rejection via monotonic tokens | `details.refSnapshot`, `details.refSnapshotInvalidation` |
+When adding a feature, ask one question all the way through the stack:
 
-#### Snapshot & input modes (Phase 3–4, implemented)
+> **Does one meaning survive unchanged from the entry contract to the terminal evidence, result, or side effect, with every authority and budget transition explicit?**
 
-| Feature | What it does |
-|---------|-------------|
-| **Interactive snapshot refs** | `snapshot` parses `@eN` refs from agent-browser output, records role/name/isContentEditable metadata per session |
-| **Compact snapshot** | `compact: true` keeps high-value roles (button, link, textbox, checkbox, radio, combobox, select, menuitem, tab, switch), drops structural divs without names |
-| **semanticAction** | Locator shorthands — `click`/`fill`/`check`/`select` with `role`/`text`/`label`/`placeholder`/`alt`/`title`/`testid` locators, compiled to agent-browser `find` commands |
-| **job** | Constrained multi-step orchestration (max 20 steps: open/click/fill/type/select/wait/assert/snapshot/screenshot), sequential execution with reliability checks per step |
-| **batch** | Raw multi-command stdin batching, per-step `batchSteps[]` result categories |
+If not, the feature is not wired yet.
 
-#### Actions
+## License
 
-| Action | Parameters | What it does |
-|--------|-----------|------|
-| `status` | none | Check browser backend and session state |
-| `tabs` | none | List open browser tabs |
-| `navigate` | `url: string` | Navigate to a URL (public HTTP/HTTPS only) |
-| `text` | none | Extract visible text from the current page |
-| `html` | none | Get raw HTML of the current page |
-| `screenshot` | none | Capture a PNG screenshot of the page |
-| `snapshot` | `compact?: boolean` | Take interactive snapshot with `@eN` refs for click/fill |
-| `click` | `selector: string` | Click an element — with dispatch verification on eligible selectors |
-| `type` | `selector: string`, `text: string` | Type text into an input field, with stale-ref preflight |
-| `fill` | `selector: string`, `text: string` | Fill a form field, with stale-ref preflight |
-| `scroll` | `x?: number`, `y?: number` | Scroll by pixel offset, with no-op detection |
-| `wait` | `selector?: string`, `waitMs?: number` | Wait for selector or milliseconds |
-| `get_url` | none | Get current page URL |
-| `get_title` | none | Get current page title |
-| `close` | none | Close the current tab |
-| `cookies` | `urls?: string[]` | Read cookie metadata (values never exposed) |
-| `set_cookies` | `cookies: Array<...>` | Set cookies (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
-| `evaluate` | `expression: string` | Run JavaScript in page context (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
-| `semanticAction` | `{ verb, locator, query, value, ... }` | Click/fill/check/select with role/text/label locators |
-| `job` | `{ steps: [...] }` | Multi-step orchestration with per-step reliability |
-| `batch` | `commands: string[][]` | Raw multi-command batching (requires sensitive flag) |
-
-### Examples
-
-```bash
-# Navigate and snapshot with interactive refs
-browser({ action: "navigate", url: "https://example.com" })
-browser({ action: "snapshot" })
-# Returns @e1, @e2, @e3... refs for follow-up clicks
-browser({ action: "click", selector: "@e2" })
-
-# Semantic action — click by role/name
-browser({ semanticAction: { verb: "click", locator: "role", query: "button", value: "Submit" } })
-
-# Multi-step job with reliability
-browser({ job: { steps: [
-  { kind: "open", url: "https://example.com" },
-  { kind: "fill", selector: "@e1", text: "hello" },
-  { kind: "click", selector: "@e2" },
-  { kind: "snapshot" }
-] } })
-
-# Extract text
-browser({ action: "text" })
-
-# Evaluate JavaScript
-browser({ action: "evaluate", expression: "document.title" })
-```
-
-### Backend selection
-
-agent-browser is the browser backend. It provides reliability checks, snapshot refs, and session management.
-
-### Chrome companion path
-
-When `PI_SEARCH_CHROME_EXTENSION_ID` is configured and a `/chrome authorize` grant is live, browser allowlisted actions route through the user-Chromium companion. The bridge listens only on literal `127.0.0.1:17319`, pins `Origin` to `chrome-extension://<extension-id>`, and requires the operator-provisioned `PI_SEARCH_CHROME_PAIRING_SECRET` on every companion request; Origin alone does not pair. A short-lived grant is renewed roughly every 30 seconds over the bridge. Selection uses the Chromium OS-default sole match or explicit `/chrome authorize <family>` choice; same-family ambiguity fails closed. Sensitive/unsupported actions stay on the isolated backend or are denied by policy. Revoke, expiry, bridge failure, or shutdown falls back to the isolated backend.
-
-### Security
-
-- Public user-controlled fetch/browser URLs accept only HTTP(S), reject credentials, private/reserved literals, localhost, metadata, and Docker hostnames; browser sessions also run system-DNS preflight and frozen domain allowlisting (defense-in-depth, not complete SSRF containment)
-- Configured local SearXNG/Ollama/embedding/sidecar/CDP/setup endpoints remain operator-owned paths and are not routed through public URL validation
-- Residual risks: DNS rebinding and Chromium DNS TOCTOU after preflight, unrestricted redirects in some fetch paths, and debug-server outbound proxying; container egress remains authoritative outer boundary. See ADR 0003.
-- `evaluate`, `set_cookies`, and `batch` are disabled by default; enable with `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`
-- Cookies return metadata only (name, domain, path, expiry, flags) — values are never exposed
-- Error messages sanitized: token/password/secret/authorization patterns stripped (≤2000 chars)
-- External tool text (`web_search`, `fetch`, `github`, `social`, `kg`, `graph`, `browser`, `desktop`, `agent_poll` — exactly `EXTERNAL_TOOL_NAMES` in `src/core/untrusted-content.ts`) is framed as untrusted evidence with a per-result fence token and heuristic injection flags; visible content is never redacted, and framing does not authorize actions or secret access
-- Security enforcement is external through containerization and other extensions
-
-### Loopback-only debug mode
-
-When navigating to a loopback address (`localhost`, `127.x.x.x`, `[::1]`), the browser session enters **loopback-only mode**: network is confined to that exact origin (scheme + host + port). All other traffic is blocked — public internet, RFC1918, metadata endpoints, different loopback ports.
-
-```bash
-# Navigate to a local dev server — enters loopback-only mode automatically
-browser({ action: "navigate", url: "http://localhost:3000" })
-
-# All browser actions work normally within the confined session
-browser({ action: "snapshot" })
-browser({ action: "click", selector: "@e1" })
-
-# Close to exit loopback mode
-browser({ action: "close" })
-```
-
-How it works:
-- A local enforcing proxy starts on an ephemeral port before the browser launches
-- The proxy resolves DNS once at startup and pins the result (prevents DNS rebinding)
-- HTTP, WebSocket, and HTTPS CONNECT requests are checked against the pinned origin
-- `AGENT_BROWSER_ALLOWED_DOMAINS` blocks cross-domain navigation and sub-resources
-- CDP backend fails closed on loopback targets (clear error message)
-- Same loopback origin reuses the adapter; different origins are rejected
-- Browser capabilities (click, type, fill, evaluate, etc.) remain unchanged
-
-Limitations:
-- Cross-port HMR is blocked by design (only same-port HMR allowed)
-- Container egress remains the outer defense boundary
-- The debug server itself can still proxy outbound traffic (outside browser boundary)
-
-Batch and job commands cannot target loopback URLs — use top-level `navigate` to enter loopback mode.
-
-## Desktop automation
-
-`desktop` tool provides native desktop observation and interaction via [Cua Driver](https://github.com/trycua/cua).
-
-> Privacy: optional paid backends (Diffbot) transmit queries/URLs/selectors/text externally — see [Diffbot privacy warning](#diffbot-privacy-warning-read-before-installing).
-
-### Installation
-
-Cua Driver is optional and disabled by default. To enable:
-
-1. Download [Cua Driver v0.7.1](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.7.1) for your platform:
-   - **macOS**: Download `cua-driver-aarch64-apple-darwin` (Apple Silicon) or `cua-driver-x86_64-apple-darwin` (Intel)
-   - **Linux**: Download `cua-driver-x86_64-unknown-linux-gnu`
-   - **Windows**: Download `cua-driver-x86_64-pc-windows-msvc.exe`
-
-2. Make it executable and place it on your `$PATH` (typically `/usr/local/bin`):
-
-```bash
-chmod +x cua-driver
-sudo mv cua-driver /usr/local/bin/
-```
-
-3. Grant permissions (one-time, OS-dependent):
-   - **macOS**: First run prompts for Accessibility (System Settings > Security & Privacy)
-   - **Linux**: May require `sudo` or xinput permissions
-   - **Windows**: Run as Administrator the first time
-
-4. Enable the tool:
-
-```bash
-export PI_SEARCH_DESKTOP_AUTOMATION="1"
-```
-
-Optionally configure the driver path:
-
-```bash
-export CUA_DRIVER_PATH="/usr/local/bin/cua-driver"
-```
-
-### Capabilities
-
-`desktop` supports these actions:
-
-| Action | Parameters | What it does |
-|--------|-----------|------|
-| `status` | none | Check Cua Driver health and permissions |
-| `list_apps` | none | List running applications |
-| `list_windows` | none | List open windows across all apps |
-| `observe_window` | `pid: number`, `windowId: string`, `includeScreenshot?: boolean` | Get accessibility tree (AX) for a window; optionally screenshot |
-| `click` | `pid: number`, `windowId: string`, `x: number`, `y: number`, `stateId: string` | Click at coordinates (requires fresh state ID) |
-| `type_text` | `pid: number`, `windowId: string`, `text: string`, `stateId: string` | Type text (requires fresh state ID) |
-| `press_key` | `pid: number`, `windowId: string`, `key: string`, `stateId: string` | Press a key (e.g., "Return", "Escape") |
-| `scroll` | `pid: number`, `windowId: string`, `deltaX?: number`, `deltaY?: number`, `stateId: string` | Scroll by pixel delta (requires fresh state ID) |
-| `wait` | `pid: number`, `windowId: string`, `predicate?: {text?, role?}`, `timeoutMs?: number` | Poll until text/role appears in AX tree (default 30s timeout) |
-
-### Examples
-
-```bash
-# Check driver health
-desktop({ action: "status" })
-
-# List windows
-desktop({ action: "list_windows" })
-
-# Observe a window's accessibility tree
-desktop({ action: "observe_window", pid: 1234, windowId: "main-window", includeScreenshot: false })
-
-# Observe with screenshot
-desktop({ action: "observe_window", pid: 1234, windowId: "main-window", includeScreenshot: true })
-
-# Interact (requires stateId from observe_window response)
-desktop({ action: "click", pid: 1234, windowId: "main-window", x: 100, y: 200, stateId: "state-123" })
-desktop({ action: "type_text", pid: 1234, windowId: "main-window", text: "hello", stateId: "state-123" })
-
-# Wait for text to appear
-desktop({ action: "wait", pid: 1234, windowId: "main-window", predicate: { text: "Save" }, timeoutMs: 5000 })
-```
-
-### State IDs
-
-Mutations (click, type, press_key, scroll) require a fresh `stateId` from the most recent `observe_window` call. After each mutation, you must call `observe_window` again to get a new state ID before the next mutation. This ensures:
-
-- State consistency: AX tree matched to real state
-- Atomicity: mutations are serialized and never retried after dispatch
-- Isolation: transport loss yields `OUTCOME_UNKNOWN` (no blind retries)
-
-### Screenshots
-
-- Optional via `includeScreenshot: true` in `observe_window`
-- Returns as inline base64 image content
-- **Sensitive**: screenshots can expose PII/credentials — close sensitive apps before capturing; the extension does not close apps on your behalf
-- Returns PNG with window content, resolution capped at 10 000×10 000 pixels (desktop screenshot via Cua Driver). Browser (`screen‑shot`) screenshots are capped at 8 000×8 000 pixels (configured in agent-browser adapter).
-
-### Observations
-
-- AX (Accessibility) tree is AX-only by default; includes element names, roles, values, but not visual pixel data
-- Tree depth capped at 32 levels; node count capped at 1 000
-- Redacts sensitive fields: passwords, tokens, secrets, paths
-- Screenshot bytes capped at 10 MB (prevents large binaries)
-- Tool outputs additionally bounded via guardText (default 60k chars); strings >10k chars go through guardText with a 60k cap (head+tail kept) after secret redaction; data/details payloads exceeding 120k chars are replaced with a guardText-bounded summary
-
-### Permissions
-
-Cua Driver relies on OS-level permissions. The extension does not request, revoke, or monitor them:
-
-- **macOS**: macOS may show an Accessibility prompt; grant access in System Settings > Privacy & Security > Accessibility.
-- **Linux**: X11 or Wayland permissions vary by desktop.
-- **Windows**: Some actions may require Administrator privileges.
-
-Permissions are user-owned and persist across sessions. Session shutdown cannot revoke grants.
-
-### Security & Privacy
-
-- Not registered by default — set `PI_SEARCH_DESKTOP_AUTOMATION=1` to register it
-- Observation is AX-only by default; screenshots require explicit opt-in
-- Screenshots and AX trees can expose sensitive information — only use with trusted applications
-- Mutations are serialized per window; transport loss is not retried
-- Confirmation tiers: type_text/press_key require explicit human confirmation in TUI and fail closed headless; scroll/click ungated — operator must close sensitive apps
-- Redaction is applied to output (passwords, tokens, paths removed before AI sees them)
-
-## Package contract
-
-```json
-{
-  "pi": {
-    "extensions": ["./src/index.ts"]
-  }
-}
-```
+MIT. See [`LICENSE`](./LICENSE).
