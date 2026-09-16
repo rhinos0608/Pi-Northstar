@@ -242,3 +242,59 @@ describe('web-access pdf: bounded local extraction, page citations, no OCR/cloud
     await assert.rejects(pending);
   });
 });
+
+describe('M6 fetch pdf: scanned pages mark degraded, text pages stay clean', () => {
+  function pdfBytes(stream: string): Uint8Array {
+    const doc =
+      '%PDF-1.4\n' +
+      '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n' +
+      '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
+      '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n' +
+      `4 0 obj<</Length ${stream.length}>>stream\n${stream}endstream\nendobj\n` +
+      '5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n' +
+      'trailer<</Root 1 0 R>>';
+    return new Uint8Array(Buffer.from(doc, 'latin1'));
+  }
+
+  const DENSE_STREAM =
+    'BT /F1 24 Tf 100 700 Td (Dense report paragraph with plenty of local text for the diagnostics floor) Tj ET\n';
+
+  async function fetchPdf(url: string, bytes: Uint8Array) {
+    const { dispatchSpecializedUrl } = await import('../../../src/native-fetch.js');
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, {
+        status: 200,
+        headers: { 'content-type': 'application/pdf' },
+      })) as typeof fetch;
+    try {
+      return await dispatchSpecializedUrl(url, {
+        env: {},
+        lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+      });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  }
+
+  it('marks degraded with the fixed local-only note for a scanned fixture', async () => {
+    const out = await fetchPdf('https://example.com/scan.pdf', pdfBytes(' '));
+    const details = (out as { details?: Record<string, unknown> }).details ?? {};
+    assert.equal(details.degraded, true);
+    assert.match(String(details.note ?? ''), /local-only PDF policy/);
+    const pdf = details.pdf as { warnings?: string[] } | undefined;
+    assert.ok(
+      pdf?.warnings?.some((w) => w.includes('possibly-scanned-no-vision')),
+      JSON.stringify(pdf?.warnings),
+    );
+  });
+
+  it('stays undegraded for a text fixture', async () => {
+    const out = await fetchPdf('https://example.com/text.pdf', pdfBytes(DENSE_STREAM));
+    const details = (out as { details?: Record<string, unknown> }).details ?? {};
+    assert.equal(details.degraded, undefined);
+    assert.equal(details.note, undefined);
+    const pdf = details.pdf as { warnings?: string[] } | undefined;
+    assert.equal(pdf?.warnings, undefined);
+  });
+});

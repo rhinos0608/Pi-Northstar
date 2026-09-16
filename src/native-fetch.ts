@@ -1,8 +1,12 @@
 import type { BackendCallResult } from './backend.js';
 import { createAnalyzeBudget } from './diffbot/diffbot-extract.js';
 import { callGithubTool } from './github/github-domain.js';
+import { parseGithubIssuePrFetchUrl } from './github/github-issue-pr-url.js';
 import { northstarTextResult, textResult } from './core/tool-output.js';
 import { callReachTool } from './reach-tools.js';
+import { isYoutubeFetchVideoUrl } from './media-vision/frame-extract.js';
+import { runFetchVideoAnalysis } from './media-vision/video-analysis.js';
+import { isVideoSynthesisConfigured } from './media-vision/video-synthesis.js';
 import { ScraplingBridge } from './web/access/scrapling-bridge.js';
 import { buildWebAccessStoredEntry, createWebAccessContentStore } from './web/access/web-access-content-store.js';
 import { WEB_ACCESS_RETRIEVAL_MAX_CHARS, parseWebAccessFetchRequest, WebAccessContractError, type WebAccessProviderId, type WebAccessQueryResult } from './web/access/web-access-contract.js';
@@ -10,8 +14,12 @@ import { retrieveWebAccessCorpus } from './web/access/web-access-retrieve.js';
 import { runWebAccessCachedSourceCheck } from './web/access/web-access-cached-source-check.js';
 import { formatWebAccessSourceCheck } from './web/access/web-access-presentation.js';
 import { isPdfUrl, extractWebAccessPdfText, loadUnpdfExtractor, WEB_ACCESS_PDF_MAX_BYTES } from './web/access/web-access-pdf.js';
+import { pdfSparsePageWarnings } from './web/access/web-access-pdf-diagnostics.js';
+import { describeFetchedImage, fetchRemoteImage, isImageUrl } from './web/access/web-access-image.js';
 import { selectWebAccessReaderKind } from './web/access/web-access-specialization.js';
 import { validateHttpUrl } from './core/http.js';
+import { sanitizeInlineDataUris } from './core/data-uri-sanitize.js';
+import { parseWebAccessAuthProfiles, resolveAuthProfileForUrl, type WebAccessAuthProfile } from './web/access/web-access-auth-contract.js';
 import { resolvePublicHostname } from './network-policy.js';
 import { buildNorthstarResult, parseEntity } from './result-contract.js';
 import { validateWebRequest, WEB_ENTITY_CONTENT_MAX } from './web/web-contract.js';
@@ -131,10 +139,15 @@ export function cacheFetchForRetrieve(input: { query: string; title: string; url
   return cacheFetchEntries(input.query, [{ title: input.title, url: input.url, snippet: input.snippet, content: input.content }]);
 }
 
-// Map a github.com URL onto the existing github tool. Only repo roots and
-// blob/tree paths map; issues/pulls/commits URLs return undefined so the
-// page reader serves them. Validation rejects ambiguous refs (e.g. branch
-// names containing slashes); callers fall through on any throw.
+// Map a github.com URL onto the existing github tool. Repo roots and
+// blob/tree paths map via parseGithubFetchUrl; issues/pulls map via
+// parseGithubIssuePrFetchUrl onto the issues/pulls actions with `number`
+// (top-level comments ride the entity body, capped at 50). PR
+// files/commits/checks subpaths decline here so the page reader serves them
+// (checks/changed-files/commits rendering stays deferred); `conversation`
+// subpaths and comment anchors route to the tool. Validation rejects
+// ambiguous refs (e.g. branch names containing slashes); callers fall
+// through on any throw.
 export function parseGithubFetchUrl(raw: string): Record<string, unknown> | undefined {
   let parsed: URL;
   try {
@@ -142,7 +155,9 @@ export function parseGithubFetchUrl(raw: string): Record<string, unknown> | unde
   } catch {
     return undefined;
   }
-  if (parsed.hostname.toLowerCase() !== 'github.com') return undefined;
+  // Leading `www.` is stripped before host validation so www.github.com
+  // routes exactly like github.com (consistent with parseGithubIssuePrFetchUrl).
+  if (parsed.hostname.toLowerCase().replace(/\.$/, '').replace(/^www\./, '') !== 'github.com') return undefined;
   const segs = parsed.pathname.split('/').filter(Boolean);
   if (segs.length < 2) return undefined;
   const owner = segs[0]!;
@@ -164,17 +179,112 @@ export function parseGithubFetchUrl(raw: string): Record<string, unknown> | unde
 async function tryGithubUrlFetch(url: string, options: NativeFetchOptions): Promise<BackendCallResult | undefined> {
   try {
     const input = parseGithubFetchUrl(url);
-    if (!input) return undefined;
-    return await callGithubTool(input, {
-      ...(options.env !== undefined ? { env: options.env } : {}),
-      ...(options.signal !== undefined ? { signal: options.signal } : {}),
-    });
+    if (input) {
+      return await callGithubTool(input, {
+        ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
+    }
+  } catch {
+    return undefined;
+  }
+  try {
+    const pr = parseGithubIssuePrFetchUrl(url);
+    if (!pr) return undefined;
+    // Deferred-render subpaths fall through to the page reader.
+    if (pr.subpath !== undefined && pr.subpath !== 'conversation') return undefined;
+    const result = await callGithubTool(
+      { action: pr.kind === 'pull' ? 'pulls' : 'issues', owner: pr.owner, repo: pr.repo, number: pr.number },
+      {
+        ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      },
+    );
+    // M5: surface the parsed URL fragment as an output note. The anchor is
+    // an id fragment only — never a raw URL part — so it is safe to include.
+    if (pr.anchor === undefined) return result;
+    const details =
+      result.details !== undefined && typeof result.details === 'object' && result.details !== null
+        ? (result.details as Record<string, unknown>)
+        : {};
+    return {
+      ...result,
+      details: {
+        ...details,
+        anchor: pr.anchor,
+        anchorNote: `Linked section #${pr.anchor}: comments ride the issue/PR body above; deep-scroll to the fragment for full context.`,
+      },
+    };
   } catch {
     return undefined;
   }
 }
 
+/**
+ * M8 media route: unchanged transcript-via-media-tool behavior unless a
+ * YouTube watch/shorts URL arrives with video analysis opted in (exact-'1'
+ * PI_VISION_FETCH_VIDEO_FRAMES or a configured synthesis tier). The analysis
+ * envelope carries transcript text as content; keyframe evidence counts and
+ * optional synthesis ride details.generatedText-style separation and are
+ * never merged into content. Any analysis failure falls back to the plain
+ * media result. Never runs on auth hosts (dispatchSpecializedUrl yields
+ * first) and never touches local files (D1).
+ */
 async function tryMediaUrlFetch(url: string, options: NativeFetchOptions): Promise<BackendCallResult | undefined> {
+  const env = options.env ?? process.env;
+  if (
+    isYoutubeFetchVideoUrl(url) &&
+    (env.PI_VISION_FETCH_VIDEO_FRAMES === '1' || isVideoSynthesisConfigured(env))
+  ) {
+    try {
+      const analysis = await runFetchVideoAnalysis(url, {
+        env,
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
+      if (analysis.text.trim().length > 0) {
+        // M1: sanitize at source — the clean text is cached and returned
+        // (sanitization is idempotent with the dispatchFetch choke point).
+        const cleanAnalysis = sanitizeInlineDataUris(analysis.text, 'fetch.media.analysis').text;
+        return withFetchResponseId(
+          textResult(cleanAnalysis, {
+            url,
+            video: {
+              keyframes: analysis.keyframes,
+              synthesized: analysis.synthesized,
+              ...(analysis.synthesis !== undefined ? { synthesisModel: analysis.synthesis.model } : {}),
+            },
+            ...(analysis.degraded
+              ? {
+                degraded: true,
+                note: 'Keyframes were requested but unavailable; transcript and metadata only.',
+              }
+              : {}),
+            ...(analysis.synthesis !== undefined
+              ? {
+                generatedText: [
+                  {
+                    kind: 'video-synthesis',
+                    model: analysis.synthesis.model,
+                    text: analysis.synthesis.text,
+                  },
+                ],
+              }
+              : {}),
+            warnings: analysis.warnings,
+          }),
+          cacheFetchForRetrieve({
+            query: url,
+            title: url,
+            url,
+            snippet: snippetOf(cleanAnalysis),
+            content: cleanAnalysis,
+          }),
+        );
+      }
+    } catch {
+      // Fall through to the plain media result below.
+    }
+  }
   try {
     return await callReachTool('video', { url }, options);
   } catch {
@@ -185,6 +295,42 @@ async function tryMediaUrlFetch(url: string, options: NativeFetchOptions): Promi
 async function tryFeedUrlFetch(url: string, options: NativeFetchOptions): Promise<BackendCallResult | undefined> {
   try {
     return await callReachTool('feeds', { url }, options);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Remote-image specialist (M4): extension-gated, magic-byte verified,
+ * metadata-only by default. Never runs on github/media/feed/pdf URLs (the
+ * dispatcher only calls it for `page` kinds) and never on an authenticated
+ * fetch (no auth path exists in this dispatcher). Any failure returns
+ * undefined so the page reader keeps current behavior. Described text rides
+ * details.generatedText separately (labeled with the vision tier), never
+ * merged into content.
+ */
+async function tryRemoteImageFetch(url: string, options: NativeFetchOptions): Promise<BackendCallResult | undefined> {
+  try {
+    if (!isImageUrl(url)) return undefined;
+    const image = await fetchRemoteImage(url, {
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(options.lookup !== undefined ? { lookup: options.lookup } : {}),
+    });
+    const described = await describeFetchedImage(image.bytes, image.mime, options.env ?? process.env);
+    const dims = image.width !== undefined && image.height !== undefined ? `, ${image.width}x${image.height}` : '';
+    return textResult(`Image fetched (${image.mime}${dims}, ${image.bytes.byteLength} bytes)`, {
+      url,
+      image: {
+        mime: image.mime,
+        bytes: image.bytes.byteLength,
+        ...(image.width !== undefined ? { width: image.width } : {}),
+        ...(image.height !== undefined ? { height: image.height } : {}),
+        ...(image.pixels !== undefined ? { pixels: image.pixels } : {}),
+      },
+      ...(described !== undefined
+        ? { generatedText: [{ kind: 'image-description', tier: described.tier, text: described.text }] }
+        : {}),
+    });
   } catch {
     return undefined;
   }
@@ -262,15 +408,45 @@ async function tryLocalPdfFetch(url: string, options: NativeFetchOptions): Promi
       if (buffer.byteLength > WEB_ACCESS_PDF_MAX_BYTES) return undefined;
     }
     if (buffer.byteLength > WEB_ACCESS_PDF_MAX_BYTES) return undefined;
+    // unpdf takes ownership of (detaches) the input buffer on parse, so the
+    // M6 diagnostics below run on a copy made before extraction consumes it.
+    const diagnosticBytes = buffer.slice();
     const pdf = await extractWebAccessPdfText(buffer, { extractor, ...(options.signal ? { signal: options.signal } : {}) });
+    // M6: honest scanned-page degradation from the local-only path (no
+    // vision seam, so no cloud render can trigger). Diagnostics failure never
+    // fails the fetch: the extracted text stands undegraded.
+    let degradedNote: string | undefined;
+    let pdfWarnings: string[] | undefined;
+    try {
+      const diagnostics = await pdfSparsePageWarnings(diagnosticBytes, extractor, options.signal);
+      if (diagnostics.warnings.length > 0) pdfWarnings = diagnostics.warnings;
+      if (diagnostics.warnings.some((warning) => warning.includes('possibly-scanned-no-vision'))) {
+        degradedNote =
+          'Scanned pages yielded little local text; OCR/vision escalation is not enabled for fetch (local-only PDF policy).';
+      }
+    } catch {
+      // Diagnostics never fail the fetch; extracted text stands as-is.
+    }
+    // M1: sanitize at source — clean text is cached and returned; the
+    // snippet derives from sanitized text (idempotent with choke point).
+    const cleanPdf = sanitizeInlineDataUris(pdf.text, 'fetch.pdf.text').text;
     return withFetchResponseId(
-      textResult(pdf.text, { url, pdf: { totalPages: pdf.totalPages, truncated: pdf.truncated, citations: pdf.citations } }),
+      textResult(cleanPdf, {
+        url,
+        ...(degradedNote !== undefined ? { degraded: true, note: degradedNote } : {}),
+        pdf: {
+          totalPages: pdf.totalPages,
+          truncated: pdf.truncated,
+          citations: pdf.citations,
+          ...(pdfWarnings !== undefined ? { warnings: pdfWarnings } : {}),
+        },
+      }),
       cacheFetchForRetrieve({
         query: url,
         title: url.split('/').pop() || url,
         url,
-        snippet: snippetOf(pdf.text),
-        content: pdf.text,
+        snippet: snippetOf(cleanPdf),
+        content: cleanPdf,
       }),
     );
   } catch {
@@ -279,15 +455,78 @@ async function tryLocalPdfFetch(url: string, options: NativeFetchOptions): Promi
 }
 
 export async function dispatchSpecializedUrl(url: string, options: NativeFetchOptions): Promise<BackendCallResult | undefined> {
+  // M7 precedence: a matching auth profile owns the host, so every
+  // specialist yields (the image branch must never run authenticated).
+  // Falls through to the authenticated reader in agenticBrowseInner.
+  if (resolveAuthProfileForUrl(url, parseWebAccessAuthProfiles(options.env ?? process.env))) return undefined;
   const kind = selectWebAccessReaderKind(url);
   if (kind === 'pdf') return tryLocalPdfFetch(url, options);
   if (kind === 'github') return tryGithubUrlFetch(url, options);
   if (kind === 'media') return tryMediaUrlFetch(url, options);
   if (kind === 'feed') return tryFeedUrlFetch(url, options);
-  return undefined;
+  // Image sniff runs only for plain pages: github/media/feed/pdf precedence
+  // above is untouched. tryRemoteImageFetch fails closed to undefined.
+  return tryRemoteImageFetch(url, options);
 }
 
+/**
+ * Model-visible browse entry: same M1 sanitize choke point as dispatchFetch
+ * (shared sanitizeFetchResultText wrapper, not a duplicate). The `browse`
+ * tool routes here directly, bypassing dispatchFetch.
+ */
 export async function agenticBrowse(args: Record<string, unknown>, options: NativeFetchOptions): Promise<BackendCallResult> {
+  return sanitizeFetchResultText(await agenticBrowseInner(args, options));
+}
+
+/**
+ * M7 authenticated read: direct HTTP with profile cookies, never the bridge,
+ * Diffbot, or external fetch. Caches only when the profile opts into
+ * `cache: 'session'` (T5); the envelope carries `details.authFetch` with the
+ * profile name only (T8).
+ */
+async function agenticBrowseAuthenticated(
+  url: string,
+  profile: WebAccessAuthProfile,
+  options: NativeFetchOptions,
+  env: Record<string, string | undefined>,
+  maxChars: number,
+): Promise<BackendCallResult> {
+  const page = await fetchReadablePage(url, options.signal, undefined, options.lookup, {
+    env,
+    authFetch: { profile, cachePolicy: profile.cache },
+  });
+  const bounded = boundPageText(page.content, maxChars);
+  // M1: sanitize at source — clean text is cached and returned (idempotent
+  // with the agenticBrowse choke point).
+  const content = sanitizeInlineDataUris(bounded.text, 'fetch.auth.content').text;
+  const parsed = parseEntity(
+    { id: page.url, url: page.url, title: page.title, snippet: truncateUtf8Bytes(content, WEB_ENTITY_CONTENT_MAX), source: 'web' },
+    { source: 'web', kind: 'article' },
+  );
+  const envelope = buildNorthstarResult({
+    request: { tool: 'agentic_browse', channel: 'web', action: 'read' },
+    outcomes: [{ source: 'web', backend: 'native-fetch', entities: parsed.ok ? [parsed.entity] : [] }],
+    pagination: { supported: false, limit: 1, hasMore: false },
+  });
+  const responseId = profile.cache === 'session'
+    ? cacheFetchForRetrieve({ query: url, title: page.title, url: page.url, snippet: content.slice(0, 500), content })
+    : undefined;
+  return northstarTextResult(content, {
+    url: page.url,
+    title: page.title,
+    content,
+    ...(responseId !== undefined ? { responseId } : {}),
+    wordCount: wordCount(content),
+    truncated: bounded.truncated,
+    maxChars,
+    omittedChars: bounded.omittedChars,
+    ...(page.declaredLinks !== undefined ? { declaredLinks: page.declaredLinks.length } : {}),
+    ...(page.extraction !== undefined ? { extraction: page.extraction } : {}),
+    authFetch: { profile: profile.name, cachePolicy: profile.cache, externalProcessing: false },
+  }, envelope);
+}
+
+async function agenticBrowseInner(args: Record<string, unknown>, options: NativeFetchOptions): Promise<BackendCallResult> {
   const action = typeof args.action === 'string' ? args.action : 'read';
   if (action !== 'read' && action !== 'browse') {
     throw new Error(`Native agentic_browse only supports read and browse actions, got: ${action}`);
@@ -321,6 +560,14 @@ export async function agenticBrowse(args: Record<string, unknown>, options: Nati
     env: readEnv,
     ...(readEnv.DIFFBOT_TOKEN?.trim() ? { fallbackBudget: createAnalyzeBudget(undefined, readEnv) } : {}),
   };
+  // M7: a matching auth profile takes the authenticated reader (direct HTTP
+  // with profile cookies). The fetchPageText test seam, bridge, Diffbot, and
+  // external fetch are skipped by construction: the auth runtime carries no
+  // seam and the page reader honors authFetch first.
+  const authProfile = resolveAuthProfileForUrl(url, parseWebAccessAuthProfiles(readEnv));
+  if (authProfile) {
+    return agenticBrowseAuthenticated(url, authProfile, options, readEnv, maxChars);
+  }
   try {
     const page = await fetchReadablePage(
       url,
@@ -330,9 +577,11 @@ export async function agenticBrowse(args: Record<string, unknown>, options: Nati
       readRuntime,
     );
     const bounded = boundPageText(page.content, maxChars);
-    const content = bounded.text;
+    // M1: sanitize at source — clean text is cached and returned; the snippet
+    // derives from sanitized text (idempotent with the choke point).
+    const content = sanitizeInlineDataUris(bounded.text, 'fetch.read.content').text;
     const parsed = parseEntity(
-      { id: page.url, url: page.url, title: page.title, snippet: truncateUtf8Bytes(bounded.shown, WEB_ENTITY_CONTENT_MAX), source: 'web' },
+      { id: page.url, url: page.url, title: page.title, snippet: truncateUtf8Bytes(content, WEB_ENTITY_CONTENT_MAX), source: 'web' },
       { source: 'web', kind: 'article' },
     );
     // Execution-fallback markers (not quality judgments): Diffbot Analyze
@@ -359,7 +608,7 @@ export async function agenticBrowse(args: Record<string, unknown>, options: Nati
       query: url,
       title: page.title || page.url,
       url: page.url,
-      snippet: snippetOf(bounded.shown),
+      snippet: snippetOf(content),
       content,
     });
     return northstarTextResult(content, {
@@ -371,6 +620,9 @@ export async function agenticBrowse(args: Record<string, unknown>, options: Nati
       truncated: bounded.truncated,
       maxChars,
       omittedChars: bounded.omittedChars,
+      // M2/M3 envelope signals (counts/labels only, never content duplication).
+      ...(page.declaredLinks !== undefined ? { declaredLinks: page.declaredLinks.length } : {}),
+      ...(page.extraction !== undefined ? { extraction: page.extraction } : {}),
       ...(fallbackUsed
         ? { fallback: { provider: 'diffbot', path: 'fallback', qualityImpact: 'not_assessed', ...(page.primaryError !== undefined ? { primaryFailure: page.primaryError } : {}) } }
         : {}),
@@ -394,6 +646,30 @@ export async function agenticBrowse(args: Record<string, unknown>, options: Nati
 }
 
 export async function dispatchFetch(args: Record<string, unknown>, options: NativeFetchOptions): Promise<BackendCallResult> {
+  return sanitizeFetchResultText(await dispatchFetchInner(args, options));
+}
+
+/**
+ * Model-visible fetch choke point (M1): every BackendCallResult leaving
+ * dispatchFetch gets inline `data:` URIs replaced in `content` text only.
+ * `details` envelopes (citations, counts) are never touched; thumbnails
+ * and frames are untouched by construction (no such fields exist here).
+ */
+function sanitizeFetchResultText(result: BackendCallResult): BackendCallResult {
+  const content = (result as { content?: Array<{ type?: string; text?: string }> }).content;
+  if (!Array.isArray(content)) return result;
+  let changed = false;
+  const sanitized = content.map((item, index) => {
+    if (item?.type !== 'text' || typeof item.text !== 'string') return item;
+    const out = sanitizeInlineDataUris(item.text, `fetch.content[${index}]`);
+    if (out.omissions.length === 0) return item;
+    changed = true;
+    return { ...item, text: out.text };
+  });
+  return changed ? { ...result, content: sanitized } : result;
+}
+
+async function dispatchFetchInner(args: Record<string, unknown>, options: NativeFetchOptions): Promise<BackendCallResult> {
   // No hidden controls: provider selection is operator-only
   // (PI_SEARCH_WEB_BACKENDS) and format does not exist as fetch input.
   if (args.provider !== undefined) {
@@ -451,10 +727,38 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
     const withQuery = typeof args.query === 'string' && args.query.trim().length > 0;
     const out: string[] = [];
     const cached: Array<{ title: string; url: string; snippet: string; content: string }> = [];
+    // M7: auth-off entries never reach the retrieve cache (T5). A config
+    // parse error falls back to cacheable: the fetch itself surfaces it.
+    const arrayAuthCacheable = (entryUrl: string): boolean => {
+      try {
+        return resolveAuthProfileForUrl(entryUrl, parseWebAccessAuthProfiles(options.env ?? process.env))?.cache !== 'off';
+      } catch {
+        return true;
+      }
+    };
     for (const url of args.urls as unknown[]) {
       const single = String(url);
       try {
         if (withQuery) {
+          // M7 (T5/T6): an auth-host URL skips semanticCrawl entirely (no
+          // bridge/Diffbot/external processing on auth hosts); it routes
+          // through agenticBrowseInner, which already carries the authFetch
+          // seam and owns the session-only cache gate.
+          let entryIsAuth = false;
+          try {
+            entryIsAuth =
+              resolveAuthProfileForUrl(single, parseWebAccessAuthProfiles(options.env ?? process.env)) !== undefined;
+          } catch {
+            entryIsAuth = false;
+          }
+          if (entryIsAuth) {
+            const authResult = await agenticBrowseInner({ url: single, ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}) }, options);
+            const authBody = resultToSingleText(authResult);
+            out.push(`## ${single}\n${authBody}`);
+            if (arrayAuthCacheable(single)) {
+              cached.push({ title: single, url: single, snippet: snippetOf(authBody), content: authBody });
+            }
+          } else {
           const chunked = await semanticCrawl({
             source: { type: 'url', url: single },
             query: args.query,
@@ -462,15 +766,21 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
             ...(typeof args.maxPages === 'number' ? { maxPages: args.maxPages } : {}),
             ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}),
           }, options);
-          const body = resultToSingleText(chunked);
+          // M1: sanitize at source — clean text is cached and returned.
+          const body = sanitizeInlineDataUris(resultToSingleText(chunked), 'fetch.query.content').text;
           out.push(`## ${single}\n${body}`);
-          cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
+          if (arrayAuthCacheable(single)) {
+            cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
+          }
+          }
         } else {
           const specialized = await dispatchSpecializedUrl(single, options);
-          const singleResult = specialized ?? await agenticBrowse({ url: single, ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}) }, options);
-          const body = resultToSingleText(singleResult);
+          const singleResult = specialized ?? await agenticBrowseInner({ url: single, ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}) }, options);
+          const body = sanitizeInlineDataUris(resultToSingleText(singleResult), 'fetch.read.content').text;
           out.push(body);
-          cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
+          if (arrayAuthCacheable(single)) {
+            cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
+          }
         }
       } catch (error) {
         out.push(`## ${single}\nError: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`);
@@ -498,6 +808,17 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
   if (typeof args.url === 'string' && typeof args.query === 'string' && args.query.trim().length > 0) {
     const single = args.url;
     const singleQuery = args.query;
+    // M7 (T5/T6): an auth-host URL never enters semanticCrawl (no
+    // bridge/Diffbot/external processing on auth hosts); the agenticBrowse
+    // path already carries the authFetch seam and owns the session-only
+    // cache gate. A config parse error falls back to the default path.
+    try {
+      if (resolveAuthProfileForUrl(single, parseWebAccessAuthProfiles(options.env ?? process.env)) !== undefined) {
+        return agenticBrowseInner(args, options);
+      }
+    } catch {
+      // Fall through to the default query path below.
+    }
     try {
       const chunked = await semanticCrawl({
         source: { type: 'url', url: single },
@@ -506,22 +827,34 @@ export async function dispatchFetch(args: Record<string, unknown>, options: Nati
         ...(typeof args.maxPages === 'number' ? { maxPages: args.maxPages } : {}),
         ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}),
       }, options);
-      const body = resultToSingleText(chunked);
+      // M1: sanitize at source — clean text is cached and returned.
+      const body = sanitizeInlineDataUris(resultToSingleText(chunked), 'fetch.query.content').text;
       const text = `## ${single}\n${body}`;
+      // M7 (T5): the singular query branch honors the same session-only
+      // auth cache gate as the array branch; a parse error stays cacheable.
+      let queryCacheable = true;
+      try {
+        queryCacheable =
+          resolveAuthProfileForUrl(single, parseWebAccessAuthProfiles(options.env ?? process.env))?.cache !== 'off';
+      } catch {
+        queryCacheable = true;
+      }
       return withFetchResponseId(
         textResult(text, { url: single }),
-        cacheFetchForRetrieve({
-          query: singleQuery.trim(),
-          title: single,
-          url: single,
-          snippet: snippetOf(body),
-          content: body,
-        }),
+        queryCacheable
+          ? cacheFetchForRetrieve({
+            query: singleQuery.trim(),
+            title: single,
+            url: single,
+            snippet: snippetOf(body),
+            content: body,
+          })
+          : undefined,
       );
     } catch {
-      return agenticBrowse(args, options);
+      return agenticBrowseInner(args, options);
     }
   }
-  return agenticBrowse(args, options);
+  return agenticBrowseInner(args, options);
 }
 

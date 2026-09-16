@@ -4,7 +4,7 @@
 // imports, no network, no disk. Node builtins only. Integration files
 // (src/index.ts, src/native-tools.ts, src/web.ts, src/web-contract.ts,
 // src/web-search-types.ts, src/result-contract.ts, src/providers.ts,
-// src/capabilities.ts, src/untrusted-content.ts, src/tool-output.ts)
+// src/capabilities.ts, src/core/untrusted-content.ts, src/core/tool-output.ts)
 // are never edited here.
 //
 // FINAL rules encoded:

@@ -7,11 +7,28 @@
 // Analyze runs only after native/Scrapling exhaustion for eligible failures;
 // ordered gated external fetch (Firecrawl/Jina) runs last. Never reorder
 // without a security review.
+//
+// Ordering exception (M7): when FetchPageRuntime.authFetch is present the
+// caller takes the cookie-authenticated direct-HTTP seam instead: the
+// fetchPageText test seam, Scrapling bridge, Diffbot fallback, and gated
+// external fetch are all skipped, and the result carries `authenticated`.
+//
+// Local parse order on native HTML (bridge/plain paths only): stripHtml,
+// then RSC flight-data rescue when the stripped text is thin, then the
+// declared-links appendix. The fetchPageText test seam, Diffbot fallback,
+// and external fetch bypass rescue/appendix: the seam stays deterministic,
+// and Diffbot/external results carry no rawHtml to scan. The response Link
+// header leg of declared-link discovery is inert (null): the text-only
+// fetch seam exposes no headers, so only the HTML leg contributes.
 
 import { fetchText, validateHttpUrl } from '../core/http.js';
 import { type DnsLookup, resolvePublicHostname } from '../network-policy.js';
 import { ScraplingBridge } from './access/scrapling-bridge.js';
+import { fetchAuthenticatedReadablePage } from './access/web-access-auth-fetch.js';
+import type { WebAccessAuthProfile } from './access/web-access-auth-contract.js';
 import { analyzePage, createAnalyzeBudget, type AnalyzeBudget } from '../diffbot/diffbot-extract.js';
+import { appendDeclaredWebLinks, discoverDeclaredWebLinks, type DeclaredWebLink } from './access/declared-web-links.js';
+import { extractRSCContent, RSC_MIN_EXTRACTED_CONTENT, RSC_MIN_USEFUL_CONTENT } from './access/rsc-extract.js';
 import { presentPageText } from './web-presentation.js';
 import { normalizeGeneratedText } from './web-native-ai.js';
 import { firecrawlFetchAdapter } from './providers/firecrawl.js';
@@ -48,6 +65,22 @@ export interface ReadablePage {
   externalFetch?: { backend: 'firecrawl' | 'jina'; externalProcessing: true } | undefined;
   /** Vendor-generated summary text kept separate from extracted content. */
   generatedText?: WebGeneratedText[] | undefined;
+  /**
+   * Declared-link appendix entries (Link header + HTML rel allowlist).
+   * Present only when rawHtml was scanned and at least one link matched.
+   */
+  declaredLinks?: DeclaredWebLink[] | undefined;
+  /**
+   * Local parse path that produced content. `rsc-flight` marks the Next.js
+   * flight-data rescue; absent on Diffbot/external results (no rawHtml).
+   */
+  extraction?: 'html-strip' | 'rsc-flight' | undefined;
+  /**
+   * Present only on the cookie-authenticated seam (M7): direct HTTP with an
+   * operator auth profile, never bridge/Diffbot/external. Profile name and
+   * cache policy only (never cookie values).
+   */
+  authenticated?: { profile: string; cachePolicy: 'session' | 'off' } | undefined;
   /** Safe (token-free, 500-char sliced) primary failure that triggered fallback. */
   primaryError?: string | undefined;
 }
@@ -57,6 +90,12 @@ export interface FetchPageRuntime {
   env?: Record<string, string | undefined> | undefined;
   /** Shared per-fetch Analyze budget (one instance across a whole crawl). */
   fallbackBudget?: AnalyzeBudget | undefined;
+  /**
+   * Cookie-authenticated seam (M7): when present, fetchReadablePage skips
+   * the fetchPageText test seam, bridge, Diffbot, and external fetch, and
+   * runs the profile-scoped direct-HTTP fetch instead.
+   */
+  authFetch?: { profile: WebAccessAuthProfile; cachePolicy: 'session' | 'off' } | undefined;
 }
 
 /**
@@ -121,6 +160,43 @@ export async function tryExternalFetch(
   };
 }
 
+/**
+ * Local finalize for native HTML (bridge/plain paths only): stripHtml,
+ * then RSC flight-data rescue when stripped text is thin, then the
+ * declared-links appendix. Runs once per page; the fetchPageText seam
+ * and Diffbot/external results bypass it.
+ */
+export function finalizeNativePage(input: { url: string; title: string; html: string; links?: string[] | undefined }): ReadablePage {
+  const stripped = stripHtml(input.html);
+  let content = stripped;
+  let title = input.title;
+  let extraction: 'html-strip' | 'rsc-flight' = 'html-strip';
+  if (stripped.trim().length < RSC_MIN_USEFUL_CONTENT && input.html.includes('self.__next_f.push')) {
+    try {
+      const rescued = extractRSCContent(input.html);
+      if (rescued && rescued.content.length > RSC_MIN_EXTRACTED_CONTENT) {
+        content = rescued.content;
+        if (!title) title = rescued.title;
+        extraction = 'rsc-flight';
+      }
+    } catch {
+      // Hostile flight payloads must not escape: keep stripped text.
+    }
+  }
+  // Link-header leg is inert (null): the text-only fetch seam exposes no
+  // response headers, so only the HTML leg contributes.
+  const declared = discoverDeclaredWebLinks(input.html, null, input.url);
+  return {
+    url: input.url,
+    title,
+    content: declared.length > 0 ? appendDeclaredWebLinks(content, declared) : content,
+    rawHtml: input.html,
+    ...(input.links !== undefined ? { links: input.links } : {}),
+    ...(declared.length > 0 ? { declaredLinks: declared } : {}),
+    extraction,
+  };
+}
+
 export async function fetchReadablePage(
   rawUrl: string,
   signal?: AbortSignal,
@@ -129,6 +205,24 @@ export async function fetchReadablePage(
   runtime?: FetchPageRuntime,
 ): Promise<ReadablePage> {
   const trimmed = rawUrl.trim();
+  // Auth seam first: an authenticated fetch skips the fetchPageText test
+  // seam, the bridge, Diffbot, and external fetch entirely.
+  if (runtime?.authFetch) {
+    const { profile, cachePolicy } = runtime.authFetch;
+    const page = await fetchAuthenticatedReadablePage(trimmed, profile, {
+      env: runtime.env ?? process.env,
+      ...(signal !== undefined ? { signal } : {}),
+      ...(lookup !== undefined ? { lookup } : {}),
+    });
+    return {
+      url: page.url,
+      title: page.title,
+      content: page.content,
+      authenticated: { profile: profile.name, cachePolicy },
+      ...(page.declaredLinks !== undefined ? { declaredLinks: page.declaredLinks } : {}),
+      ...(page.extraction !== undefined ? { extraction: page.extraction } : {}),
+    };
+  }
   // Test seam: serve HTML without SSRF validation or network. Production
   // never sets fetchPageText, so every real fetch still validates below.
   // The seam also skips Diffbot fallback so tests stay deterministic.
@@ -171,10 +265,9 @@ export async function fetchReadablePage(
         throw new Error('Scrapling bridge returned blocked URL');
       }
       await resolvePublicHostname(new URL(bridgeFinalUrl).hostname, signal, lookup);
-      const content = stripHtml(result.content);
-      if (content.trim()) {
+      if (stripHtml(result.content).trim()) {
         const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
-        return { url: bridgeFinalUrl, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
+        return finalizeNativePage({ url: bridgeFinalUrl, title: result.title || '', html: result.content, ...(links ? { links } : {}) });
       }
       if (!hasToken) {
         // No Diffbot token: Analyze skipped, but gated external fetch
@@ -183,7 +276,7 @@ export async function fetchReadablePage(
         const external = await tryExternalFetch(url, noTokenEnv, signal, lookup, undefined);
         if (external) return external;
         const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
-        return { url: bridgeFinalUrl, title: result.title || '', content, rawHtml: result.content, ...(links ? { links } : {}) };
+        return finalizeNativePage({ url: bridgeFinalUrl, title: result.title || '', html: result.content, ...(links ? { links } : {}) });
       }
     } catch (error) {
       if (!hasToken) {
@@ -205,8 +298,7 @@ export async function fetchReadablePage(
     const title = cleanText((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').trim());
     plainHtml = html;
     plainTitle = title;
-    const content = stripHtml(html);
-    if (content.trim()) return { url, title, content, rawHtml: html };
+    if (stripHtml(html).trim()) return finalizeNativePage({ url, title, html });
     // Empty/unusable content: eligible for Analyze fallback (no primary error).
   } catch (error) {
     if (!hasToken) {
@@ -233,9 +325,7 @@ export async function fetchReadablePage(
     const external = await tryExternalFetch(url, env, signal, lookup, primaryError);
     if (external) return external;
     if (primaryError) throw primaryError;
-    const html = plainHtml ?? '';
-    const title = plainTitle;
-    return { url, title, content: stripHtml(html), rawHtml: html };
+    return finalizeNativePage({ url, title: plainTitle, html: plainHtml ?? '' });
   }
   const budget = runtime?.fallbackBudget ?? createAnalyzeBudget(undefined, env);
   if (budget.remaining <= 0) {

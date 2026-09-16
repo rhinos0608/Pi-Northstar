@@ -74,3 +74,64 @@ test('web.ts re-exports the page-reader public symbols', () => {
   assert.equal(web.boundPageText, boundPageText);
   assert.ok(Array.isArray(web.ALL_FETCH_ADAPTERS));
 });
+
+function stubPublicFetch(html: string): () => void {
+  const saved = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(html, { status: 200 })) as typeof fetch;
+  return () => { globalThis.fetch = saved; };
+}
+
+const publicLookup = async () => [{ address: '93.184.216.34', family: 4 as const }];
+
+function flightBody(article: string): string {
+  const payload = `23:${JSON.stringify(['$', 'article', null, { children: ['$', 'p', null, { children: article }] }])}\n`;
+  return `<script>self.__next_f.push([1,${JSON.stringify(payload)}])</script>`;
+}
+
+test('thin stripHtml + flight payload rescues with rsc-flight extraction', async () => {
+  const article = 'RSC rescued article body through the reader path. '.repeat(20);
+  const restore = stubPublicFetch(
+    '<!doctype html><html><head><title>Reader RSC</title></head><body><div>Loading...</div>' +
+      flightBody(article) +
+      '</body></html>',
+  );
+  try {
+    const page = await fetchReadablePage('https://example.com/rsc', undefined, undefined, publicLookup);
+    assert.equal(page.extraction, 'rsc-flight');
+    assert.match(page.content, /RSC rescued article body/);
+  } finally {
+    restore();
+  }
+});
+
+test('non-flight thin page keeps html-strip extraction', async () => {
+  const restore = stubPublicFetch(
+    '<html><head><title>Thin</title></head><body><p>Hi</p></body></html>',
+  );
+  try {
+    const page = await fetchReadablePage('https://example.com/thin', undefined, undefined, publicLookup);
+    assert.equal(page.extraction, 'html-strip');
+    assert.equal(page.declaredLinks, undefined);
+    assert.ok(!page.content.includes('## Declared links'));
+  } finally {
+    restore();
+  }
+});
+
+test('declared-links appendix appended once with declaredLinks reported', async () => {
+  const prose = `Substantive reader body that stays above the rescue floor. ${'x'.repeat(600)}`;
+  const restore = stubPublicFetch(
+    '<html><head><title>Docs</title>' +
+      '<link rel="service-doc" href="/docs">' +
+      `</head><body><article><p>${prose}</p></article></body></html>`,
+  );
+  try {
+    const page = await fetchReadablePage('https://example.com/docs', undefined, undefined, publicLookup);
+    assert.equal(page.extraction, 'html-strip');
+    assert.equal(page.declaredLinks?.length, 1);
+    assert.equal(page.content.split('## Declared links').length - 1, 1);
+    assert.match(page.content, /<https:\/\/example\.com\/docs>/);
+  } finally {
+    restore();
+  }
+});

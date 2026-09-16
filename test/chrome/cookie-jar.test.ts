@@ -238,3 +238,17 @@ test('default browser import degrades on unsupported platforms', async (t) => {
   assert.equal(result.ok, false);
   assert.match(result.message, /macOS/);
 });
+
+test('auth fetch path uses per-hop jar headers only, never the derived CLI env (T7/T12)', async () => {
+  // Static seam guard: web-access-auth-fetch may call cookieHeaderForUrl (per
+  // hop, host/path/expiry scoped) but must never call cookieAuthEnvironment
+  // (bulk derived env for CLI children). Companion grants in
+  // chrome-profile-auth stay out of the fetch path entirely.
+  const source = await readFile(new URL('../../src/web/access/web-access-auth-fetch.ts', import.meta.url), 'utf8');
+  assert.match(source, /cookieHeaderForUrl/);
+  // Comment lines may name the forbidden seam for documentation; code lines
+  // must never reference it.
+  const code = source.split('\n').filter((line) => !line.trimStart().startsWith('//')).join('\n');
+  assert.doesNotMatch(code, /cookieAuthEnvironment/);
+  assert.doesNotMatch(code, /chrome-profile-auth/);
+});

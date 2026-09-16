@@ -3,7 +3,10 @@
 // Supports `url | urls` arrays in readable/raw modes. GitHub/media URLs route
 // through the injected GitHub/media reader first (separate local tools are
 // never modified); everything else uses the guarded page reader. No PDF
-// parser, no proxy, no auth profiles, no shell. Retrieval slices reuse the
+// parser, no proxy, no shell. Cookie-authenticated fetching lives in the
+// operator-only, host-scoped auth seam (`web-access-auth-contract.ts` +
+// `web-access-auth-fetch.ts`, configured via PI_FETCH_AUTH_PROFILES): this
+// module carries no auth logic itself. Retrieval slices reuse the
 // existing Northstar maximum (50k chars). When `allowExternal` is false, no
 // reader is called (explicit external-fetch gate).
 

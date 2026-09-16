@@ -159,3 +159,63 @@ test('cacheFetchForRetrieve roundtrips through retrieve with source identity', a
   assert.equal(cacheFetchForRetrieve({ query: '', title: 't', url: 'u', snippet: 's', content: 'c' }), undefined);
   assert.equal(cacheFetchForRetrieve({ query: 'q', title: 't', url: 'u', snippet: 's', content: '' }), undefined);
 });
+
+const AUTH_HTML =
+  '<html><head><title>Auth Article</title></head>' +
+  '<body><article><p>Authenticated article body words for cache policy.</p></article></body></html>';
+
+function authOptions(cache: 'session' | 'off') {
+  return {
+    env: {
+      PI_FETCH_AUTH_PROFILES: JSON.stringify({
+        yt: { provider: 'youtube', hosts: ['www.youtube.com'], cache },
+      }),
+    },
+    lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+    // Throwing seam: the auth path must skip fetchPageText entirely (plan b).
+    fetchPageText: async () => { throw new Error('fetchPageText must not run on auth fetches'); },
+  } as unknown as Parameters<typeof callNativeTool>[2];
+}
+
+function stubAuthFetch() {
+  const savedFetch = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    seen.push(String(input));
+    return new Response(AUTH_HTML, { status: 200, headers: { 'content-type': 'text/html' } });
+  }) as typeof fetch;
+  return { restore: () => { globalThis.fetch = savedFetch; }, seen };
+}
+
+test('auth fetch with cache off serves content but issues no responseId (T5)', async () => {
+  const { restore, seen } = stubAuthFetch();
+  try {
+    const out = await callNativeTool('fetch', { url: 'https://www.youtube.com/auth-off' }, authOptions('off'));
+    const text = JSON.stringify(out);
+    assert.match(text, /Authenticated article body words/);
+    const details = (out as { details?: Record<string, unknown> }).details ?? {};
+    assert.equal(details.responseId, undefined);
+    assert.deepEqual(details.authFetch, { profile: 'yt', cachePolicy: 'off', externalProcessing: false });
+    assert.ok(seen.every((url) => url.startsWith('https://www.youtube.com/')), 'only the target origin is fetched');
+  } finally {
+    restore();
+  }
+});
+
+test('auth fetch with cache session roundtrips through retrieve (T5)', async () => {
+  const { restore } = stubAuthFetch();
+  try {
+    const fetched = await callNativeTool('fetch', { url: 'https://www.youtube.com/auth-session' }, authOptions('session'));
+    const details = (fetched as { details?: Record<string, unknown> }).details ?? {};
+    assert.deepEqual(details.authFetch, { profile: 'yt', cachePolicy: 'session', externalProcessing: false });
+    assert.equal(typeof details.responseId, 'string');
+    const out = await callNativeTool(
+      'fetch',
+      { action: 'retrieve', responseId: details.responseId as string },
+      { env: {} },
+    );
+    assert.ok(JSON.stringify(out).includes('Authenticated article body words'));
+  } finally {
+    restore();
+  }
+});
