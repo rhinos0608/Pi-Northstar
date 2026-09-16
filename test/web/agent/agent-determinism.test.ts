@@ -17,6 +17,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { runAdaptiveCore } from '../../../src/web/agent/agent-core.js';
+import { snapshotForJob } from '../../../src/web/agent/agent-capabilities.js';
+import { questionId } from '../../../src/web/agent/agent-state.js';
 import { validateAgentResult } from '../../../src/web/agent/agent-contract.js';
 
 const FILLER =
@@ -45,7 +47,6 @@ const QUERY_URL: Record<string, string> = {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const emptyReport = () => async () => ({ text: '', sources: [] as Array<{ url: string; title: string }> });
 
 const planner = async () => ({
   questions: [{ question: 'Acme Pro pricing overview details?', priority: 3, required: true }],
@@ -57,8 +58,16 @@ const legsEvaluator = () => {
   let calls = 0;
   return async () => {
     calls += 1;
-    if (calls === 1) return { questionUpdates: [], nextQueries: [...LEG_QUERIES], shouldContinue: true };
-    return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+    if (calls === 1)
+      return {
+        questionUpdates: [],
+        nextActions: [...LEG_QUERIES].map((query) => ({
+          questionId: questionId('Acme Pro pricing overview details?'),
+          intent: { kind: 'web_search', query },
+        })),
+        shouldContinue: true,
+      };
+    return { questionUpdates: [], nextActions: [], shouldContinue: false };
   };
 };
 
@@ -109,7 +118,6 @@ function legDeps(options: {
       if (body === undefined) throw new Error(`no fixture body for ${url}`);
       return body;
     },
-    report: emptyReport(),
     planner,
     evaluator: legsEvaluator(),
     budgets: { maxRounds: 3, maxSearches: 8, maxFetches: 16 },
@@ -233,4 +241,223 @@ test('zero delays vs delays: identical composition', async () => {
   assert.ok(validateAgentResult(idle.result).ok);
   assert.ok(validateAgentResult(delayed.result).ok);
   assert.equal(canon(delayed.result), canon(idle.result), 'delays changed the composed result');
+});
+
+// --- Task 8 width schedule (code-owned profiles, "up to" semantics) ---
+
+const WIDTH_QUERIES = [
+  'Acme Pro alpha leg details',
+  'Acme Pro beta leg details',
+  'Acme Pro gamma leg details',
+  'Acme Pro delta leg details',
+  'Acme Pro epsilon leg details',
+] as const;
+
+/** Evaluator: round 1 proposes the given gaps, later rounds stop. */
+const widthEvaluator = (queries: readonly string[]) => {
+  let calls = 0;
+  return async () => {
+    calls += 1;
+    if (calls === 1)
+      return {
+        questionUpdates: [],
+        nextActions: queries.map((query) => ({
+          questionId: questionId('Acme Pro pricing overview details?'),
+          intent: { kind: 'web_search', query },
+        })),
+        shouldContinue: true,
+      };
+    return { questionUpdates: [], nextActions: [], shouldContinue: false };
+  };
+};
+
+/** Deps with a search-call counter; one distinct URL per search call. */
+function widthDeps(queries: readonly string[], options: {
+  profile?: 'balanced' | 'deep' | 'narrow';
+  snapshot?: ReturnType<typeof snapshotForJob>;
+  planner?: Parameters<typeof runAdaptiveCore>[1]['planner'];
+} = {}) {
+  let searches = 0;
+  const deps: Parameters<typeof runAdaptiveCore>[1] = {
+    search: async () => {
+      searches += 1;
+      return [{ title: `Page ${searches}`, url: `https://example.com/width-${searches}` }];
+    },
+    fetchText: async (url: string) =>
+      `Acme Pro launch pricing background details with partner quotes from ${url} included here.${FILLER}`,
+    planner: options.planner ?? planner,
+    evaluator: widthEvaluator(queries),
+    budgets: { maxRounds: 3, maxSearches: 8, maxFetches: 16 },
+    ...(options.profile === undefined ? {} : { gatherProfile: options.profile }),
+    ...(options.snapshot === undefined ? {} : { capabilitiesSnapshot: options.snapshot }),
+  };
+  return { deps, searchCount: () => searches };
+}
+
+/** Wave 7: balanced holds because the plan carries a servable specialist
+ *  intent — never because specialist lanes merely exist (lanes alone narrow). */
+const specialistSnapshot = () =>
+  snapshotForJob({ DIFFBOT_TOKEN: 'token', YOUTUBE_API_KEY: 'key', OPENCLI_PRESENT: '1' });
+
+/** Single-question plan with a genuine specialist intent (the research lane
+ *  is servable on the specialist snapshot, so the profile stays balanced). */
+const specialistPlanner = async () => ({
+  questions: [
+    {
+      question: 'Acme Pro pricing overview details?',
+      priority: 3,
+      required: true,
+      intent: { kind: 'research_search', query: 'Acme Pro pricing overview details' },
+    },
+  ],
+  scopeNotes: [],
+});
+
+test('width: first dispatch round binds schedule head (balanced 3)', async () => {
+  const { deps, searchCount } = widthDeps(WIDTH_QUERIES, {
+    profile: 'balanced',
+    snapshot: specialistSnapshot(),
+    planner: specialistPlanner,
+  });
+  const result = await runAdaptiveCore('Acme Pro pricing overview', deps);
+  assert.ok(validateAgentResult(result).ok);
+  // Evaluator validation caps gaps at 2 (Task 5 MAX_NEXT_ACTIONS, out of
+  // scope), so dispatch = min(2 gaps, width 3): 1 root seed + 2 follow-ups.
+  // The width-3 table value itself pins at the policy unit level.
+  assert.equal(searchCount(), 3, '1 root seed + min(gaps, width-3) follow-ups');
+});
+
+test('width: narrow binds 1 with 5 gaps', async () => {
+  const { deps, searchCount } = widthDeps(WIDTH_QUERIES, { profile: 'narrow' });
+  const result = await runAdaptiveCore('Acme Pro pricing overview', deps);
+  assert.ok(validateAgentResult(result).ok);
+  assert.equal(searchCount(), 2, '1 root seed + 1 narrow follow-up');
+});
+
+test('width: deep dispatches like balanced (same schedule head)', async () => {
+  const { deps, searchCount } = widthDeps(WIDTH_QUERIES, { profile: 'deep', snapshot: specialistSnapshot() });
+  const result = await runAdaptiveCore('Acme Pro pricing overview', deps);
+  assert.ok(validateAgentResult(result).ok);
+  assert.equal(searchCount(), 3, '1 root seed + min(gaps, width-3) follow-ups');
+});
+
+test('width: "up to" semantics — 1 gap dispatches 1 task, never pads', async () => {
+  const { deps, searchCount } = widthDeps([WIDTH_QUERIES[0] as string], {
+    profile: 'balanced',
+    snapshot: specialistSnapshot(),
+  });
+  const result = await runAdaptiveCore('Acme Pro pricing overview', deps);
+  assert.ok(validateAgentResult(result).ok);
+  assert.equal(searchCount(), 2, '1 root seed + 1 follow-up; width never pads');
+});
+
+test('width: explicit balanced refines to narrow on single question with no specialist need', async () => {
+  const { deps, searchCount } = widthDeps(WIDTH_QUERIES, { profile: 'balanced' });
+  const result = await runAdaptiveCore('Acme Pro pricing overview', deps);
+  assert.ok(validateAgentResult(result).ok);
+  assert.equal(searchCount(), 2, 'refined narrow: 1 root seed + 1 follow-up');
+});
+
+test('width: absent profile keeps the unscheduled legacy full set', async () => {
+  const { deps, searchCount } = widthDeps(WIDTH_QUERIES.slice(0, 3));
+  const result = await runAdaptiveCore('Acme Pro pricing overview', deps);
+  assert.ok(validateAgentResult(result).ok);
+  assert.equal(searchCount(), 3, 'legacy: 1 root seed + evaluator-kept follow-ups');
+});
+
+test('fetch-aware stop: searches-exhausted round still dispatches a pending web_fetch', async () => {
+  const { gatherExecutor } = await import('../../../src/web/agent/agent-gather.js');
+  const FETCH_URL = 'https://example.com/fetch-target';
+  const fetched: string[] = [];
+  let calls = 0;
+  const result = await runAdaptiveCore('Acme Pro pricing overview', {
+    search: async () => [{ title: 'Search hit', url: 'https://example.com/search-hit', snippet: 'launch pricing snippet words' }],
+    fetchText: async (url: string) => {
+      fetched.push(url);
+      return `Acme Pro launch pricing background details with partner quotes from ${url} included here.${FILLER}`;
+    },
+    planner,
+    evaluator: async () => {
+      calls += 1;
+      if (calls === 1)
+        return {
+          questionUpdates: [],
+          nextActions: [
+            {
+              questionId: questionId('Acme Pro pricing overview details?'),
+              intent: { kind: 'web_fetch', url: FETCH_URL },
+            },
+          ],
+          shouldContinue: true,
+        };
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
+    },
+    // Round 1 spends the single search; the pending web_fetch must still run.
+    budgets: { maxRounds: 3, maxSearches: 1, maxFetches: 12, maxGatherActions: 6, maxUtilityCalls: 8 },
+    gatherProfile: 'balanced',
+    gatherExecutor: async (intents, round, ctx) => {
+      const outcome = await gatherExecutor(intents, round, ctx);
+      // Provenance seed: the follow-up fetch url enters round 1 as a bounded
+      // research-source candidate so round-2 validation admits it.
+      if (round === 1) outcome.candidates.push({ kind: 'research-source', route: 'research', source: 'test', title: 'Fetch target', url: FETCH_URL });
+      return outcome;
+    },
+  });
+  assert.ok(validateAgentResult(result).ok);
+  assert.ok(fetched.includes(FETCH_URL), 'round-2 dispatch executes the pending web_fetch (fetchText called)');
+  assert.ok(
+    result.warnings.some((warning) => warning.includes('round 2:') && warning.includes('fetches=1')),
+    `round 2 admits the fetch leg: ${JSON.stringify(result.warnings)}`,
+  );
+});
+
+test('fetch-aware stop (lane-aware): searches-exhausted round still dispatches a pending web_fetch', async () => {
+  const { gatherExecutor } = await import('../../../src/web/agent/agent-gather.js');
+  const FETCH_URL = 'https://example.com/fetch-target';
+  const fetched: string[] = [];
+  let calls = 0;
+  const result = await runAdaptiveCore('Acme Pro pricing overview', {
+    search: async () => [{ title: 'Search hit', url: 'https://example.com/search-hit', snippet: 'launch pricing snippet words' }],
+    fetchText: async (url: string) => {
+      fetched.push(url);
+      return `Acme Pro launch pricing background details with partner quotes from ${url} included here.${FILLER}`;
+    },
+    planner,
+    evaluator: async () => {
+      calls += 1;
+      if (calls === 1)
+        return {
+          questionUpdates: [],
+          nextActions: [
+            {
+              questionId: questionId('Acme Pro pricing overview details?'),
+              intent: { kind: 'web_fetch', url: FETCH_URL },
+            },
+          ],
+          shouldContinue: true,
+        };
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
+    },
+    // Round 1 spends the single search; the pending web_fetch must still run.
+    budgets: { maxRounds: 3, maxSearches: 1, maxFetches: 12, maxGatherActions: 6, maxUtilityCalls: 8 },
+    gatherProfile: 'balanced',
+    gatherExecutor: async (intents, round, ctx) => {
+      const outcome = await gatherExecutor(intents, round, ctx);
+      // Provenance seed: the follow-up fetch url enters round 1 as a bounded
+      // research-source candidate so round-2 validation admits it.
+      if (round === 1) outcome.candidates.push({ kind: 'research-source', route: 'research', source: 'test', title: 'Fetch target', url: FETCH_URL });
+      return outcome;
+    },
+    capabilitiesSnapshot: snapshotForJob({}),
+  });
+  assert.ok(validateAgentResult(result).ok);
+  assert.ok(fetched.includes(FETCH_URL), 'round-2 dispatch executes the pending web_fetch (fetchText called)');
+  assert.ok(
+    result.warnings.some((warning) => warning.includes('round 2:') && warning.includes('fetches=1')),
+    `round 2 admits the fetch leg: ${JSON.stringify(result.warnings)}`,
+  );
+  assert.ok(
+    !result.warnings.some((warning) => warning.includes('budget_exhausted')),
+    `no early budget_exhausted stop: ${JSON.stringify(result.warnings)}`,
+  );
 });

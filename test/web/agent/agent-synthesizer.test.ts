@@ -6,6 +6,8 @@ import {
   AGENT_MAX_SOURCES,
   validateAgentResult,
 } from '../../../src/web/agent/agent-contract.js';
+import { EVIDENCE_ONLY_DEGRADED_WARNING } from '../../../src/web/agent/agent-core.js';
+import { runAdaptiveCore } from '../../../src/web/agent/agent-core.js';
 import type { AgentEvidence } from '../../../src/web/agent/agent-state.js';
 import {
   buildSynthesisPrompt,
@@ -190,8 +192,12 @@ test('compileSourceSet groups tracking-param url variants together', () => {
   ];
   const compiled = compileSourceSet(evidence);
   const urls = compiled.sourceCatalog.map((s) => s.canonicalUrl);
-  assert.ok(urls.some((u) => u === 'https://example.com/page?utm_source=feed' || u === 'https://example.com/page?fbclid=abc'));
+  // Tracking-param variants collapse to the normalized canonical document URL.
+  assert.ok(urls.includes('https://example.com/page'));
+  assert.ok(urls.includes('https://example.com/other'));
   assert.equal(compiled.sourceCatalog.length, 2);
+  const pageGroup = compiled.sourceCatalog.find((s) => s.canonicalUrl === 'https://example.com/page')!;
+  assert.deepEqual([...pageGroup.evidenceIds].sort(), ['ev-1', 'ev-2']);
   assert.deepEqual([...compiled.selectedEvidenceIds].sort(), ['ev-1', 'ev-2', 'ev-3']);
 });
 
@@ -459,4 +465,222 @@ test('orphaned block ids sort by content hash, not input order', () => {
   assert.equal(out.ok, true);
   if (!out.ok) return;
   assert.deepEqual(out.dropped.orphanedBlockIds, sortedByHash, 'orphan order follows content hash');
+});
+
+// --- Task 3: synthesis-failure fallback prefers the evidence-only floor ---
+
+const SYNTH_FILLER =
+  ' Additional background context about the product lineup and release notes follows here for completeness and extra length.';
+const SYNTH_BODY = `Acme Pro launch price is $199 per month. Details follow with more filler words to fill the passage.${SYNTH_FILLER}`;
+
+const synthFailureDeps = (synthesizer: (args: { prompt: string }) => Promise<unknown>) => ({
+  search: async () => [{ title: 'Hidden pricing', url: 'https://example.com/hidden-price' }],
+  fetchText: async () => SYNTH_BODY,
+  planner: async () => ({
+    questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
+    scopeNotes: [],
+  }),
+  evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
+  synthesizer,
+});
+
+test('synthesizer throw degrades to evidence-only with the degraded marker', async () => {
+  const result = await runAdaptiveCore(
+    'Acme Pro pricing overview',
+    synthFailureDeps(async () => {
+      throw new Error('synth down');
+    }),
+  );
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.ok(result.warnings.includes(EVIDENCE_ONLY_DEGRADED_WARNING), JSON.stringify(result.warnings));
+  assert.ok(result.reportText.includes('$199'), `admitted excerpt ships; got ${result.reportText}`);
+  assert.ok(result.claims.length > 0, 'evidence-only claims ship');
+  const sourceIds = new Set(result.sources.map((s) => s.id));
+  for (const claim of result.claims) {
+    for (const id of claim.sourceIds) assert.ok(sourceIds.has(id), `claim cites catalog id ${id}`);
+  }
+});
+
+test('synthesizer schema-invalid output degrades to evidence-only with the degraded marker', async () => {
+  const result = await runAdaptiveCore(
+    'Acme Pro pricing overview',
+    synthFailureDeps(async () => ({ bogus: true })),
+  );
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.ok(result.warnings.includes(EVIDENCE_ONLY_DEGRADED_WARNING), JSON.stringify(result.warnings));
+  assert.ok(result.reportText.includes('$199'), `admitted excerpt ships; got ${result.reportText}`);
+  assert.ok(result.claims.length > 0, 'evidence-only claims ship');
+});
+
+test('KG evidence admitted ships as a claimable source with structured identity', async () => {
+  const { createAgentState } = await import('../../../src/web/agent/agent-state.js');
+  const { admitKgFields } = await import('../../../src/web/agent/agent-acquisition.js');
+  const state = createAgentState({ goal: 'Which release added multi-region support to Quartz?' });
+  const admission = admitKgFields(state, {
+    provider: 'wikidata',
+    query: 'Quartz multi-region support release version',
+    fields: [{
+      nodeId: 'Q-quartz-9',
+      field: 'releaseNotes',
+      value: 'Quartz release notes state that multi-region support landed in version 2.4 with 128 concurrent job capacity per region.',
+    }],
+  });
+  assert.ok(admission.evidence.length > 0, 'KG field admitted');
+  const admittedEvidence = state.admittedEvidence.filter((entry) => entry.status === 'admitted');
+  assert.ok(admittedEvidence.length > 0);
+  const compiled = compileSourceSet(admittedEvidence, { maxSources: AGENT_MAX_SOURCES });
+  assert.equal(compiled.sourceCatalog.length, 1);
+  assert.equal(compiled.sourceCatalog[0]!.canonicalUrl, 'wikidata:Q-quartz-9/releaseNotes');
+  assert.deepEqual(compiled.sourceCatalog[0]!.locator, { nodeId: 'Q-quartz-9', field: 'releaseNotes' });
+  const evId = admittedEvidence[0]!.id;
+  const validated = validateSynthesisOutput({
+    claimUnits: [{ id: 'cu-0', text: 'Quartz multi-region support landed in version 2.4.', evidenceIds: [evId] }],
+    blocks: [{
+      id: 'b-0',
+      sectionId: 'kg',
+      prose: 'Quartz multi-region support landed in version 2.4.',
+      claimUnitIds: ['cu-0'],
+    }],
+    unresolvedGaps: [],
+  }, admittedEvidence);
+  assert.equal(validated.ok, true);
+  if (!validated.ok) return;
+  const rendered = renderResultFromIR(validated.value, compiled, 'Which release added multi-region support to Quartz?');
+  assert.equal(rendered.sources.length, 1);
+  assert.equal(rendered.sources[0]!.url, 'wikidata:Q-quartz-9/releaseNotes');
+  assert.equal(rendered.claims.length, 1);
+  assert.deepEqual(rendered.claims[0]!.sourceIds, [rendered.sources[0]!.id]);
+  assert.ok(validateAgentResult({
+    version: 1,
+    query: 'Which release added multi-region support to Quartz?',
+    reportText: rendered.reportText,
+    claims: rendered.claims,
+    sources: rendered.sources,
+    warnings: [],
+  }).ok, 'structured-identity source validates');
+});
+
+test('URL-less research abstract ships as a claimable source in both composers', async () => {
+  const { createAgentState } = await import('../../../src/web/agent/agent-state.js');
+  const { admitResearchAbstract } = await import('../../../src/web/agent/agent-acquisition.js');
+  const { composeEvidenceOnlyResult } = await import('../../../src/web/agent/agent-core.js');
+  const { isStructuredSourceUrl } = await import('../../../src/web/agent/agent-contract.js');
+  const state = createAgentState({ goal: 'Zebra migration corridor studies' });
+  // No canonicalUrl: URL-less identity entry with a char-range locator.
+  const admission = admitResearchAbstract(state, {
+    abstract: 'Zebra herds migrate seasonally across savanna corridors, tracking rainfall gradients northward.',
+    provider: 'openalex',
+    query: 'zebra migration corridors',
+  });
+  assert.equal(admission.evidence.length, 1);
+  assert.equal(admission.evidence[0]!.sourceRef.canonicalUrl, '');
+  const admitted = state.admittedEvidence.filter((entry) => entry.status === 'admitted');
+  // compileSourceSet: grouped under a renderable structured identity, claimable.
+  const compiled = compileSourceSet(admitted, { maxSources: AGENT_MAX_SOURCES });
+  assert.equal(compiled.sourceCatalog.length, 1);
+  const catalogUrl = compiled.sourceCatalog[0]!.canonicalUrl;
+  assert.ok(isStructuredSourceUrl(catalogUrl), `claimable structured identity; got ${catalogUrl}`);
+  assert.ok(catalogUrl.startsWith('openalex:'), catalogUrl);
+  assert.ok(catalogUrl.endsWith('/abstract'), catalogUrl);
+  assert.deepEqual(compiled.droppedEvidenceIds, []);
+  assert.deepEqual(compiled.sourceCatalog[0]!.evidenceIds, [admitted[0]!.id]);
+  // composeEvidenceOnlyResult: same entry ships as a cited source.
+  const result = composeEvidenceOnlyResult('Zebra migration corridor studies', state, [], 'round_cap');
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.equal(result.sources.length, 1);
+  assert.equal(result.sources[0]!.url, catalogUrl);
+  assert.equal(result.claims.length, 1);
+  assert.deepEqual(result.claims[0]!.sourceIds, [result.sources[0]!.id]);
+  assert.ok(!result.warnings.some((w) => w.includes('no claimable source')), JSON.stringify(result.warnings));
+});
+
+test('malformed URL-less entries drop with a warning, never silently', async () => {
+  const { createAgentState } = await import('../../../src/web/agent/agent-state.js');
+  const { composeEvidenceOnlyResult } = await import('../../../src/web/agent/agent-core.js');
+  const state = createAgentState({ goal: 'Zebra migration corridor studies' });
+  const good = state.addEvidence({
+    sourceRef: { canonicalUrl: 'https://example.com/good', sourceClass: 'news', acquisitionRoute: 'fetch' },
+    documentHash: 'doc-good',
+    locator: { start: 0, end: 12 },
+    excerpt: 'Good excerpt',
+    questionIds: [],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in good));
+  // Admission-shape bug injected past validation: no URL, no identity.
+  state.admittedEvidence.push({
+    id: 'ev-malformed',
+    sourceRef: { canonicalUrl: '', sourceClass: 'unknown', acquisitionRoute: 'research' },
+    documentHash: 'doc-bad',
+    locator: { start: 0, end: 9 },
+    excerpt: 'Bad entry',
+    excerptHash: 'hash-bad',
+    questionIds: [],
+    round: 1,
+    status: 'admitted',
+    corroboratingFingerprint: 'fp-bad',
+  } as never);
+  const admitted = state.admittedEvidence.filter((entry) => entry.status === 'admitted');
+  const compiled = compileSourceSet(admitted, { maxSources: AGENT_MAX_SOURCES });
+  assert.deepEqual(compiled.droppedEvidenceIds, ['ev-malformed']);
+  assert.ok(!('rejected' in good) && compiled.selectedEvidenceIds.includes(good.id));
+  const result = composeEvidenceOnlyResult('Zebra migration corridor studies', state, [], 'round_cap');
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.ok(result.warnings.some((w) => w.includes('no claimable source')), JSON.stringify(result.warnings));
+});
+
+test('case-variant structured providers group identically in both composers (shared key)', async () => {
+  const { createAgentState } = await import('../../../src/web/agent/agent-state.js');
+  const { composeEvidenceOnlyResult } = await import('../../../src/web/agent/agent-core.js');
+  const { evidenceSourceKey } = await import('../../../src/web/agent/agent-synthesizer.js');
+  const addKg = (state: ReturnType<typeof createAgentState>, provider: string, excerpt: string) => {
+    const out = state.addEvidence({
+      sourceRef: {
+        canonicalUrl: '',
+        identity: { provider, query: 'quartz release notes', nodeId: 'Q-quartz-9' },
+        sourceClass: 'unknown',
+        acquisitionRoute: 'kg',
+      },
+      documentHash: `doc-${provider}`,
+      locator: { nodeId: 'Q-quartz-9', field: 'releaseNotes' },
+      excerpt,
+      questionIds: [],
+      round: 1,
+      status: 'admitted',
+    });
+    assert.ok(!('rejected' in out), JSON.stringify(out));
+  };
+  // Case-variant providers split — identically — in both composers (structured
+  // identities key on the raw `provider:nodeId/field` string; only http(s)
+  // entries go through normalizeUrl).
+  const split = createAgentState({ goal: 'Which release added multi-region support to Quartz?' });
+  addKg(split, 'Wikidata', 'Quartz release notes state multi-region support landed in version 2.4.');
+  addKg(split, 'wikidata', 'Quartz release notes state multi-region support landed in version 2.4 with job capacity.');
+  const splitAdmitted = split.admittedEvidence.filter((entry) => entry.status === 'admitted');
+  assert.equal(splitAdmitted.length, 2);
+  const [first, second] = [evidenceSourceKey(splitAdmitted[0]!), evidenceSourceKey(splitAdmitted[1]!)];
+  assert.ok(first !== undefined && second !== undefined);
+  assert.equal(first!.key, 'Wikidata:Q-quartz-9/releaseNotes');
+  assert.equal(second!.key, 'wikidata:Q-quartz-9/releaseNotes');
+  const splitCompiled = compileSourceSet(splitAdmitted, { maxSources: AGENT_MAX_SOURCES });
+  assert.equal(splitCompiled.sourceCatalog.length, 2);
+  const splitResult = composeEvidenceOnlyResult('Which release added multi-region support to Quartz?', split, [], 'round_cap');
+  assert.ok(validateAgentResult(splitResult).ok, JSON.stringify(validateAgentResult(splitResult).issues));
+  assert.equal(splitResult.sources.length, 2);
+  assert.deepEqual(
+    splitResult.sources.map((source) => source.url).sort(),
+    splitCompiled.sourceCatalog.map((entry) => entry.canonicalUrl).sort(),
+  );
+  // Same-spelling providers merge — identically — in both composers.
+  const merged = createAgentState({ goal: 'Which release added multi-region support to Quartz?' });
+  addKg(merged, 'wikidata', 'Quartz release notes state multi-region support landed in version 2.4.');
+  addKg(merged, 'wikidata', 'Quartz release notes state multi-region support landed in version 2.4 with job capacity.');
+  const mergedAdmitted = merged.admittedEvidence.filter((entry) => entry.status === 'admitted');
+  const mergedCompiled = compileSourceSet(mergedAdmitted, { maxSources: AGENT_MAX_SOURCES });
+  assert.equal(mergedCompiled.sourceCatalog.length, 1);
+  const mergedResult = composeEvidenceOnlyResult('Which release added multi-region support to Quartz?', merged, [], 'round_cap');
+  assert.ok(validateAgentResult(mergedResult).ok, JSON.stringify(validateAgentResult(mergedResult).issues));
+  assert.equal(mergedResult.sources.length, 1);
+  assert.equal(mergedResult.sources[0]!.url, mergedCompiled.sourceCatalog[0]!.canonicalUrl);
 });

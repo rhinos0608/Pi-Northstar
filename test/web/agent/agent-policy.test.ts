@@ -1,17 +1,34 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  admissibleGatherLanes,
+  AGENT_DEFAULT_BUDGETS,
+  canDispatchAnyAction,
   corroboratingFingerprint,
+  DEFAULT_LANE_CAPS,
+  DEFAULT_ROUND_FETCH_CAPS,
+  DEEP_LANE_CAPS,
   deriveEvidenceConfidence,
+  deriveGatherProfile,
   detectConflicts,
+  effectiveLaneCaps,
+  evaluatorUtilityHeadroom,
   MAX_FETCHES,
+  MAX_GATHER_ACTIONS,
+  MAX_LANE_ACTIONS,
   MAX_ROUNDS,
   MAX_SEARCHES,
   MAX_UTILITY_CALLS,
   resolveBudgets,
   semanticGrowth,
+  snapshotHasSpecialistNeed,
   stopPolicy,
+  utilityBudgetSplit,
+  verifyUtilityHeadroom,
+  widthForRound,
+  WIDTH_SCHEDULES,
   type AgentBudgets,
+  type GatherLane,
   type StopPolicyContext,
 } from '../../../src/web/agent/agent-policy.js';
 import type { AgentEvidence } from '../../../src/web/agent/agent-state.js';
@@ -62,17 +79,23 @@ test('resolveBudgets fills defaults', () => {
     maxSearches: 4,
     maxFetches: 12,
     maxUtilityCalls: 8,
+    maxGatherActions: AGENT_DEFAULT_BUDGETS.maxGatherActions,
+    laneCaps: { ...DEFAULT_LANE_CAPS },
+    roundFetchCaps: [...DEFAULT_ROUND_FETCH_CAPS],
   });
   assert.deepEqual(resolveBudgets({ maxRounds: 2 }), {
     maxRounds: 2,
     maxSearches: 4,
     maxFetches: 12,
     maxUtilityCalls: 8,
+    maxGatherActions: AGENT_DEFAULT_BUDGETS.maxGatherActions,
+    laneCaps: { ...DEFAULT_LANE_CAPS },
+    roundFetchCaps: [...DEFAULT_ROUND_FETCH_CAPS],
   });
 });
 
 test('resolveBudgets rejects non-positive-integer budgets', () => {
-  for (const field of ['maxRounds', 'maxSearches', 'maxFetches', 'maxUtilityCalls'] as const) {
+  for (const field of ['maxRounds', 'maxSearches', 'maxFetches', 'maxUtilityCalls', 'maxGatherActions'] as const) {
     for (const bad of [0, -1, 1.5, Number.NaN]) {
       assert.throws(() => resolveBudgets({ [field]: bad } as Partial<AgentBudgets>), {
         name: 'RangeError',
@@ -98,6 +121,10 @@ test('resolveBudgets rejects values past hard caps', () => {
   assert.throws(() => resolveBudgets({ maxUtilityCalls: MAX_UTILITY_CALLS + 1 }), {
     name: 'RangeError',
     message: `maxUtilityCalls exceeds maximum of ${MAX_UTILITY_CALLS}`,
+  });
+  assert.throws(() => resolveBudgets({ maxGatherActions: MAX_GATHER_ACTIONS + 1 }), {
+    name: 'RangeError',
+    message: `maxGatherActions exceeds maximum of ${MAX_GATHER_ACTIONS}`,
   });
 });
 
@@ -409,4 +436,402 @@ test('deriveEvidenceConfidence is deterministic and empty-safe', () => {
     score: 0,
     breakdown: { independentFingerprints: 0, sourceClassBoost: 0, conflictPenalty: 0, verifiedBoost: 0 },
   });
+});
+
+// --- Task 8 BudgetEnvelope ---
+
+test('resolveBudgets validates lane caps with reject-not-clamp', () => {
+  for (const bad of [0, -1, 1.5, Number.NaN]) {
+    assert.throws(() => resolveBudgets({ laneCaps: { web: bad } }), {
+      name: 'RangeError',
+      message: 'laneCaps.web must be a positive integer',
+    });
+  }
+  assert.throws(() => resolveBudgets({ laneCaps: { github: MAX_LANE_ACTIONS + 1 } }), {
+    name: 'RangeError',
+    message: `laneCaps.github exceeds maximum of ${MAX_LANE_ACTIONS}`,
+  });
+  assert.equal(resolveBudgets({ laneCaps: { web: 2 } }).laneCaps.web, 2);
+  assert.deepEqual(resolveBudgets({ laneCaps: { web: 2 } }).laneCaps.research, DEFAULT_LANE_CAPS.research);
+});
+
+test('resolveBudgets roundFetchCaps are operator-lower-only', () => {
+  assert.deepEqual(resolveBudgets().roundFetchCaps, [7, 4, 1]);
+  assert.deepEqual(resolveBudgets({ roundFetchCaps: [5, 2, 1] }).roundFetchCaps, [5, 2, 1]);
+  assert.throws(() => resolveBudgets({ roundFetchCaps: [8, 4, 1] }), {
+    name: 'RangeError',
+    message: 'roundFetchCaps[0] exceeds maximum of 7',
+  });
+  assert.throws(() => resolveBudgets({ roundFetchCaps: [7, 5, 1] }), {
+    name: 'RangeError',
+    message: 'roundFetchCaps[1] exceeds maximum of 4',
+  });
+  assert.throws(() => resolveBudgets({ roundFetchCaps: [7, 4, 2] }), {
+    name: 'RangeError',
+    message: 'roundFetchCaps[2] exceeds maximum of 1',
+  });
+  for (const bad of [[0, 4, 1], [7, 4, 1.5]] as Array<[number, number, number]>) {
+    assert.throws(() => resolveBudgets({ roundFetchCaps: bad }), {
+      name: 'RangeError',
+      message: 'roundFetchCaps must be a 3-tuple of positive integers',
+    });
+  }
+});
+
+test('width schedules pinned per profile: 3-2-1, narrow 1', () => {
+  assert.deepEqual(WIDTH_SCHEDULES.balanced, [3, 2, 1]);
+  assert.deepEqual(WIDTH_SCHEDULES.deep, [3, 2, 1]);
+  assert.deepEqual(WIDTH_SCHEDULES.narrow, [1, 1, 1]);
+  assert.deepEqual([1, 2, 3, 4].map((round) => widthForRound('balanced', round)), [3, 2, 1, 1]);
+  assert.deepEqual([1, 2, 3].map((round) => widthForRound('narrow', round)), [1, 1, 1]);
+  assert.deepEqual([1, 2, 3].map((round) => widthForRound('deep', round)), [3, 2, 1]);
+});
+
+test('deriveGatherProfile is code-owned: deep/narrow/balanced', () => {
+  assert.equal(deriveGatherProfile({ depth: 'deep', requiredQuestionCount: 5, specialistNeeded: true }), 'deep');
+  assert.equal(deriveGatherProfile({ requiredQuestionCount: 1, specialistNeeded: false }), 'narrow');
+  assert.equal(deriveGatherProfile({ requiredQuestionCount: 1, specialistNeeded: true }), 'balanced');
+  assert.equal(deriveGatherProfile({ requiredQuestionCount: 3, specialistNeeded: false }), 'balanced');
+  assert.equal(deriveGatherProfile({ depth: 'balanced', requiredQuestionCount: 1, specialistNeeded: false }), 'narrow');
+});
+
+test('effectiveLaneCaps: deep raises specialists, balanced untouched', () => {
+  const balanced = effectiveLaneCaps(resolveBudgets(), 'balanced');
+  assert.deepEqual(balanced, { ...DEFAULT_LANE_CAPS });
+  const deep = effectiveLaneCaps(resolveBudgets(), 'deep');
+  assert.equal(deep.web, DEFAULT_LANE_CAPS.web);
+  for (const lane of ['research', 'github', 'social', 'video', 'kg'] as const) {
+    assert.equal(deep[lane], DEEP_LANE_CAPS[lane]);
+  }
+  const raised = effectiveLaneCaps(resolveBudgets({ laneCaps: { research: 10 } }), 'deep');
+  assert.equal(raised.research, 10);
+});
+
+test('utilityBudgetSplit reserves synthesis+verify before evaluator spend', () => {
+  assert.deepEqual(utilityBudgetSplit(8), { planner: 1, synthesis: 1, verifyRepair: 2, evaluator: 4 });
+  assert.deepEqual(utilityBudgetSplit(4), { planner: 1, synthesis: 1, verifyRepair: 2, evaluator: 0 });
+  assert.equal(evaluatorUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 4, synthesizerPresent: true, verifierPresent: true }), 1);
+  assert.equal(evaluatorUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 5, synthesizerPresent: true, verifierPresent: true }), 0);
+  assert.equal(evaluatorUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 7, synthesizerPresent: false, verifierPresent: false }), 1);
+});
+
+test('verifyUtilityHeadroom holds the repair reserve out of initial verification', () => {
+  // Repairer present: 2 calls walled off for repair+reverify.
+  assert.equal(verifyUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 3, repairerPresent: true }), 3);
+  assert.equal(verifyUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 6, repairerPresent: true }), 0);
+  assert.equal(verifyUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 7, repairerPresent: true }), 0);
+  // No repairer: no repair stage, full headroom spends on verification.
+  assert.equal(verifyUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 7, repairerPresent: false }), 1);
+  assert.equal(verifyUtilityHeadroom({ maxUtilityCalls: 8, utilityCallsUsed: 8, repairerPresent: false }), 0);
+});
+
+const laneCtx = (overrides: Record<string, unknown> = {}) => {
+  const budgets = resolveBudgets();
+  return baseCtx({
+    budgets,
+    admissibleLanes: ['web', 'research', 'github', 'social', 'video', 'kg'] as GatherLane[],
+    gatherActionsUsed: 0,
+    laneActionsUsed: {},
+    ...overrides,
+  });
+};
+
+test('stopPolicy lane-aware: search cap is web-lane scope, fetch cap is global', () => {
+  const budgets = resolveBudgets();
+  // maxSearches is web-lane scope, never a job-wide kill: exhausted web
+  // searches with github headroom keeps the job alive (the executor web-gate
+  // + canDispatchAnyAction own web exhaustion; specialist follow-ups route).
+  assert.deepEqual(
+    stopPolicy(
+      laneCtx({
+        budgets,
+        searchesUsed: budgets.maxSearches,
+        fetchesUsed: 0,
+        gatherActionsUsed: 2,
+        laneActionsUsed: { web: budgets.laneCaps.web },
+        admissibleLanes: ['web', 'github'] as GatherLane[],
+      }),
+    ),
+    { stop: false, reason: 'continue' },
+  );
+  assert.deepEqual(
+    stopPolicy(
+      laneCtx({
+        budgets,
+        searchesUsed: 0,
+        fetchesUsed: budgets.maxFetches,
+        gatherActionsUsed: 2,
+        laneActionsUsed: { web: budgets.laneCaps.web },
+        admissibleLanes: ['web', 'github'] as GatherLane[],
+      }),
+    ),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+});
+
+test('stopPolicy lane-aware: envelope + all lanes exhausted stops', () => {
+  const budgets = resolveBudgets();
+  const result = stopPolicy(
+    laneCtx({
+      budgets,
+      gatherActionsUsed: budgets.maxGatherActions,
+      laneActionsUsed: {
+        web: budgets.laneCaps.web,
+        research: budgets.laneCaps.research,
+        github: budgets.laneCaps.github,
+        social: budgets.laneCaps.social,
+        video: budgets.laneCaps.video,
+        kg: budgets.laneCaps.kg,
+      },
+    }),
+  );
+  assert.deepEqual(result, { stop: true, reason: 'budget_exhausted' });
+});
+
+test('stopPolicy lane-aware: envelope exhausted stops even with lane headroom', () => {
+  // Wave 5 budget unification (D3): executor planning refuses at the envelope,
+  // so stopPolicy agrees — envelope-exhausted stops even with lane headroom.
+  // Previously this continued; the two paths disagreed on envelope semantics.
+  const budgets = resolveBudgets();
+  const result = stopPolicy(
+    laneCtx({
+      budgets,
+      gatherActionsUsed: budgets.maxGatherActions,
+      laneActionsUsed: { web: budgets.laneCaps.web },
+    }),
+  );
+  assert.deepEqual(result, { stop: true, reason: 'budget_exhausted' });
+});
+
+test('stopPolicy legacy: gather envelope stops when counters exist in context', () => {
+  const budgets = resolveBudgets();
+  assert.deepEqual(
+    stopPolicy(baseCtx({ budgets, gatherActionsUsed: budgets.maxGatherActions ?? 6 })),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+  assert.deepEqual(stopPolicy(baseCtx({ budgets, gatherActionsUsed: 0 })).stop, false);
+});
+
+test('follow-up width binding is min(evaluator gap cap 2, widthForRound)', () => {
+  // The evaluator caps proposals at MAX_NEXT_ACTIONS=2 (agent-evaluator.ts
+  // owns the cap; the core never raises it), so the descending schedule
+  // binds round-1 seeding (wide-first) while follow-up rounds resolve to
+  // min(2, widthForRound). Balanced/deep round 2+: min(2, 2)=2; round 3+:
+  // min(2, 1)=1; narrow stays 1 throughout.
+  const gapCap = 2;
+  assert.deepEqual(
+    [1, 2, 3].map((round) => Math.min(gapCap, widthForRound('balanced', round))),
+    [2, 2, 1],
+  );
+  assert.deepEqual(
+    [1, 2, 3].map((round) => Math.min(gapCap, widthForRound('deep', round))),
+    [2, 2, 1],
+  );
+  assert.deepEqual(
+    [1, 2, 3].map((round) => Math.min(gapCap, widthForRound('narrow', round))),
+    [1, 1, 1],
+  );
+});
+
+test('stopPolicy lane-aware: utility exhaustion still stops', () => {
+  const budgets = resolveBudgets();
+  assert.deepEqual(
+    stopPolicy(laneCtx({ budgets, utilityCallsUsed: budgets.maxUtilityCalls })).reason,
+    'budget_exhausted',
+  );
+});
+
+test('fetch-aware web lane: pending web_fetch survives exhausted maxSearches', () => {
+  const budgets = resolveBudgets();
+  const envelope = budgets.maxGatherActions ?? 6;
+  const dispatchBudgets = {
+    maxSearches: budgets.maxSearches,
+    maxGatherActions: envelope,
+    laneCaps: budgets.laneCaps,
+    maxFetches: budgets.maxFetches,
+  };
+  assert.equal(
+    canDispatchAnyAction(
+      {
+        gatherActionsUsed: 0,
+        searchesUsed: budgets.maxSearches,
+        pendingWebFetches: 1,
+        fetchesUsed: 0,
+        admissibleLanes: ['web'],
+      },
+      dispatchBudgets,
+    ),
+    true,
+  );
+  // Lane-aware branch: no budget stop (growth/queries/evaluator all allow continue).
+  assert.deepEqual(
+    stopPolicy(
+      laneCtx({
+        budgets,
+        searchesUsed: budgets.maxSearches,
+        fetchesUsed: 0,
+        pendingWebFetches: 1,
+        gatherActionsUsed: 0,
+        laneActionsUsed: {},
+        admissibleLanes: ['web'],
+      }),
+    ),
+    { stop: false, reason: 'continue' },
+  );
+  // Legacy branch (no snapshot): scalar search gate waived for the pending fetch.
+  assert.deepEqual(
+    stopPolicy(baseCtx({ budgets, searchesUsed: budgets.maxSearches, fetchesUsed: 0, pendingWebFetches: 1 })),
+    { stop: false, reason: 'continue' },
+  );
+});
+
+test('fetch-aware web lane: fetch exhaustion still stops despite pending web_fetch', () => {
+  const budgets = resolveBudgets();
+  const envelope = budgets.maxGatherActions ?? 6;
+  const dispatchBudgets = {
+    maxSearches: budgets.maxSearches,
+    maxGatherActions: envelope,
+    laneCaps: budgets.laneCaps,
+    maxFetches: budgets.maxFetches,
+  };
+  assert.equal(
+    canDispatchAnyAction(
+      {
+        gatherActionsUsed: 0,
+        searchesUsed: budgets.maxSearches,
+        pendingWebFetches: 2,
+        fetchesUsed: budgets.maxFetches,
+        admissibleLanes: ['web'],
+      },
+      dispatchBudgets,
+    ),
+    false,
+  );
+  assert.deepEqual(
+    stopPolicy(
+      laneCtx({
+        budgets,
+        searchesUsed: budgets.maxSearches,
+        fetchesUsed: budgets.maxFetches,
+        pendingWebFetches: 2,
+        gatherActionsUsed: 0,
+        laneActionsUsed: {},
+        admissibleLanes: ['web'],
+      }),
+    ),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+  assert.deepEqual(
+    stopPolicy(
+      baseCtx({
+        budgets,
+        searchesUsed: budgets.maxSearches,
+        fetchesUsed: budgets.maxFetches,
+        pendingWebFetches: 2,
+      }),
+    ),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+});
+
+test('fetch-aware web lane: absent/zero pending keeps current exhausted behavior', () => {
+  const budgets = resolveBudgets();
+  const envelope = budgets.maxGatherActions ?? 6;
+  const dispatchBudgets = {
+    maxSearches: budgets.maxSearches,
+    maxGatherActions: envelope,
+    laneCaps: budgets.laneCaps,
+    maxFetches: budgets.maxFetches,
+  };
+  const base = { gatherActionsUsed: 0, searchesUsed: budgets.maxSearches, admissibleLanes: ['web'] as const };
+  assert.equal(canDispatchAnyAction({ ...base, fetchesUsed: 0 }, dispatchBudgets), false);
+  assert.equal(canDispatchAnyAction({ ...base, pendingWebFetches: 0, fetchesUsed: 0 }, dispatchBudgets), false);
+  // Fetch headroom alone (no pending fetch) does not waive search exhaustion.
+  assert.equal(canDispatchAnyAction({ ...base, fetchesUsed: 0 }, { ...dispatchBudgets, maxFetches: 99 }), false);
+  assert.deepEqual(
+    stopPolicy(
+      laneCtx({
+        budgets,
+        searchesUsed: budgets.maxSearches,
+        fetchesUsed: 0,
+        gatherActionsUsed: 0,
+        laneActionsUsed: {},
+        admissibleLanes: ['web'],
+      }),
+    ),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+  assert.deepEqual(
+    stopPolicy(baseCtx({ budgets, searchesUsed: budgets.maxSearches, fetchesUsed: 0 })),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+});
+
+test('fetch-aware web lane: envelope exhaustion still stops despite pending web_fetch', () => {
+  const budgets = resolveBudgets();
+  const envelope = budgets.maxGatherActions ?? 6;
+  assert.equal(
+    canDispatchAnyAction(
+      {
+        gatherActionsUsed: envelope,
+        searchesUsed: budgets.maxSearches,
+        pendingWebFetches: 1,
+        fetchesUsed: 0,
+        admissibleLanes: ['web'],
+      },
+      {
+        maxSearches: budgets.maxSearches,
+        maxGatherActions: envelope,
+        laneCaps: budgets.laneCaps,
+        maxFetches: budgets.maxFetches,
+      },
+    ),
+    false,
+  );
+  assert.deepEqual(
+    stopPolicy(
+      laneCtx({
+        budgets,
+        searchesUsed: budgets.maxSearches,
+        fetchesUsed: 0,
+        pendingWebFetches: 1,
+        gatherActionsUsed: envelope,
+        laneActionsUsed: {},
+        admissibleLanes: ['web'],
+      }),
+    ),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+  assert.deepEqual(
+    stopPolicy(baseCtx({ budgets, gatherActionsUsed: envelope, pendingWebFetches: 1 })),
+    { stop: true, reason: 'budget_exhausted' },
+  );
+});
+
+test('admissibleGatherLanes gates social/video/kg on live surfaces', () => {
+  const off = {
+    research: { usable: true },
+    github: { usable: true },
+    kg: { usable: false },
+    video: { youtube: { usable: false }, bilibili: { usable: false } },
+    social: [{ usable: false }],
+  };
+  assert.deepEqual(admissibleGatherLanes(off), ['web', 'research', 'github']);
+  assert.equal(snapshotHasSpecialistNeed(off), true);
+  const webOnly = {
+    research: { usable: false },
+    github: { usable: false },
+    kg: { usable: false },
+    video: { youtube: { usable: false }, bilibili: { usable: false } },
+    social: [{ usable: false }],
+  };
+  assert.deepEqual(admissibleGatherLanes(webOnly), ['web', 'research', 'github']);
+  const live = {
+    research: { usable: true },
+    github: { usable: true },
+    kg: { usable: true },
+    video: { youtube: { usable: true }, bilibili: { usable: false } },
+    social: [{ usable: true }],
+  };
+  assert.deepEqual(admissibleGatherLanes(live), ['web', 'research', 'github', 'social', 'video', 'kg']);
 });

@@ -15,6 +15,11 @@
 // probe throw/reject counts as absent. Env-hint inference never runs when a
 // probe is provided.
 
+// Wave 9 (D4): single source of truth lives in agent-gather.ts. Imported for
+// the snapshot intersection only; used inside buildCapabilities at call time,
+// never at module-eval time, so the gather ↔ capabilities cycle stays safe.
+import { EXECUTOR_SUPPORTED_SPECIALIST_LANES } from './agent-gather.js';
+
 export type CapabilityVertical =
   | 'web'
   | 'research'
@@ -48,6 +53,11 @@ export interface EffectiveCapabilitiesSnapshot {
   kg: EffectiveCapability;
   graph: EffectiveCapability;
   github: EffectiveCapability;
+  /** Wave 9 (D4) additive: executor-supported specialist lanes, copied from
+   *  EXECUTOR_SUPPORTED_SPECIALIST_LANES in agent-gather.ts (the single
+   *  source of truth). Planner/policy consumers read usable flags, which are
+   *  already intersected; this field names the lane list explicitly. */
+  executorSupportedLanes: readonly string[];
 }
 
 /** Injected CLI probe: true = installed and responding. Throw = absent. */
@@ -272,7 +282,26 @@ function resolveSocial(env: Record<string, string | undefined>, cli: CliMap): Ef
   ];
 }
 
+/** Wave 9 (D4) intersection: a lane with no executor tool surface is never a
+ *  usable specialist choice, even when the machine is capable. Machine truth
+ *  stays observable — backend untouched, machine quality/reason embedded in
+ *  reason — but usable flips false and advertised quality reads unavailable,
+ *  so planner-visible lanes ⊆ executor-supported lanes. Degraded-to-web
+ *  fallback information survives via the deny path in
+ *  gatherActionAdmissibility, never as a usable lane. */
+function deferLaneWithoutToolSurface(action: string, entry: EffectiveCapability): EffectiveCapability {
+  return {
+    ...entry,
+    usable: false,
+    quality: 'unavailable',
+    reason: `${action} has no executor tool surface this cycle (deferred); machine ${entry.quality}: ${entry.reason ?? 'no reason'}`,
+  };
+}
+
 function buildCapabilities(env: Record<string, string | undefined>, cli: CliMap): EffectiveCapabilitiesSnapshot {
+  const supportedLanes: readonly string[] = EXECUTOR_SUPPORTED_SPECIALIST_LANES;
+  const maybeDefer = (lane: string, action: string, entry: EffectiveCapability): EffectiveCapability =>
+    supportedLanes.includes(lane) ? entry : deferLaneWithoutToolSurface(action, entry);
   const kg = hasEnv(env, 'DIFFBOT_TOKEN')
     ? cap('kg.search', 'kg', true, 'full', 'DIFFBOT_TOKEN present; DQL search/enhance via diffbot-dql', 'diffbot-dql')
     : cap('kg.search', 'kg', false, 'unavailable', 'DIFFBOT_TOKEN unset; kg channel conditionally registered only', 'diffbot-dql');
@@ -306,10 +335,10 @@ function buildCapabilities(env: Record<string, string | undefined>, cli: CliMap)
       'native-public-apis',
     ),
     video: {
-      youtube: resolveYoutube(env),
-      bilibili: resolveBilibili(env, cli),
+      youtube: maybeDefer('video', 'video.youtube', resolveYoutube(env)),
+      bilibili: maybeDefer('video', 'video.bilibili', resolveBilibili(env, cli)),
     },
-    social: resolveSocial(env, cli),
+    social: resolveSocial(env, cli).map((entry) => maybeDefer('social', entry.action, entry)),
     kg,
     graph,
     github: cap(
@@ -320,6 +349,7 @@ function buildCapabilities(env: Record<string, string | undefined>, cli: CliMap)
       'always available; hardened clone stack, token optional for public data',
       'github-api',
     ),
+    executorSupportedLanes: [...EXECUTOR_SUPPORTED_SPECIALIST_LANES],
   };
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "pi-northstar",
   "version": "0.5.0",
-  "description": "Pi extension — web_search, fetch, github, social, kg/graph, browser, desktop, and agent_poll with fused multi-provider search, 12-source research, agent reports, and opt-in media/vision acquisition.",
+  "description": "Pi extension — web_search, fetch, github, social, kg/graph, browser, desktop, and agent_poll with fused multi-provider search, 12-source research, adaptive agent jobs, and opt-in media/vision acquisition.",
   "type": "module",
   "license": "MIT",
   "engines": {

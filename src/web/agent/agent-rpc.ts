@@ -32,6 +32,12 @@ export interface AgentRpcRecord {
     ownerPattern: string;
     roles: readonly string[];
   };
+  /**
+   * Negotiated JSON-schema dialect (record-level only; snapshots carry
+   * transport + reason only). Absent means v1-only/text. Observability
+   * only — no gating change.
+   */
+  jsonSchema?: 'flat-v1' | 'structured-v1';
 }
 
 export interface AgentRpcNegotiationInput {
@@ -46,6 +52,12 @@ export interface LeafNegotiatedCapabilities {
     ownerPattern: string;
     roles: readonly string[];
   };
+  /**
+   * Negotiated JSON-schema dialect (observability only; wire gating lives in
+   * the leaf client via getNegotiatedCapabilities/supportsJsonOutput).
+   * Absent means v1-only/text.
+   */
+  jsonSchema?: 'flat-v1' | 'structured-v1';
 }
 
 /** Minimal leaf provider surface. Satisfied structurally by LeafRuntimeClient. */

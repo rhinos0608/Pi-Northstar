@@ -32,6 +32,7 @@ function validEvents(): AgentResearchEvent[] {
     { type: 'RoundClosed', jobId: JOB, round: 1, growthCount: 1, conflictsCount: 0 },
     { type: 'SynthesisCompleted', jobId: JOB, claimUnitCount: 2, blockCount: 1, orphanedCount: 0 },
     { type: 'VerificationCompleted', jobId: JOB, supportedCount: 2, refutedCount: 0, unsupportedCount: 0, repairApplied: 1, repairRejected: 0 },
+    { type: 'CandidatesAccumulated', jobId: JOB, round: 1, added: 2, dropped: 1 },
     { type: 'JobReady', jobId: JOB, resultByteLength: 512, warningCount: 0 },
   ];
 }
@@ -47,7 +48,7 @@ function journalOf(events: AgentResearchEvent[]): AgentEventJournal {
   return journal;
 }
 
-test('all ten event types construct', () => {
+test('all eleven event types construct', () => {
   for (const event of validEvents()) {
     const checked = validateAgentResearchEvent(event);
     assert.equal(checked.ok, true, event.type);
@@ -203,4 +204,132 @@ test('determinism: same events yield identical canonical bytes', () => {
   // Key order in input does not change bytes.
   const reordered = { jobId: JOB, query: 'laptops', createdAtMs: 1000, type: 'JobCreated' };
   assert.equal(validateAgentResearchEvent(reordered).ok, true);
+});
+
+test('EvidenceAdmitted accepts URL-less structured-identity anchors with typed locators', () => {
+  // KG row: '' sentinel + identity + {nodeId, field} locator.
+  const kg = {
+    type: 'EvidenceAdmitted',
+    jobId: JOB,
+    evidenceId: EV1,
+    round: 1,
+    questionIds: [Q1],
+    excerptHash: HASH,
+    fingerprint: FP,
+    canonicalUrl: '',
+    identity: { provider: 'wikidata', query: 'Quartz release', nodeId: 'Q-quartz-9' },
+    locator: { nodeId: 'Q-quartz-9', field: 'releaseNotes' },
+  };
+  assert.equal(validateAgentResearchEvent(kg).ok, true, JSON.stringify(validateAgentResearchEvent(kg)));
+  // Research abstract: '' sentinel + provider/query identity + char-range locator.
+  const abstract = {
+    type: 'EvidenceAdmitted',
+    jobId: JOB,
+    evidenceId: EV1,
+    round: 2,
+    questionIds: [Q1],
+    excerptHash: HASH,
+    fingerprint: FP,
+    canonicalUrl: '',
+    identity: { provider: 'openalex', query: 'zebra migration corridors' },
+    locator: { start: 0, end: 128 },
+  };
+  assert.equal(validateAgentResearchEvent(abstract).ok, true, JSON.stringify(validateAgentResearchEvent(abstract)));
+  // URL-anchored evidence with a locator still validates (locator optional shape).
+  const url = {
+    type: 'EvidenceAdmitted',
+    jobId: JOB,
+    evidenceId: EV1,
+    round: 1,
+    questionIds: [Q1],
+    excerptHash: HASH,
+    fingerprint: FP,
+    canonicalUrl: 'https://example.com/paper',
+    locator: { page: 2 },
+  };
+  assert.equal(validateAgentResearchEvent(url).ok, true, JSON.stringify(validateAgentResearchEvent(url)));
+});
+
+test('EvidenceAdmitted rejects malformed anchors, identities, and locators', () => {
+  const base = {
+    type: 'EvidenceAdmitted',
+    jobId: JOB,
+    evidenceId: EV1,
+    round: 1,
+    questionIds: [Q1],
+    excerptHash: HASH,
+    fingerprint: FP,
+  };
+  const bad = [
+    // '' sentinel without identity.
+    { ...base, canonicalUrl: '' },
+    // URL + identity together (XOR violation).
+    { ...base, canonicalUrl: 'https://example.com/a', identity: { provider: 'kg', query: 'q' } },
+    // Non-http URL.
+    { ...base, canonicalUrl: 'ftp://example.com/a' },
+    // Empty provider / oversized nodeId.
+    { ...base, canonicalUrl: '', identity: { provider: '', query: 'q' } },
+    { ...base, canonicalUrl: '', identity: { provider: 'kg', query: 'q', nodeId: `n-${'x'.repeat(300)}` } },
+    // Split KG locator.
+    { ...base, canonicalUrl: '', identity: { provider: 'kg', query: 'q' }, locator: { nodeId: 'n-1' } },
+    // Unknown locator variant.
+    { ...base, canonicalUrl: '', identity: { provider: 'kg', query: 'q' }, locator: { offset: 3 } },
+  ];
+  for (const event of bad) {
+    assert.equal(validateAgentResearchEvent(event).ok, false, JSON.stringify(event));
+  }
+});
+
+test('replay-compat: legacy EvidenceAdmitted validates byte-for-byte', () => {
+  const legacy = { type: 'EvidenceAdmitted', jobId: JOB, evidenceId: EV1, round: 1, questionIds: [Q1], excerptHash: HASH, fingerprint: FP };
+  assert.equal(validateAgentResearchEvent(legacy).ok, true);
+  const journal = journalOf([validEvents()[0]!, legacy as never]);
+  assert.equal(
+    serializeJournal(journal),
+    canonicalJson({ jobId: JOB, events: [validEvents()[0], legacy] }),
+  );
+});
+
+test('CandidatesAccumulated validates count-only shape with exact keys', () => {
+  const valid = { type: 'CandidatesAccumulated', jobId: JOB, round: 1, added: 3, dropped: 1 };
+  assert.equal(validateAgentResearchEvent(valid).ok, true, JSON.stringify(validateAgentResearchEvent(valid)));
+  const zero = { type: 'CandidatesAccumulated', jobId: JOB, round: 1, added: 0, dropped: 0 };
+  assert.equal(validateAgentResearchEvent(zero).ok, true);
+  const extra = { ...valid, titles: ['leaked title'] };
+  assert.equal(validateAgentResearchEvent(extra).ok, false);
+  if (!validateAgentResearchEvent(extra).ok) {
+    assert.match((validateAgentResearchEvent(extra) as { ok: false; reason: string }).reason, /unexpected field/);
+  }
+  const missing = { type: 'CandidatesAccumulated', jobId: JOB, round: 1, added: 3 };
+  assert.equal(validateAgentResearchEvent(missing).ok, false);
+  const negative = { type: 'CandidatesAccumulated', jobId: JOB, round: 1, added: -1, dropped: 0 };
+  assert.equal(validateAgentResearchEvent(negative).ok, false);
+  const float = { type: 'CandidatesAccumulated', jobId: JOB, round: 1, added: 1.5, dropped: 0 };
+  assert.equal(validateAgentResearchEvent(float).ok, false);
+});
+
+test('CandidatesAccumulated joins round monotonicity and projects as a no-op', () => {
+  const acc = (round: number, added: number, dropped: number): AgentResearchEvent => ({
+    type: 'CandidatesAccumulated', jobId: JOB, round, added, dropped,
+  });
+  // Multi-round journal replays cleanly with candidate events interleaved.
+  const journal = journalOf([
+    validEvents()[0]!,
+    validEvents()[1]!,
+    acc(1, 3, 1),
+    { type: 'SearchCompleted', jobId: JOB, round: 1, query: 'laptops price', hitCount: 5, searchesUsed: 1 },
+    acc(2, 0, 2),
+    { type: 'SearchCompleted', jobId: JOB, round: 2, query: 'laptops warranty', hitCount: 2, searchesUsed: 2 },
+  ]);
+  assert.equal(replayable(JOB, journal), true);
+  // Round regression through the candidate event fails replay: roundOf sees it.
+  const regress = journalOf([validEvents()[0]!, validEvents()[1]!, acc(2, 1, 0)]);
+  regress.events.push(acc(1, 0, 1));
+  assert.equal(replayable(JOB, regress), false);
+  // Projection ignores the counts: no state mutation, rounds untouched.
+  const projected = projectAgentState(regress, 'goal');
+  assert.equal(projected.ok, true);
+  if (!projected.ok) return;
+  assert.equal(projected.state.rounds, 0);
+  assert.deepEqual(projected.state.evidenceIds, []);
 });

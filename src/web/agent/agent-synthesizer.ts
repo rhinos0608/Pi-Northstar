@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import {
   AGENT_CLAIM_MAX_BYTES,
   AGENT_MAX_SOURCES,
+  formatStructuredSourceUrl,
   type AgentClaimV1,
   type AgentSourceV1,
 } from './agent-contract.js';
@@ -228,12 +229,83 @@ export interface CompiledSourceSet {
   selectedEvidenceIds: string[];
   sourceCatalog: Array<{
     publicId: string;
+    /** Group URL: normalized http(s) canonical, or a structured identity
+     *  `provider:nodeId/field` for URL-less ledger evidence. */
     canonicalUrl: string;
     title?: string;
+    /** KG group locator carried from the representative evidence entry;
+     *  absent = document-class group (renderer falls back to location). */
+    locator?: { nodeId: string; field: string };
     evidenceIds: string[];
   }>;
+  /** Admitted entries dropped for a malformed source identity (no URL, no
+   *  well-formed structured identity): admission-shape bugs surfaced here so
+   *  callers can warn instead of silently losing evidence. */
+  droppedEvidenceIds: string[];
 }
 
+/** Deterministic group identity for URL-less ledger evidence (canonicalUrl
+ *  '' sentinel). Two shapes, both reject-not-clamp (undefined = malformed):
+ *  KG rows key on the entry's sourceRef provider + {nodeId, field} locator;
+ *  non-KG identity entries (research abstracts: char-range locator, identity
+ *  {provider, query}) key on provider + a stable query hash rendered as a
+ *  structured identity string (`provider:q-<hex16>/abstract`, matching the
+ *  agent-contract.ts STRUCTURED_SOURCE_URL_PATTERN vocabulary so the group
+ *  URL stays claimable). Field names the artifact class: 'abstract' for the
+ *  research route, 'excerpt' otherwise. */
+export function structuredLedgerKey(entry: AgentEvidence): { url: string; locator?: { nodeId: string; field: string } } | undefined {
+  const locator = entry.locator as { nodeId?: unknown; field?: unknown };
+  const identity = entry.sourceRef.identity;
+  if (identity === undefined) return undefined;
+  if (typeof locator.nodeId === 'string' && typeof locator.field === 'string') {
+    const structured = formatStructuredSourceUrl(identity.provider, locator.nodeId, locator.field);
+    if (structured === undefined) return undefined;
+    return { url: structured, locator: { nodeId: locator.nodeId, field: locator.field } };
+  }
+  const provider = identity.provider;
+  const query = typeof identity.query === 'string' ? identity.query.trim() : '';
+  if (typeof provider !== 'string' || provider === '' || query === '') return undefined;
+  const nodeId = `q-${sha256hex(query).slice(0, 16)}`;
+  const field = entry.sourceRef.acquisitionRoute === 'research' ? 'abstract' : 'excerpt';
+  const structured = formatStructuredSourceUrl(provider, nodeId, field);
+  if (structured === undefined) return undefined;
+  return { url: structured };
+}
+
+/** Group key + display URL + locator for the source compilers (single shared
+ *  key derivation for the synthesis catalog and the evidence-only composer):
+ *  normalized http(s) canonical URL, or the raw deterministic structured
+ *  identity for URL-less ledger evidence (KG rows key on provider +
+ *  {nodeId, field} locator; research abstracts key on provider + query hash).
+ *  Structured identities are case-sensitive (`provider:nodeId/field` keeps the
+ *  provider spelling), so case-variant providers split consistently in both
+ *  composers; only http(s) entries go through normalizeUrl. Undefined when
+ *  neither identity is well-formed — the caller drops the entry from the
+ *  catalog instead of shipping a coerced URL (dropped ids surface via
+ *  CompiledSourceSet.droppedEvidenceIds / the evidence-only warning). */
+export function evidenceSourceKey(entry: AgentEvidence):
+  | { key: string; url: string; locator?: { nodeId: string; field: string } }
+  | undefined {
+  if (entry.sourceRef.canonicalUrl !== '') {
+    const normalized = normalizeUrl(entry.sourceRef.canonicalUrl);
+    return { key: normalized, url: normalized };
+  }
+  const structured = structuredLedgerKey(entry);
+  if (structured === undefined) return undefined;
+  return { key: structured.url, url: structured.url, ...(structured.locator === undefined ? {} : { locator: structured.locator }) };
+}
+
+/** Group key for the source compiler: normalized http(s) canonical URL, or
+ *  the deterministic structured identity for URL-less ledger evidence (KG
+ *  rows key on provider + {nodeId, field} locator; research abstracts key on
+ *  provider + query hash). Undefined when neither identity is well-formed —
+ *  the caller drops the entry from the catalog instead of shipping a coerced
+ *  URL (dropped ids surface via CompiledSourceSet.droppedEvidenceIds). */
+function evidenceGroupKey(entry: AgentEvidence): { key: string; locator?: { nodeId: string; field: string } } | undefined {
+  const grouped = evidenceSourceKey(entry);
+  if (grouped === undefined) return undefined;
+  return { key: grouped.key, ...(grouped.locator === undefined ? {} : { locator: grouped.locator }) };
+}
 const DIRECT_SOURCE_CLASSES = new Set(['official', 'docs', 'repo', 'academic']);
 
 /**
@@ -251,21 +323,32 @@ export function compileSourceSet(
   options?: { maxSources?: number },
 ): CompiledSourceSet {
   const maxSources = Math.max(0, Math.floor(options?.maxSources ?? AGENT_MAX_SOURCES));
-  const groups = new Map<string, AgentEvidence[]>();
+  // Group by normalized canonical URL; URL-less ledger evidence (KG rows)
+  // groups by structured identity instead, so '' can never become a catalog
+  // URL. Entries with no well-formed identity drop from the catalog (never
+  // coerced); their ids stay unselected so the model never cites them.
+  const groups = new Map<string, { items: AgentEvidence[]; locator?: { nodeId: string; field: string } }>();
+  const droppedEvidenceIds: string[] = [];
   for (const entry of evidence) {
     // normalizeUrl guards direct callers passing tracking-param variants of
     // one page; admission already normalizes canonicalUrl upstream.
-    const list = groups.get(normalizeUrl(entry.sourceRef.canonicalUrl));
-    if (list !== undefined) list.push(entry);
-    else groups.set(normalizeUrl(entry.sourceRef.canonicalUrl), [entry]);
+    const grouped = evidenceGroupKey(entry);
+    if (grouped === undefined) {
+      droppedEvidenceIds.push(entry.id);
+      continue;
+    }
+    const list = groups.get(grouped.key);
+    if (list !== undefined) list.items.push(entry);
+    else groups.set(grouped.key, { items: [entry], ...(grouped.locator === undefined ? {} : { locator: grouped.locator }) });
   }
   interface Scored {
     url: string;
     items: AgentEvidence[];
     score: number;
     leadClass: string;
+    locator?: { nodeId: string; field: string };
   }
-  const scored: Scored[] = [...groups.values()].map((items) => {
+  const scored: Scored[] = [...groups.entries()].map(([key, { items, locator }]) => {
     // Deterministic within-group order: sort members by the same stable key
     // (id, then canonicalUrl) so evidenceIds/lines and truncation survival
     // are input-order-independent end-to-end. Scoring and membership untouched.
@@ -278,13 +361,16 @@ export function compileSourceSet(
     );
     // Deterministic representative: first of the stably sorted members.
     const representative = sortedItems[0] as AgentEvidence;
-    const url = representative?.sourceRef.canonicalUrl ?? '';
+    // Group URL is the map key (normalized http(s) canonical, or the
+    // structured identity) — never the raw canonicalUrl, which is '' for
+    // URL-less ledger evidence.
+    const url = key;
     const leadClass = representative?.sourceRef.sourceClass ?? 'unknown';
     const questions = new Set<string>();
     for (const entry of items) for (const questionId of entry.questionIds) questions.add(questionId);
     const direct = items.some((entry) => DIRECT_SOURCE_CLASSES.has(entry.sourceRef.sourceClass)) ? 1 : 0;
     const independent = new Set(items.map((entry) => entry.corroboratingFingerprint)).size;
-    return { url, items: sortedItems, score: questions.size * 3 + direct + independent, leadClass };
+    return { url, items: sortedItems, score: questions.size * 3 + direct + independent, leadClass, ...(locator === undefined ? {} : { locator }) };
   });
   scored.sort((a, b) => (a.score !== b.score ? b.score - a.score : a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
   const byClass = new Map<string, Scored[]>();
@@ -309,10 +395,12 @@ export function compileSourceSet(
     publicId: `src-${index}`,
     canonicalUrl: group.url,
     evidenceIds: group.items.map((entry) => entry.id),
+    ...(group.locator === undefined ? {} : { locator: group.locator }),
   }));
   return {
     selectedEvidenceIds: selected.flatMap((group) => group.items.map((entry) => entry.id)),
     sourceCatalog,
+    droppedEvidenceIds,
   };
 }
 
@@ -386,7 +474,9 @@ export function renderResultFromIR(
     url: entry.canonicalUrl,
     title: entry.title ?? entry.canonicalUrl,
     sourceKind: 'derived' as const,
-    locator: { location: entry.canonicalUrl },
+    // KG groups carry their {nodeId, field} locator from the representative
+    // evidence entry; document groups keep the location fallback.
+    ...(entry.locator === undefined ? { locator: { location: entry.canonicalUrl } } : { locator: { ...entry.locator } }),
     warnings: ['derived from admitted evidence'],
   }));
   return { reportText: parts.join('\n\n'), claims, sources, orphanedClaimUnitIds: [...orphaned].sort(), blockTexts: parts };

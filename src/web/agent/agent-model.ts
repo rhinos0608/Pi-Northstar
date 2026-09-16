@@ -1,13 +1,18 @@
 // model proposes, code validates — this seam is the only model entry into the loop.
 //
 // createLeafModelClient drives completeJson over the LeafRuntimeProvider seam:
-// one leaf call per completeJson (prompt already fenced/built by callers),
-// JSON mode when the negotiated outputModes include 'json', else text-mode +
-// client-side parse. Both paths end in client parse + wire-level gate, returning
-// {ok,value} | {ok:false,reason} with fixed reasons only — never provider text.
+// one leaf call per completeJson (prompt already fenced/built by callers).
+// Wire schemas attach only when the negotiated jsonSchema dialect is
+// 'structured-v1'; otherwise text-mode + client-side parse (outputModes 'json'
+// alone is insufficient). Both paths end in client parse + wire-level gate,
+// returning {ok,value} | {ok:false,reason} with fixed reasons only — never
+// provider text.
 // Callers (agent-core) validate domain-side; completeJson adds the wire gate only.
 import type { LeafNegotiatedCapabilities, LeafRuntimeProvider } from './agent-rpc.js';
 import { VERIFICATION_SCHEMA } from './agent-verifier.js';
+import { buildPlannerPrompt } from './agent-planner.js';
+import { formatCapabilitiesForPrompt, type EffectiveCapabilitiesSnapshot } from './agent-capabilities.js';
+import type { AgentBudgets } from './agent-policy.js';
 
 export interface AgentModelRequest {
   prompt: string;
@@ -24,7 +29,47 @@ export interface AgentModelClient {
   ): Promise<{ ok: true; value: T } | { ok: false; reason: string }>;
 }
 
-/** Flat JSON-mode schema for the planner call: questions + scope notes. */
+/**
+ * Wire-level GatherIntent shape: kind enum + optional per-kind fields,
+ * additionalProperties false. Deliberately oneOf-free (oneOf is outside the
+ * negotiated structured-v1 subset); the domain validator
+ * (validateGatherIntent, exact-keys per kind) is authoritative. The wire
+ * gate (wireValidates below) checks array presence only.
+ */
+export const GATHER_INTENT_WIRE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  required: ['kind'],
+  properties: {
+    kind: { type: 'string', enum: ['web_search', 'research_search', 'web_fetch', 'github_search', 'social_search', 'video_transcript', 'kg_lookup'] },
+    query: { type: 'string' },
+    limit: { type: 'integer', minimum: 1, maximum: 50 },
+    source: { type: 'string' },
+    yearFrom: { type: 'integer', minimum: 1900, maximum: 2100 },
+    yearTo: { type: 'integer', minimum: 1900, maximum: 2100 },
+    scope: { type: 'string', enum: ['repo', 'code', 'issues', 'files'] },
+    repoHint: { type: 'string' },
+    state: { type: 'string', enum: ['open', 'closed', 'all'] },
+    labels: { type: 'array', items: { type: 'string' } },
+    number: { type: 'integer', minimum: 1 },
+    platform: { type: 'string' },
+    sort: { type: 'string' },
+    videoHint: { type: 'string' },
+    entityType: { type: 'string', enum: ['Person', 'Organization'] },
+    name: { type: 'string' },
+    url: { type: 'string' },
+    id: { type: 'string' },
+  },
+  additionalProperties: false,
+};
+
+/**
+ * Planner schema (questions + scope notes + nested per-question gather
+ * intent). Forwarded on the wire only when the negotiated jsonSchema dialect
+ * is 'structured-v1'; otherwise the call runs as text JSON with client-side
+ * parse + wire gate. The wire `intent` shape is intentionally permissive
+ * (kind enum + optional fields, no oneOf — outside the structured-v1 subset);
+ * the DOMAIN validator (validateGatherIntent) is authoritative.
+ */
 export const AGENT_PLAN_SCHEMA: Record<string, unknown> = {
   type: 'object',
   required: ['questions'],
@@ -38,6 +83,7 @@ export const AGENT_PLAN_SCHEMA: Record<string, unknown> = {
           question: { type: 'string' },
           priority: { type: 'integer', minimum: 1, maximum: 3 },
           required: { type: 'boolean' },
+          intent: GATHER_INTENT_WIRE_SCHEMA,
         },
       },
     },
@@ -45,10 +91,15 @@ export const AGENT_PLAN_SCHEMA: Record<string, unknown> = {
   },
 };
 
-/** Flat JSON-mode schema for the evaluator call. */
+/**
+ * Evaluator schema (clean break: nextQueries deleted, no old-name alias).
+ * Forwarded on the wire only when the negotiated jsonSchema dialect is
+ * 'structured-v1'; otherwise text JSON with client-side parse + wire gate.
+ * nextActions carry questionId (evaluation prompts include established IDs).
+ */
 export const AGENT_EVALUATION_SCHEMA: Record<string, unknown> = {
   type: 'object',
-  required: ['questionUpdates', 'nextQueries', 'shouldContinue'],
+  required: ['questionUpdates', 'nextActions', 'shouldContinue'],
   properties: {
     questionUpdates: {
       type: 'array',
@@ -63,12 +114,26 @@ export const AGENT_EVALUATION_SCHEMA: Record<string, unknown> = {
       },
     },
     gaps: { type: 'array', items: { type: 'string' } },
-    nextQueries: { type: 'array', items: { type: 'string' } },
+    nextActions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['questionId', 'intent'],
+        properties: {
+          questionId: { type: 'string' },
+          intent: GATHER_INTENT_WIRE_SCHEMA,
+        },
+      },
+    },
     shouldContinue: { type: 'boolean' },
   },
 };
 
-/** Flat JSON-mode schema for the synthesis IR call. */
+/**
+ * Synthesis IR schema. Forwarded on the wire only when the negotiated
+ * jsonSchema dialect is 'structured-v1'; otherwise text JSON with
+ * client-side parse + wire gate.
+ */
 export const AGENT_SYNTHESIS_IR_SCHEMA: Record<string, unknown> = {
   type: 'object',
   required: ['blocks', 'claimUnits'],
@@ -123,12 +188,61 @@ const SCHEMA_REGISTRY: Record<string, SchemaEntry> = {
   verification: { schema: VERIFICATION_SCHEMA, role: 'verification', stage: 'agent-verify', v2Role: 'researcher', maxOutputTokens: 2048 },
 };
 
+/**
+ * Steering seams over one leaf provider (Task 4, text-JSON mode).
+ *
+ * Shapes mirror AgentCoreDeps exactly: planner takes (goal, budgets) and
+ * builds the same prompt runAgentCore's utility path would (buildPlannerPrompt
+ * + Capabilities block when a snapshot is supplied); evaluator/synthesizer/
+ * verifier/repairer take the core-built ({ prompt }) and return the raw model
+ * value. completeJson owns the wire gate + text-JSON fallback; failures
+ * degrade to undefined (core maps that to its deterministic fallbacks) and
+ * never throw or leak provider text. Repairer reuses the synthesis schema.
+ */
+export interface AgentModelSeams {
+  planner: (goal: string, budgets: AgentBudgets) => Promise<unknown>;
+  evaluator: (args: { prompt: string }) => Promise<unknown>;
+  synthesizer: (args: { prompt: string }) => Promise<unknown>;
+  verifier: (args: { prompt: string }) => Promise<unknown>;
+  repairer: (args: { prompt: string }) => Promise<unknown>;
+  utilityModelClient: AgentModelClient;
+}
+
+export function createAgentModelSeams(
+  provider: LeafRuntimeProvider,
+  opts?: { capabilitiesSnapshot?: EffectiveCapabilitiesSnapshot },
+): AgentModelSeams {
+  const client = createLeafModelClient(provider);
+  const callRole = async (prompt: string, schemaName: string): Promise<unknown> => {
+    let outcome: { ok: true; value: unknown } | { ok: false; reason: string };
+    try {
+      outcome = await client.completeJson<unknown>(prompt, schemaName);
+    } catch {
+      return undefined;
+    }
+    return outcome.ok ? outcome.value : undefined;
+  };
+  return {
+    planner: async (goal, budgets) => {
+      const base = buildPlannerPrompt(goal, budgets);
+      const prompt =
+        opts?.capabilitiesSnapshot === undefined
+          ? base
+          : `${base}\nCapabilities:\n${formatCapabilitiesForPrompt(opts.capabilitiesSnapshot)}`;
+      return callRole(prompt, 'agent-plan');
+    },
+    evaluator: async ({ prompt }) => callRole(prompt, 'agent-evaluation'),
+    synthesizer: async ({ prompt }) => callRole(prompt, 'synthesis'),
+    verifier: async ({ prompt }) => callRole(prompt, 'verification'),
+    repairer: async ({ prompt }) => callRole(prompt, 'synthesis'),
+    utilityModelClient: client,
+  };
+}
+
 /** Default per-call timeout: 60s. Overridable per call via opts. */
 export const AGENT_MODEL_DEFAULT_TIMEOUT_MS = 60_000;
 
 export interface LeafModelClientOptions {
-  /** Explicit caps override the provider's negotiated view (tests, embeds). */
-  outputModes?: readonly string[];
   correlationV2?: LeafNegotiatedCapabilities['correlationV2'];
   timeoutMs?: number;
 }
@@ -157,7 +271,7 @@ function wireValidates(entry: SchemaEntry, value: unknown): boolean {
       return Array.isArray(value.questions);
     case 'evaluator':
       return (
-        Array.isArray(value.questionUpdates) && Array.isArray(value.nextQueries) && typeof value.shouldContinue === 'boolean'
+        Array.isArray(value.questionUpdates) && Array.isArray(value.nextActions) && typeof value.shouldContinue === 'boolean'
       );
     case 'synthesis':
       return Array.isArray(value.blocks) && Array.isArray(value.claimUnits);
@@ -191,10 +305,15 @@ export function createLeafModelClient(
     ): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
       const entry = SCHEMA_REGISTRY[schemaName];
       if (entry === undefined) return { ok: false, reason: 'unknown_schema' };
-      const negotiated = provider.getNegotiatedCapabilities?.();
-      const outputModes = options?.outputModes ?? negotiated?.outputModes;
+      const negotiated = provider.getNegotiatedCapabilities?.() as
+        | (LeafNegotiatedCapabilities & { jsonSchema?: unknown })
+        | undefined;
+      const rawDialect = negotiated?.jsonSchema;
+      // Force-text guard: only the negotiated 'structured-v1' dialect earns a
+      // wire schema. Absent, 'flat-v1', or anything else → text JSON with
+      // client-side parse via extractJsonText + wireValidates below.
+      const structuredJson = rawDialect === 'structured-v1';
       const correlationV2 = options?.correlationV2 ?? negotiated?.correlationV2;
-      const jsonMode = outputModes?.includes('json') ?? false;
       const maxOutputTokens = opts?.maxOutputTokens ?? entry.maxOutputTokens;
       const timeoutMs = opts?.timeoutMs ?? options?.timeoutMs ?? AGENT_MODEL_DEFAULT_TIMEOUT_MS;
       let text: string;
@@ -204,7 +323,7 @@ export function createLeafModelClient(
           maxOutputTokens,
           role: correlationV2 !== undefined ? entry.v2Role : 'researcher',
           stage: entry.stage,
-          ...(jsonMode ? { outputSchema: entry.schema } : {}),
+          ...(structuredJson ? { outputSchema: entry.schema } : {}),
         });
         if (typeof out?.text !== 'string' || out.text.trim() === '') return { ok: false, reason: 'schema_error' };
         text = out.text;

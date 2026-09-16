@@ -350,7 +350,7 @@ export default function (pi: ExtensionAPI): void {
 
   // Leaf-runtime RPC client: only when an exact leaf model is configured.
   // Absent env = no client, agents stay standalone (existing behavior).
-  // No new tool; the client only feeds the agent report leg.
+  // No new tool; the client only supplies staged steering calls inside adaptive agent jobs.
   const leafModel = (process.env.PI_NORTHSTAR_LEAF_MODEL ?? '').trim();
   const leafClient = leafModel !== '' ? new LeafRuntimeClient({ events: pi.events, modelId: leafModel }) : undefined;
   if (leafClient !== undefined) setLeafRuntimeProvider(leafClient);

@@ -1,13 +1,22 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { buildRepairPrompt, runAdaptiveCore, runAgentCore, type AgentProgress, type AgentSearchHit } from '../../../src/web/agent/agent-core.js';
-import { questionId } from '../../../src/web/agent/agent-state.js';
+import {
+  composeEvidenceOnlyResult,
+  EVIDENCE_ONLY_DEGRADED_WARNING,
+  EVIDENCE_ONLY_EMPTY_WARNING,
+} from '../../../src/web/agent/agent-core.js';
+import { createAgentState, questionId } from '../../../src/web/agent/agent-state.js';
 import { snapshotForJob } from '../../../src/web/agent/agent-capabilities.js';
 import { validateAgentResult } from '../../../src/web/agent/agent-contract.js';
 
+/** Task 5 migration: legacy string follow-ups become web_search actions on the established question. */
+const webActions = (question: string, queries: readonly string[]) =>
+  queries.map((query) => ({ questionId: questionId(question), intent: { kind: 'web_search', query } }));
+
 type Hit = AgentSearchHit;
 
-const emptyReport = () => async () => ({ text: '', sources: [] as Array<{ url: string; title: string }> });
 
 const searchFrom = (fn: (query: string) => Hit[]) => async (query: string): Promise<Hit[]> => [...fn(query)];
 
@@ -36,24 +45,27 @@ const PRICE_A = `Pro plan costs $99 per month billed annually with extra words h
 const PRICE_B = `Pro plan costs $199 per month billed annually with extra words here for the passage.${FILLER}`;
 const SECOND = `Second page with distinct Acme Pro launch details and partner quotes included here for follow-up coverage.${FILLER}`;
 
-test('compat: runAgentCore without adaptive deps keeps the recorded shape', async () => {
+test('compat: runAgentCore without seams runs the adaptive loop over the evidence-only floor', async () => {
   const hits = [
     { title: 'Alpha pricing', url: 'https://example.com/alpha', snippet: 'alpha pricing tiers' },
     { title: 'Beta pricing', url: 'https://example.com/beta', snippet: 'beta pricing plans' },
   ];
-  const deps = {
+  const result = await runAgentCore('pricing tiers', {
     search: async () => [...hits],
-    fetchText: async (url: string) => `Body text about pricing tiers for ${url}. Pricing details follow.`,
-    report: async () => ({
-      text: 'Unmapped sentence one. Unmapped sentence two.',
-      sources: [{ url: 'https://example.com/alpha', title: 'Alpha' }],
-      claims: [{ text: 'Structured finding.', sourceIds: ['src-0'] }],
-    }),
-  };
-  const result = await runAgentCore('pricing tiers', deps);
-  assert.ok(validateAgentResult(result).ok);
-  assert.deepEqual(result.claims, [{ text: 'Structured finding.', sourceIds: ['src-0'] }]);
-  assert.ok(!result.warnings.some((w) => w.startsWith('round ')), 'no adaptive round summaries on legacy path');
+    fetchText: async (url: string) => `Body text about pricing tiers for ${url}. Pricing details follow.${FILLER}`,
+  });
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.ok(result.warnings.some((w) => w.startsWith('round ')), 'adaptive round summaries on the only path');
+  assert.ok(result.warnings.includes(EVIDENCE_ONLY_DEGRADED_WARNING), 'absent seam degrades to evidence-only');
+  assert.ok(!result.warnings.includes('synthesis from evidence IR'));
+  const urls = result.sources.map((source) => source.url);
+  assert.ok(urls.includes('https://example.com/alpha'));
+  assert.ok(urls.includes('https://example.com/beta'));
+  assert.ok(result.claims.some((claim) => claim.text.includes('Pricing details follow')), 'admitted excerpts ship as claims');
+  for (const claim of result.claims) {
+    assert.ok(claim.sourceIds.length > 0);
+    for (const id of claim.sourceIds) assert.ok(result.sources.some((source) => source.id === id));
+  }
 });
 
 test('recovery: targeted follow-up exposes the hidden source', async () => {
@@ -68,9 +80,9 @@ test('recovery: targeted follow-up exposes the hidden source', async () => {
   const evaluator = async () => {
     calls += 1;
     if (calls === 1) {
-      return { questionUpdates: [], nextQueries: ['Acme Pro launch price details'], shouldContinue: true };
+      return { questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', ['Acme Pro launch price details']), shouldContinue: true };
     }
-    return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+    return { questionUpdates: [], nextActions: [], shouldContinue: false };
   };
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom((q) =>
@@ -82,7 +94,6 @@ test('recovery: targeted follow-up exposes the hidden source', async () => {
       'https://example.com/overview': OVERVIEW,
       'https://example.com/hidden-price': HIDDEN,
     }),
-    report: emptyReport(),
     planner,
     evaluator,
   });
@@ -104,15 +115,14 @@ test('conflict: contradictory values across rounds surface in the round summary'
       'https://example.com/price-a': PRICE_A,
       'https://example.com/price-b': PRICE_B,
     }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What does the Pro plan cost per month?', priority: 3, required: true }],
       scopeNotes: [],
     }),
     evaluator: async () => {
       calls += 1;
-      if (calls === 1) return { questionUpdates: [], nextQueries: ['Pro plan cost per month billing details'], shouldContinue: true };
-      return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+      if (calls === 1) return { questionUpdates: [], nextActions: webActions('What does the Pro plan cost per month?', ['Pro plan cost per month billing details']), shouldContinue: true };
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
     },
     budgets: { maxRounds: 2 },
   });
@@ -127,12 +137,11 @@ test('stop: budget exhausted appends research debt', async () => {
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: ['fresh follow-up query alpha one'], shouldContinue: true }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', ['fresh follow-up query alpha one']), shouldContinue: true }),
     budgets: { maxSearches: 1 },
   });
   assert.ok(validateAgentResult(result).ok);
@@ -152,14 +161,13 @@ test('stop: two duplicate rounds halt with no_progress and research debt', async
       return [{ title: 'Overview', url: 'https://example.com/overview' }];
     },
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
     evaluator: async () => {
       calls += 1;
-      return { questionUpdates: [], nextQueries: [`fresh follow-up research query number ${calls} alpha`], shouldContinue: true };
+      return { questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', [`fresh follow-up research query number ${calls} alpha`]), shouldContinue: true };
     },
     budgets: { maxRounds: 4, maxSearches: 4 },
   });
@@ -169,7 +177,7 @@ test('stop: two duplicate rounds halt with no_progress and research debt', async
   assert.ok(validateAgentResult(result).ok);
 });
 
-test('stop: duplicate-only nextQueries halt with no_queries and research debt', async () => {
+test('stop: duplicate-only nextActions halt with no_queries and research debt', async () => {
   let calls = 0;
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom((q) =>
@@ -181,14 +189,13 @@ test('stop: duplicate-only nextQueries halt with no_queries and research debt', 
       'https://example.com/overview': OVERVIEW,
       'https://example.com/second': SECOND,
     }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
     evaluator: async () => {
       calls += 1;
-      return { questionUpdates: [], nextQueries: ['second round targeted follow-up query'], shouldContinue: true };
+      return { questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', ['second round targeted follow-up query']), shouldContinue: true };
     },
     budgets: { maxRounds: 3 },
   });
@@ -202,7 +209,6 @@ test('stop: all_required_grounded breaks cleanly with no research debt', async (
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Hidden', url: 'https://example.com/hidden-price' }]),
     fetchText: fetchFrom({ 'https://example.com/hidden-price': HIDDEN }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
@@ -213,7 +219,7 @@ test('stop: all_required_grounded breaks cleanly with no research debt', async (
       assert.ok(first, 'evaluator prompt carries this-round evidence with ids');
       return {
         questionUpdates: [{ questionId: first!.questionIds[0], status: 'answered', evidenceIds: [first!.id] }],
-        nextQueries: [],
+        nextActions: [],
         shouldContinue: false,
       };
     },
@@ -228,12 +234,11 @@ test('stop: round_cap fires at maxRounds with research debt', async () => {
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: ['fresh follow-up query alpha one'], shouldContinue: true }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', ['fresh follow-up query alpha one']), shouldContinue: true }),
     budgets: { maxRounds: 1 },
   });
   assert.ok(result.warnings.some((w) => /^round 1: /.test(w)));
@@ -246,12 +251,11 @@ test('deadline: past deadline throws the exact contract message', async () => {
     runAdaptiveCore('Acme Pro pricing overview', {
       search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
       fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-      report: emptyReport(),
       planner: async () => ({
         questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
         scopeNotes: [],
       }),
-      evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+      evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
       deadlineMs: 100,
       now: () => 5000,
     }),
@@ -264,7 +268,6 @@ test('abort: already-aborted signal throws immediately', async () => {
     runAdaptiveCore('Acme Pro pricing overview', {
       search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
       fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-      report: emptyReport(),
       planner: async () => ({ questions: [{ question: 'What is the launch price of Acme Pro?' }], scopeNotes: [] }),
       signal: AbortSignal.abort(),
     }),
@@ -281,14 +284,13 @@ test('abort: mid-loop abort throws', async () => {
         return [{ title: 'Overview', url: 'https://example.com/overview' }];
       },
       fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-      report: emptyReport(),
       planner: async () => ({
         questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
         scopeNotes: [],
       }),
       evaluator: async () => {
         evalCalls += 1;
-        return { questionUpdates: [], nextQueries: ['fresh follow-up query alpha one'], shouldContinue: true };
+        return { questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', ['fresh follow-up query alpha one']), shouldContinue: true };
       },
       signal: controller.signal,
       budgets: { maxRounds: 3 },
@@ -302,14 +304,13 @@ test('evaluator overreach: shouldContinue:false is advisory while budget remains
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
     evaluator: async () => {
       calls += 1;
-      return { questionUpdates: [], nextQueries: [`fresh follow-up research query part ${calls} alpha`], shouldContinue: false };
+      return { questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', [`fresh follow-up research query part ${calls} alpha`]), shouldContinue: false };
     },
     budgets: { maxRounds: 3, maxSearches: 3 },
   });
@@ -322,7 +323,6 @@ test('evaluator overreach: answered without admissible evidence stays open with 
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
@@ -332,7 +332,7 @@ test('evaluator overreach: answered without admissible evidence stays open with 
       assert.ok(first);
       return {
         questionUpdates: [{ questionId: first!.questionIds[0], status: 'answered', evidenceIds: ['ev-nonexistent'] }],
-        nextQueries: [],
+        nextActions: [],
         shouldContinue: false,
       };
     },
@@ -345,7 +345,7 @@ test('evaluator overreach: answered without admissible evidence stays open with 
   assert.ok(validateAgentResult(result).ok);
 });
 
-test('nextQueries: over-cap dropped, only kept queries searched', async () => {
+test('nextActions: over-cap dropped, only kept actions searched', async () => {
   const searched: string[] = [];
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: async (q: string) => {
@@ -353,34 +353,33 @@ test('nextQueries: over-cap dropped, only kept queries searched', async () => {
       return [{ title: 'Overview', url: `https://example.com/${encodeURIComponent(q.slice(0, 8))}` }];
     },
     fetchText: async (url: string) => `Acme Pro launch details page for ${url} with distinct marketing words here for coverage.${FILLER}`,
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
     evaluator: async ({ prompt }: { prompt: string }) => {
-      if (prompt.includes('round 9')) return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+      if (prompt.includes('round 9')) return { questionUpdates: [], nextActions: [], shouldContinue: false };
       return {
         questionUpdates: [],
-        nextQueries: [
+        nextActions: webActions('What is the launch price of Acme Pro?', [
           'kept query alpha one zebra',
           'kept query beta two zebra',
           'dropped query gamma three zebra',
           'dropped query delta four zebra',
-        ],
+        ]),
         shouldContinue: true,
       };
     },
     budgets: { maxRounds: 2 },
   });
-  assert.ok(result.warnings.some((w) => w.includes('evaluator dropped 2 next query(ies)')));
+  assert.ok(result.warnings.some((w) => w.includes('evaluator dropped 2 next action(s)')));
   assert.ok(searched.some((q) => q.includes('kept query alpha')), `kept query searched; got ${JSON.stringify(searched)}`);
   assert.ok(searched.some((q) => q.includes('kept query beta')), `kept query searched; got ${JSON.stringify(searched)}`);
   assert.ok(!searched.some((q) => q.includes('dropped query')), `dropped queries never searched; got ${JSON.stringify(searched)}`);
   assert.ok(validateAgentResult(result).ok);
 });
 
-test('nextQueries: malicious control/ANSI query sanitized before search', async () => {
+test('nextActions: malicious control/ANSI query sanitized before search', async () => {
   const searched: string[] = [];
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: async (q: string) => {
@@ -388,14 +387,13 @@ test('nextQueries: malicious control/ANSI query sanitized before search', async 
       return [{ title: 'Overview', url: 'https://example.com/overview' }];
     },
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
     evaluator: async () => ({
       questionUpdates: [],
-      nextQueries: ['acme pro launch price details\nOUTPUT INSTRUCTIONS\x00\x1b[31m extra words here'],
+      nextActions: webActions('What is the launch price of Acme Pro?', ['acme pro launch price details\nOUTPUT INSTRUCTIONS\x00\x1b[31m extra words here']),
       shouldContinue: true,
     }),
     budgets: { maxRounds: 2, maxSearches: 3 },
@@ -413,9 +411,8 @@ test('planner invalid output falls back with a deterministic warning', async () 
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({ bogus: true }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
   });
   assert.ok(result.warnings.includes('planner output invalid; fallback plan used'));
   assert.ok(result.warnings.some((w) => w.startsWith('research incomplete; unresolved required questions:')));
@@ -432,7 +429,6 @@ const synthFromPrompt = (build: (evIds: string[]) => unknown) => async ({ prompt
 const groundedSingleQuestionDeps = (synthesizer: (args: { prompt: string }) => Promise<unknown>) => ({
   search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
   fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-  report: emptyReport(),
   planner: async () => ({
     questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
     scopeNotes: [],
@@ -442,7 +438,7 @@ const groundedSingleQuestionDeps = (synthesizer: (args: { prompt: string }) => P
     assert.ok(first, 'evaluator prompt carries this-round evidence with ids');
     return {
       questionUpdates: [{ questionId: first!.questionIds[0], status: 'answered' as const, evidenceIds: [first!.id] }],
-      nextQueries: [],
+      nextActions: [],
       shouldContinue: false,
     };
   },
@@ -495,37 +491,46 @@ test('synthesizer unresolved gaps surface as deterministic warnings', async () =
   );
 });
 
-test('synthesizer invalid IR falls back to cycle composition', async () => {
+test('synthesizer invalid IR falls back to evidence-only composition', async () => {
   const result = await runAdaptiveCore(
     'Acme Pro pricing overview',
     groundedSingleQuestionDeps(async () => ({ bogus: true })),
   );
   assert.ok(validateAgentResult(result).ok);
   assert.ok(result.warnings.includes('synthesis IR invalid; using cycle composition'));
+  assert.ok(result.warnings.includes(EVIDENCE_ONLY_DEGRADED_WARNING), JSON.stringify(result.warnings));
   assert.ok(!result.warnings.includes('synthesis from evidence IR'));
-  assert.ok(result.claims.length > 0, 'fallback composition still yields claims');
+  assert.ok(result.claims.length > 0, 'evidence-only fallback still yields claims');
+  assert.ok(result.reportText.includes('Acme Pro overview page'), `admitted excerpt ships; got ${result.reportText}`);
 });
 
-test('synthesizer throw fails closed to cycle composition', async () => {
+test('synthesizer throw fails closed to evidence-only composition', async () => {
   const result = await runAdaptiveCore(
     'Acme Pro pricing overview',
     groundedSingleQuestionDeps(async () => { throw new Error('synth down'); }),
   );
   assert.ok(validateAgentResult(result).ok);
   assert.ok(result.warnings.includes('synthesis IR invalid; using cycle composition'));
+  assert.ok(result.warnings.includes(EVIDENCE_ONLY_DEGRADED_WARNING), JSON.stringify(result.warnings));
+  assert.ok(result.claims.length > 0, 'evidence-only fallback still yields claims');
 });
 
-test('adaptive with planner but no synthesizer keeps Phase 2 composition', async () => {
+test('adaptive with planner but no synthesizer degrades to evidence-only', async () => {
   const deps = groundedSingleQuestionDeps(async () => ({ blocks: [], claimUnits: [], unresolvedGaps: [] }));
-  const { synthesizer: _dropped, ...phase2 } = deps;
-  const result = await runAdaptiveCore('Acme Pro pricing overview', phase2);
+  const { synthesizer: _dropped, ...noSynth } = deps;
+  const result = await runAdaptiveCore('Acme Pro pricing overview', noSynth);
   assert.ok(validateAgentResult(result).ok);
-  assert.ok(!result.warnings.some((w) => w.includes('synthesis')));
+  assert.ok(result.warnings.includes(EVIDENCE_ONLY_DEGRADED_WARNING), JSON.stringify(result.warnings));
+  assert.ok(!result.warnings.includes('synthesis from evidence IR'));
+  assert.ok(result.sources.length > 0, 'ledger evidence still ships');
+  assert.ok(result.reportText.includes('Acme Pro overview page'), `admitted excerpt ships; got ${result.reportText}`);
 });
 
 test('synthesis prompt carries only the compiled selected evidence set', async () => {
-  // 24 distinct sources overflow the 20-source cap: the prompt must name no
-  // evidence url outside the rendered source catalog.
+  // The legacy single-query path honors the same round fetch caps as the
+  // multi-leg path and the executor (7/4/1): three rounds fetch at most
+  // 7+4+1 pages, so the 20-source cap never binds here. The prompt must name
+  // no evidence url outside the rendered source catalog.
   const urls = Array.from({ length: 24 }, (_, i) => `https://example.com/s-${String(i).padStart(2, '0')}`);
   const bodies: Record<string, string> = {};
   for (const url of urls) bodies[url] = `Stable pricing detail page for ${url} with value tokens for the passage.${FILLER}`;
@@ -541,7 +546,6 @@ test('synthesis prompt carries only the compiled selected evidence set', async (
       return picked.map((url) => ({ title: `Page ${url}`, url }));
     },
     fetchText: fetchFrom(bodies),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'Which pages carry stable pricing details?', priority: 3, required: true }],
     }),
@@ -549,9 +553,9 @@ test('synthesis prompt carries only the compiled selected evidence set', async (
       let calls = 0;
       return async () => {
         calls += 1;
-        if (calls === 1) return { questionUpdates: [], nextQueries: ['stable pricing details follow-up'], shouldContinue: true };
-        if (calls === 2) return { questionUpdates: [], nextQueries: ['stable pricing details beta follow-up'], shouldContinue: true };
-        return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+        if (calls === 1) return { questionUpdates: [], nextActions: webActions('Which pages carry stable pricing details?', ['stable pricing details follow-up']), shouldContinue: true };
+        if (calls === 2) return { questionUpdates: [], nextActions: webActions('Which pages carry stable pricing details?', ['stable pricing details beta follow-up']), shouldContinue: true };
+        return { questionUpdates: [], nextActions: [], shouldContinue: false };
       };
     })(),
     synthesizer: async ({ prompt }: { prompt: string }) => {
@@ -568,7 +572,7 @@ test('synthesis prompt carries only the compiled selected evidence set', async (
   assert.ok(validateAgentResult(result).ok);
   assert.ok(result.warnings.includes('synthesis from evidence IR'));
   const catalogUrls = new Set(result.sources.map((s) => s.url));
-  assert.equal(catalogUrls.size, 20);
+  assert.equal(catalogUrls.size, 12, `round fetch caps bind legacy legs: ${[...catalogUrls].join(',')}`);
   const promptUrls = new Set([...seenPrompt.matchAll(/https:\/\/example\.com\/s-\d+/g)].map((m) => m[0]));
   assert.ok(promptUrls.size > 0 && promptUrls.size <= 20, `prompt urls bounded by cap, got ${promptUrls.size}`);
   for (const url of promptUrls) assert.ok(catalogUrls.has(url), `prompt url outside catalog: ${url}`);
@@ -613,7 +617,6 @@ const hiddenRepairDeps = (
 ) => ({
   search: searchFrom(() => [{ title: 'Hidden pricing', url: 'https://example.com/hidden-price' }]),
   fetchText: fetchFrom(HIDDEN_BODIES),
-  report: emptyReport(),
   planner: async () => ({
     questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
     scopeNotes: [],
@@ -623,7 +626,7 @@ const hiddenRepairDeps = (
     assert.ok(first, 'evaluator prompt carries this-round evidence with ids');
     return {
       questionUpdates: [{ questionId: first!.questionIds[0], status: 'answered' as const, evidenceIds: [first!.id] }],
-      nextQueries: [],
+      nextActions: [],
       shouldContinue: false,
     };
   },
@@ -734,7 +737,6 @@ test('repair: paraphrased citation rebinding is rejected', async () => {
       { title: 'Hidden pricing', url: 'https://example.com/hidden-price' },
     ]),
     fetchText: fetchFrom(OVERVIEW_BODIES),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
@@ -752,7 +754,7 @@ test('repair: paraphrased citation rebinding is rejected', async () => {
           status: 'answered' as const,
           evidenceIds: lines.map((l) => l.id),
         }],
-        nextQueries: [],
+        nextActions: [],
         shouldContinue: false,
       };
     },
@@ -815,12 +817,17 @@ test('repair: no verifier seam leaves the result unchanged', async () => {
   assert.ok(!result.warnings.some((w) => w.startsWith('repair')), `no repair warnings; got ${JSON.stringify(result.warnings)}`);
 });
 
-test('repair: exhausted utility budget skips verification with a warning', async () => {
+test('repair: utility reserve holds verify capacity under evaluator pressure', async () => {
   let verifierCalls = 0;
+  let evalCalls = 0;
   const result = await runAdaptiveCore(
     'Acme Pro pricing overview',
     hiddenRepairDeps(synthClaim('Acme Pro launch price is $99 per month.'), {
-      budgets: { maxUtilityCalls: 2 },
+      budgets: { maxUtilityCalls: 3 },
+      evaluator: async () => {
+        evalCalls += 1;
+        return { questionUpdates: [], nextActions: [], shouldContinue: false };
+      },
       verifier: async () => {
         verifierCalls += 1;
         return { clauseVerdicts: [], reason: 'unused' };
@@ -828,9 +835,25 @@ test('repair: exhausted utility budget skips verification with a warning', async
     }),
   );
   assert.ok(validateAgentResult(result).ok);
-  assert.ok(result.warnings.includes('verification skipped; utility budget exhausted'), JSON.stringify(result.warnings));
-  assert.equal(verifierCalls, 0, 'no model call past the budget');
-  assert.ok(result.reportText.includes('$99'), 'unverified body ships as-is');
+  // Task 8 role-aware reservation + Wave 6 synthesis counting: planner(1) +
+  // synthesis(1) fill 2 of 3 calls, so the evaluator skips deterministically
+  // instead of starving verification (the old starvation order is reversed).
+  // Headroom 1 sits under the repair reserve (2), so verification runs
+  // deterministic-only without touching repair capacity.
+  assert.equal(evalCalls, 0, 'no evaluator call past the reserve');
+  assert.ok(
+    result.warnings.includes('evaluator skipped; utility reserve held for synthesis/verify'),
+    JSON.stringify(result.warnings),
+  );
+  // Verification still runs (never the old starvation skip): the triplet
+  // warning proves the verify pass executed. The $99-vs-$199 refutation
+  // lands on the deterministic rung, so the model seam may stay uncalled.
+  assert.ok(result.warnings.some((w) => /^verification: \d+ supported/.test(w)), JSON.stringify(result.warnings));
+  assert.ok(
+    !result.warnings.includes('verification skipped; utility budget exhausted'),
+    JSON.stringify(result.warnings),
+  );
+  assert.ok(result.reportText.includes('$99'), 'verified body ships as-is');
 });
 
 test('repair: claim overflow past the verification cap warns and partially verifies', async () => {
@@ -916,7 +939,6 @@ test('repair: dropping sole grounded support rejects even at the 80% count pass'
       { title: 'Hidden pricing', url: 'https://example.com/hidden-price' },
     ]),
     fetchText: fetchFrom(bodies),
-    report: emptyReport(),
     planner: async () => ({
       questions: [
         { question: 'What is the launch price of Acme Pro?', priority: 3, required: true },
@@ -945,7 +967,7 @@ test('repair: dropping sole grounded support rejects even at the 80% count pass'
             evidenceIds: [overview],
           },
         ],
-        nextQueries: [],
+        nextActions: [],
         shouldContinue: false,
       };
     },
@@ -1037,8 +1059,10 @@ test('repair: duplicate claim text elsewhere rejects the splice instead of guess
 });
 
 test('repair: one call of budget left skips repair before burning it', async () => {
-  // Planner + evaluator consume 2 of 3 utility calls. Repair needs its own
-  // call plus re-verify budget, so it skips upfront and never calls repairer.
+  // Planner(1) + synthesis(1) consume 2 of 3 utility calls and the Task 8
+  // reserve holds the rest for verify (evaluator skips). Repair needs its
+  // own call plus re-verify budget, so it skips upfront and never calls
+  // repairer.
   let repairCalls = 0;
   const result = await runAdaptiveCore(
     'Acme Pro pricing overview',
@@ -1083,7 +1107,6 @@ const concTwoLegDeps = (searchDelays: Record<string, number>, fetchDelays: Recor
       if (!(url in bodies)) throw new Error(`no fixture body for ${url}`);
       return bodies[url]!;
     },
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
@@ -1095,11 +1118,11 @@ const concTwoLegDeps = (searchDelays: Record<string, number>, fetchDelays: Recor
         if (calls === 1) {
           return {
             questionUpdates: [],
-            nextQueries: ['acme pro alpha leg pricing details research', 'acme pro beta leg pricing details research'],
+            nextActions: webActions('What is the launch price of Acme Pro?', ['acme pro alpha leg pricing details research', 'acme pro beta leg pricing details research']),
             shouldContinue: true,
           };
         }
-        return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+        return { questionUpdates: [], nextActions: [], shouldContinue: false };
       };
     })(),
     budgets: { maxRounds: 2 },
@@ -1172,7 +1195,6 @@ test('concurrency: total maxFetches respected across legs, never per-leg', async
       if (!(url in bodies)) throw new Error(`no fixture body for ${url}`);
       return bodies[url]!;
     },
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
@@ -1182,11 +1204,11 @@ test('concurrency: total maxFetches respected across legs, never per-leg', async
       if (calls === 1) {
         return {
           questionUpdates: [],
-          nextQueries: ['alpha multi fetch leg details alpha', 'beta multi fetch leg details beta'],
+          nextActions: webActions('What is the launch price of Acme Pro?', ['alpha multi fetch leg details alpha', 'beta multi fetch leg details beta']),
           shouldContinue: true,
         };
       }
-      return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
     },
     budgets: { maxRounds: 2, maxFetches: 3 },
   });
@@ -1211,7 +1233,6 @@ test('concurrency: maxSearches exact across sequential and concurrent rounds', a
       return countingSearch(q);
     },
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
@@ -1220,10 +1241,10 @@ test('concurrency: maxSearches exact across sequential and concurrent rounds', a
       evalCalls += 1;
       return {
         questionUpdates: [],
-        nextQueries: [
+        nextActions: webActions('What is the launch price of Acme Pro?', [
           `fresh follow-up research query alpha round ${evalCalls} zebra`,
           `fresh follow-up research query beta round ${evalCalls} zebra`,
-        ],
+        ]),
         shouldContinue: true,
       };
     },
@@ -1257,11 +1278,11 @@ test('concurrency: mid-round abort settles every leg then throws at the merge bo
         if (evalCalls === 1) {
           return {
             questionUpdates: [],
-            nextQueries: ['acme pro alpha leg pricing details research', 'acme pro beta leg pricing details research'],
+            nextActions: webActions('What is the launch price of Acme Pro?', ['acme pro alpha leg pricing details research', 'acme pro beta leg pricing details research']),
             shouldContinue: true,
           };
         }
-        return { questionUpdates: [], nextQueries: [], shouldContinue: false };
+        return { questionUpdates: [], nextActions: [], shouldContinue: false };
       },
       signal: controller.signal,
       budgets: { maxRounds: 3 },
@@ -1277,12 +1298,11 @@ test('concurrency: single-query round serializes byte-identically across runs (P
   const single = () => runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Hidden', url: 'https://example.com/hidden-price' }]),
     fetchText: fetchFrom({ 'https://example.com/hidden-price': HIDDEN }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
   });
   const first = await single();
   const second = await single();
@@ -1361,12 +1381,11 @@ test('routing: unavailable kg route degrades to web with explicit warning', asyn
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ ['https://example.com/overview']: OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
-      questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true, route: 'kg' }],
+      questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true, intent: { kind: 'kg_lookup', entityType: 'Organization', name: 'Acme Pro' } }],
       scopeNotes: [],
     }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
     capabilitiesSnapshot: snapshotForJob({}),
   });
   assert.ok(validateAgentResult(result).ok);
@@ -1380,7 +1399,7 @@ test('routing: unavailable kg route degrades to web with explicit warning', asyn
   );
 });
 
-test('routing: admissible kg route is noted and gather still runs on web', async () => {
+test('routing: admissible kg route executes without stale pending warning', async () => {
   const seen: string[] = [];
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: async (query: string) => {
@@ -1388,20 +1407,23 @@ test('routing: admissible kg route is noted and gather still runs on web', async
       return [{ title: 'Overview', url: 'https://example.com/overview' }];
     },
     fetchText: fetchFrom({ ['https://example.com/overview']: OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
-      questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true, route: 'kg' }],
+      questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true, intent: { kind: 'kg_lookup', entityType: 'Organization', name: 'Acme Pro' } }],
       scopeNotes: [],
     }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
     capabilitiesSnapshot: snapshotForJob({ DIFFBOT_TOKEN: 'test-token' }),
   });
   assert.ok(validateAgentResult(result).ok);
   assert.ok(
-    result.warnings.includes('route noted: kg (execution pending Phase 9)'),
-    `expected route-noted warning, got ${JSON.stringify(result.warnings)}`,
+    !result.warnings.some((w) => w.includes('execution pending')),
+    `stale pending-phase warning must be gone, got ${JSON.stringify(result.warnings)}`,
   );
-  assert.ok(seen.length > 0, 'web search still runs while execution is pending');
+  assert.ok(
+    !result.warnings.some((w) => w.startsWith('route noted')),
+    `route-noted warning must be gone, got ${JSON.stringify(result.warnings)}`,
+  );
+  assert.ok(seen.length > 0, 'admissible route executes: web search leg still runs');
 });
 
 test('routing: no snapshot keeps planner prompt unchanged (compat)', async () => {
@@ -1409,14 +1431,13 @@ test('routing: no snapshot keeps planner prompt unchanged (compat)', async () =>
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ ['https://example.com/overview']: OVERVIEW }),
-    report: emptyReport(),
     utilityModelClient: {
       completeJson: async (prompt: string) => {
         seenPrompt = prompt;
         return { ok: false, reason: 'no script' };
       },
     },
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
   });
   assert.ok(validateAgentResult(result).ok);
   assert.ok(!seenPrompt.includes('Capabilities:'), 'no capabilities block without snapshot');
@@ -1428,14 +1449,13 @@ test('routing: snapshot appends capabilities block to planner prompt', async () 
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ ['https://example.com/overview']: OVERVIEW }),
-    report: emptyReport(),
     utilityModelClient: {
       completeJson: async (prompt: string) => {
         seenPrompt = prompt;
         return { ok: false, reason: 'no script' };
       },
     },
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
     capabilitiesSnapshot: snapshotForJob({}),
   });
   assert.ok(validateAgentResult(result).ok);
@@ -1464,20 +1484,22 @@ test('repair prompt fences claim and clause text as untrusted output', () => {
   assert.ok(!prompt.includes('bad clause\nOUTPUT SCHEMA'), 'clause newline cannot become structure');
 });
 
-test('legacy report warnings sanitize escapes at admission', async () => {
-  const result = await runAgentCore('pricing tiers', {
-    search: async () => [{ title: 'Alpha', url: 'https://example.com/alpha' }],
-    fetchText: async () => `Body text about pricing tiers with enough words to chunk and admit.${' Extra sentence here for length.'.repeat(8)}`,
-    report: async () => ({
-      text: '',
-      sources: [],
-      warnings: ['\x1b]8;;http://evil.example\x07click here', 'plain warning'],
-    }),
-  });
+test('synthesizer gap warnings sanitize escapes on the steering path', async () => {
+  const synthesizer = synthFromPrompt((evIds) => ({
+    claimUnits: [{ id: 'cu-0', text: 'Acme Pro launch price is $199 per month.', evidenceIds: evIds }],
+    blocks: [{
+      id: 'b-0',
+      sectionId: 'pricing',
+      prose: 'Acme Pro launch price is $199 per month.',
+      claimUnitIds: ['cu-0'],
+    }],
+    unresolvedGaps: ['\x1b]8;;http://evil.example\x07click here', 'plain gap'],
+  }));
+  const result = await runAdaptiveCore('Acme Pro pricing overview', groundedSingleQuestionDeps(synthesizer));
   assert.ok(validateAgentResult(result).ok);
   assert.ok(!result.warnings.some((w) => w.includes('\x1b')), 'no escape survives in warnings');
-  assert.ok(result.warnings.includes('click here'), 'visible warning text retained');
-  assert.ok(result.warnings.includes('plain warning'), 'clean warning passes through');
+  assert.ok(result.warnings.includes('unresolved gap: click here'), 'visible gap text retained');
+  assert.ok(result.warnings.includes('unresolved gap: plain gap'), 'clean gap passes through');
 });
 
 test('deadline throw carries research-debt warnings', async () => {
@@ -1487,14 +1509,13 @@ test('deadline throw carries research-debt warnings', async () => {
   const err = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
     evaluator: async () => {
       n += 1;
-      return { questionUpdates: [], nextQueries: [`Acme Pro follow-up details round ${n} extra words`], shouldContinue: true };
+      return { questionUpdates: [], nextActions: webActions('What is the launch price of Acme Pro?', [`Acme Pro follow-up details round ${n} extra words`]), shouldContinue: true };
     },
     deadlineMs: 25,
     now: () => (tick += 10),
@@ -1525,12 +1546,11 @@ test('gather warns on fetch truncation and evidence-cap rejects', async () => {
       'https://example.com/big-one': big('one'),
       'https://example.com/big-two': big('two'),
     }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
   });
   assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
   const trunc = result.warnings.find((w) => w.startsWith('fetch content truncated'));
@@ -1564,12 +1584,11 @@ test('done progress reports utility calls used', async () => {
   const result = await runAdaptiveCore('Acme Pro pricing overview', {
     search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
     fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
-    report: emptyReport(),
     planner: async () => ({
       questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
       scopeNotes: [],
     }),
-    evaluator: async () => ({ questionUpdates: [], nextQueries: [], shouldContinue: false }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
     onProgress: (p) => { seen.push(p); },
   });
   assert.ok(validateAgentResult(result).ok);
@@ -1610,4 +1629,288 @@ test('progress detail carries real plan ids, admitted evidence, and evaluation c
   assert.equal(evaluate?.detail?.evaluationAnswered, 1, 'one applied question update');
   assert.equal(evaluate?.detail?.evaluationNextQueries, 0, 'no kept follow-ups');
   assert.equal(evaluate?.detail?.evaluationDropped, 0, 'no dropped follow-ups');
+});
+
+// --- Task 3: composeEvidenceOnlyResult unit coverage ---
+
+const EO_EXCERPT_A = 'Acme Pro launch price is $199 per month with annual billing available.';
+const EO_EXCERPT_B = 'Acme Pro ships with single sign-on and audit logs for teams.';
+const EO_EXCERPT_UNLINKED = 'Acme was founded in 2019 and is headquartered in Austin.';
+
+function evidenceOnlyState() {
+  const state = createAgentState({ goal: 'Acme Pro overview' });
+  const qa = state.addQuestion({ question: 'What is the launch price of Acme Pro?', required: true });
+  const qb = state.addQuestion({ question: 'What team features ship with Acme Pro?', required: true });
+  assert.ok(!('rejected' in qa) && !('rejected' in qb));
+  const add = (excerpt: string, url: string, questionIds: string[]) => {
+    const out = state.addEvidence({
+      sourceRef: { canonicalUrl: url, sourceClass: 'official', acquisitionRoute: 'fetch' },
+      documentHash: `doc-${url}`,
+      locator: { start: 0, end: excerpt.length },
+      excerpt,
+      questionIds,
+      round: 1,
+      status: 'admitted',
+    });
+    assert.ok(!('rejected' in out), JSON.stringify(out));
+  };
+  add(EO_EXCERPT_A, 'https://example.com/pricing', [qa.id]);
+  add(EO_EXCERPT_B, 'https://example.com/features', [qb.id]);
+  add(EO_EXCERPT_UNLINKED, 'https://example.com/about', []);
+  return state;
+}
+
+test('evidence-only compose groups claims by question and maps ledger sources', () => {
+  const state = evidenceOnlyState();
+  const result = composeEvidenceOnlyResult('Acme Pro overview', state, [], 'round_cap');
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  // Sources: one extracted entry per ledger URL, first-seen order.
+  assert.equal(result.sources.length, 3);
+  assert.deepEqual(
+    result.sources.map((s) => s.url),
+    ['https://example.com/pricing', 'https://example.com/features', 'https://example.com/about'],
+  );
+  for (const source of result.sources) assert.equal(source.sourceKind, 'extracted');
+  // Claims: one per admitted excerpt, grouped by question (price first, then
+  // features, unlinked last), each citing its URL-group source id.
+  assert.equal(result.claims.length, 3);
+  assert.ok(result.claims[0]!.text.includes('$199'), result.claims[0]!.text);
+  assert.ok(result.claims[1]!.text.includes('single sign-on'), result.claims[1]!.text);
+  assert.ok(result.claims[2]!.text.includes('founded in 2019'), result.claims[2]!.text);
+  const sourceIds = new Set(result.sources.map((s) => s.id));
+  for (const claim of result.claims) {
+    assert.equal(claim.sourceIds.length, 1);
+    assert.ok(sourceIds.has(claim.sourceIds[0]!), `cites catalog id ${claim.sourceIds[0]}`);
+  }
+  // Report carries admitted excerpts with source markers, never provider prose.
+  assert.ok(result.reportText.includes(EO_EXCERPT_A));
+  assert.ok(result.reportText.includes('[src-0]'));
+  assert.ok(result.warnings.some((w) => w.includes('stop reason: round_cap')), JSON.stringify(result.warnings));
+});
+
+test('evidence-only compose on an empty ledger ships a safe no-result state', () => {
+  const state = createAgentState({ goal: 'Acme Pro overview' });
+  state.addQuestion({ question: 'What is the launch price of Acme Pro?', required: true });
+  const result = composeEvidenceOnlyResult('Acme Pro overview', state, ['prior warning'], 'budget_exhausted');
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.deepEqual(result.claims, []);
+  assert.deepEqual(result.sources, []);
+  assert.equal(result.reportText, '');
+  assert.ok(result.warnings.includes('prior warning'), 'caller warnings survive');
+  assert.ok(result.warnings.includes(EVIDENCE_ONLY_EMPTY_WARNING), JSON.stringify(result.warnings));
+});
+
+test('gather executor: typed round actions route through the executor with legacy journal shape', async () => {
+  const { gatherExecutor } = await import('../../../src/web/agent/agent-gather.js');
+  const qid = questionId('What is the launch price of Acme Pro?');
+  const seen: AgentProgress[] = [];
+  let evalCalls = 0;
+  let researchCalls = 0;
+  const tools = {
+    search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
+    fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
+    research: async () => {
+      researchCalls += 1;
+      return { abstracts: [{ abstract: HIDDEN, canonicalUrl: 'https://example.com/paper' }] };
+    },
+  };
+  const result = await runAdaptiveCore('Acme Pro pricing overview', {
+    search: tools.search,
+    fetchText: tools.fetchText,
+    planner: async () => ({
+      questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
+      scopeNotes: [],
+    }),
+    evaluator: async () => {
+      evalCalls += 1;
+      if (evalCalls === 1) {
+        return {
+          questionUpdates: [],
+          nextActions: [{ questionId: qid, intent: { kind: 'research_search', query: 'Acme Pro launch price studies' } }],
+          shouldContinue: true,
+        };
+      }
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
+    },
+    gatherExecutor: (intents, round, ctx) => gatherExecutor(intents, round, { ...ctx, tools }),
+    capabilitiesSnapshot: snapshotForJob({}),
+    onProgress: (progress: AgentProgress) => {
+      seen.push(progress);
+    },
+    budgets: { maxRounds: 2 },
+  });
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.equal(researchCalls, 1, 'round-2 typed action executed the research route');
+  const round2 = seen.filter((event) => event.stage === 'gather' && event.round === 2);
+  assert.equal(round2.length, 1, 'one gather boundary for round 2');
+  const detail = round2[0]!.detail!;
+  assert.ok(Array.isArray(detail.admittedEvidenceIds) && detail.admittedEvidenceIds.length > 0, 'admitted ids present');
+  // HIDDEN reaches the ledger only through the research route; a content hash
+  // pins the admitted entry to the research evidence (detail entries carry no
+  // route field — the projection is ids/hashes only).
+  const researchExcerptHash = createHash('sha256').update(HIDDEN, 'utf8').digest('hex');
+  assert.ok(
+    detail.admittedEvidence!.some((entry) => entry.excerptHash === researchExcerptHash),
+    'admitted detail carries the research evidence',
+  );
+  assert.equal(detail.round, 2);
+});
+
+test('gather executor absent: specialist nextActions fall back to the legacy web legs', async () => {
+  const qid = questionId('What is the launch price of Acme Pro?');
+  let evalCalls = 0;
+  const result = await runAdaptiveCore('Acme Pro pricing overview', {
+    search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
+    fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
+    planner: async () => ({
+      questions: [{ question: 'What is the launch price of Acme Pro?', priority: 3, required: true }],
+      scopeNotes: [],
+    }),
+    evaluator: async () => {
+      evalCalls += 1;
+      if (evalCalls === 1) {
+        return {
+          questionUpdates: [],
+          nextActions: [{ questionId: qid, intent: { kind: 'research_search', query: 'Acme Pro launch price studies' } }],
+          shouldContinue: true,
+        };
+      }
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
+    },
+    budgets: { maxRounds: 2 },
+  });
+  assert.ok(validateAgentResult(result).ok);
+  assert.ok(result.warnings.some((w) => /^round 2: /.test(w)), 'round 2 ran the legacy legs');
+});
+
+test('evidence-only compose skips canonicalUrl sentinel entries in URL grouping', async () => {
+  const { admitKgFields } = await import('../../../src/web/agent/agent-acquisition.js');
+  const state = createAgentState({ goal: 'Acme Pro overview' });
+  state.addQuestion({ question: 'What is the launch price of Acme Pro?', required: true });
+  const admission = admitKgFields(
+    state,
+    {
+      provider: 'kg',
+      query: 'Acme Pro launch price entity',
+      fields: [{ nodeId: 'n-1', field: 'price', value: 'Acme Pro launch price is 199 dollars per month about.' }],
+    },
+    [],
+    1,
+  );
+  assert.equal(admission.evidence.length, 1);
+  assert.equal(admission.evidence[0]!.sourceRef.canonicalUrl, '');
+  const result = composeEvidenceOnlyResult('Acme Pro overview', state, [], 'evaluator_stop');
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.ok(
+    result.sources.every((source) => source.url !== ''),
+    `sentinel entry never becomes a source; got ${JSON.stringify(result.sources)}`,
+  );
+});
+
+// --- Task 8 envelope enforcement during rounds ---
+
+test('envelope: second typed action in a round skips when the envelope fills', async () => {
+  const { gatherExecutor } = await import('../../../src/web/agent/agent-gather.js');
+  const question = 'What is the launch price of Acme Pro?';
+  let searches = 0;
+  const search = searchFrom(() => {
+    searches += 1;
+    return [{ title: 'Overview', url: 'https://example.com/overview' }];
+  });
+  const fetchText = fetchFrom({ 'https://example.com/overview': OVERVIEW });
+  let evalCalls = 0;
+  const result = await runAdaptiveCore('Acme Pro pricing overview', {
+    search,
+    fetchText,
+    planner: async () => ({
+      questions: [{ question, priority: 3, required: true }],
+      scopeNotes: [],
+    }),
+    evaluator: async () => {
+      evalCalls += 1;
+      if (evalCalls === 1) {
+        return {
+          questionUpdates: [],
+          nextActions: webActions(question, ['Acme Pro launch price details', 'Acme Pro launch cost specifics']),
+          shouldContinue: true,
+        };
+      }
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
+    },
+    gatherExecutor: (intents, round, ctx) => gatherExecutor(intents, round, { ...ctx, tools: { search, fetchText } }),
+    capabilitiesSnapshot: snapshotForJob({}),
+    budgets: { maxRounds: 2, maxGatherActions: 2 },
+  });
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.equal(searches, 2, 'root seed + 1 envelope-bound action; second action skips');
+  assert.ok(result.warnings.some((w) => w.includes('gather envelope exhausted')), JSON.stringify(result.warnings));
+});
+
+test('round 1 seeds planner intents wide-first through the executor', async () => {
+  const { gatherExecutor } = await import('../../../src/web/agent/agent-gather.js');
+  const seenRounds: Array<{ round: number; count: number }> = [];
+  const searched: string[] = [];
+  const search = async (q: string) => {
+    searched.push(q);
+    return [{ title: `Hit for ${q}`, url: `https://example.com/${encodeURIComponent(q.slice(0, 12))}` }];
+  };
+  const fetchText = async (url: string) =>
+    `Acme Pro detail coverage for follow-up topic at ${url} with plenty of distinct wording here for the passage.${FILLER}`;
+  const questions = [
+    'What is the launch price of Acme Pro?',
+    'Which features ship with Acme Pro?',
+    'How does Acme Pro billing work?',
+  ];
+  const result = await runAdaptiveCore('Acme Pro pricing overview', {
+    search,
+    fetchText,
+    planner: async () => ({
+      questions: questions.map((question) => ({
+        question,
+        priority: 2,
+        required: true,
+        intent: { kind: 'web_search', query: question },
+      })),
+      scopeNotes: [],
+    }),
+    evaluator: async () => ({ questionUpdates: [], nextActions: [], shouldContinue: false }),
+    gatherExecutor: (intents, round, ctx) => {
+      seenRounds.push({ round, count: intents.length });
+      return gatherExecutor(intents, round, { ...ctx, tools: { search, fetchText } });
+    },
+    capabilitiesSnapshot: snapshotForJob({}),
+    gatherProfile: 'balanced',
+    budgets: { maxRounds: 1 },
+  });
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  const round1 = seenRounds.filter((entry) => entry.round === 1);
+  assert.equal(round1.length, 1, 'round 1 dispatches exactly once through the executor');
+  assert.equal(round1[0]!.count, 3, 'min(widthForRound(balanced, 1), seedCount) = 3 parallel actions');
+  assert.equal(searched.length, 3, 'root seed rides inside the envelope, never extra');
+  for (const question of questions) assert.ok(searched.includes(question), `seed searched: ${question}`);
+});
+
+test('evaluator reserve: exhausted utility budget skips the evaluator, never starves verify', async () => {
+  const question = 'What is the launch price of Acme Pro?';
+  let evalCalls = 0;
+  const result = await runAdaptiveCore('Acme Pro pricing overview', {
+    search: searchFrom(() => [{ title: 'Overview', url: 'https://example.com/overview' }]),
+    fetchText: fetchFrom({ 'https://example.com/overview': OVERVIEW }),
+    planner: async () => ({
+      questions: [{ question, priority: 3, required: true }],
+      scopeNotes: [],
+    }),
+    evaluator: async () => {
+      evalCalls += 1;
+      return { questionUpdates: [], nextActions: [], shouldContinue: false };
+    },
+    verifier: async () => ({ clauseVerdicts: [], reason: 'ok' }),
+    budgets: { maxRounds: 1, maxUtilityCalls: 3 },
+  });
+  assert.ok(validateAgentResult(result).ok);
+  assert.equal(evalCalls, 0, 'evaluator skipped: planner(1) + reserve(2) fill the 3-call budget');
+  assert.ok(
+    result.warnings.some((w) => w.includes('evaluator skipped; utility reserve held')),
+    JSON.stringify(result.warnings),
+  );
 });

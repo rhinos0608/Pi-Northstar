@@ -1,12 +1,20 @@
 import { questionId } from './agent-state.js';
+import { formatCandidatesSection, type AgentCandidate } from './agent-candidates.js';
+import { normalizeUrl } from '../../search/fusion.js';
 import { truncateUtf8Bytes } from './agent-report-route.js';
 import { cleanUntrustedText } from '../../core/untrusted-content.js';
+import { validateGatherIntent, type GatherIntent } from './agent-gather-intents.js';
 
 export interface AgentPlanQuestion {
   id: string;
   question: string;
   priority: number;
   required: boolean;
+  /** Validated per-question gather intent (planner-proposed route/action).
+   *  Absent when the planner omitted it or it failed validation. Real ids
+   *  attach post-normalize in applyPlanRoutes (core), preserving index
+   *  alignment — the planner never emits questionIds. */
+  intent?: GatherIntent;
 }
 
 export interface AgentPlan {
@@ -65,7 +73,15 @@ function coerceRequired(raw: unknown): boolean {
   return Boolean(raw);
 }
 
-export function normalizePlan(raw: unknown): NormalizePlanResult {
+/** Allowlist gate: a web_fetch url is servable only when its normalized form
+ *  matches a bounded research-source candidate url. Model-generated urls without
+ *  candidate provenance never validate. */
+export function isResearchSourceCandidateUrl(url: string, candidates: readonly AgentCandidate[]): boolean {
+  const want = normalizeUrl(url);
+  return candidates.some((c) => c.kind === 'research-source' && normalizeUrl(c.url) === want);
+}
+
+export function normalizePlan(raw: unknown, candidates: readonly AgentCandidate[] = []): NormalizePlanResult {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return { ok: false, issues: ['plan must be an object'] };
   }
@@ -111,11 +127,32 @@ export function normalizePlan(raw: unknown): NormalizePlanResult {
     }
     seen.add(id);
     const rec = entry as Record<string, unknown>;
+    // Planner must NOT emit questionId: ids are code-owned (recomputed above).
+    // A caller-supplied id/questionId is dropped with a warning, never trusted.
+    if (rec.id !== undefined || rec.questionId !== undefined) {
+      issues.push(`plan.questions[${i}].questionId ignored; ids are code-owned`);
+    }
+    // Nested gather intent: validated via the domain validator; invalid →
+    // dropped with a warning, question text still stands.
+    let intent: GatherIntent | undefined;
+    if (rec.intent !== undefined) {
+      const validated = validateGatherIntent(rec.intent);
+      if (validated.ok) {
+        if (validated.value.kind === 'web_fetch' && !isResearchSourceCandidateUrl(validated.value.url, candidates)) {
+          issues.push(`plan.questions[${i}].intent dropped (web_fetch url not a research-source candidate)`);
+        } else {
+          intent = validated.value;
+        }
+      } else {
+        issues.push(`plan.questions[${i}].intent dropped (${validated.reason})`);
+      }
+    }
     questions.push({
       id,
       question: q,
       priority: coercePriority(rec.priority, issues),
       required: coerceRequired(rec.required),
+      ...(intent === undefined ? {} : { intent }),
     });
   }
 
@@ -151,15 +188,31 @@ export function fallbackPlan(goal: string): AgentPlan {
 export function buildPlannerPrompt(
   goal: string,
   budget: { maxRounds: number; maxSearches: number },
+  candidates: readonly AgentCandidate[] = [],
 ): string {
+  // Wave 2 (D6): bounded candidates (most-recent ≤12) so round-N+1 intents
+  // compile from candidate identity in the same refinement cycle. Navigation
+  // hints only — never groundable; the planner emits intents, never evidence.
+  const candidateLines = formatCandidatesSection(candidates);
   return [
     'You are the research planner. Decompose the goal into answerable research questions.',
     `Goal: ${sanitizeGoal(goal)}`,
     `Budget: maxRounds=${budget.maxRounds} maxSearches=${budget.maxSearches}`,
-    'Return JSON only, matching shape {"questions":[{"question":string,"priority":1|2|3,"required":boolean}],"scopeNotes":string[]}.',
+    ...(candidateLines.length === 0
+      ? []
+      : [
+          'CANDIDATES',
+          'navigation hints only — cannot satisfy or ground questions',
+          ...candidateLines,
+          'You may compile question intents from candidate identity: github files {scope:"files",query:path,repoHint:"owner/repo"} from github-code, issues listing from github-repo/github-issue, fetch from a research-source url, kg_lookup {entityType,id} from kg-entity.',
+        ]),
+    'Return JSON only, matching shape {"questions":[{"question":string,"priority":1|2|3,"required":boolean,"intent":{gather action}}],"scopeNotes":string[]}.',
+    'Each question carries an "intent" naming its gather route/action: {"kind":"web_search","query":string} | {"kind":"research_search","query":string,"source"?:string,"yearFrom"?:number,"yearTo"?:number} | {"kind":"web_fetch","url":string} (direct read of a bounded research-source candidate url only — normalized match required, fetch reserve, never maxSearches) | {"kind":"github_search","scope":"repo|code","query":string,"repoHint"?:string} | {"kind":"github_search","scope":"issues","repoHint":string,"state"?:"open|closed|all","labels"?:string[],"number"?:number} (no query field — bounded listing filter) | {"kind":"github_search","scope":"files","query":string(path-like),"repoHint":string} | {"kind":"kg_lookup","entityType":"Person|Organization","name"?:string,"url"?:string,"id"?:string,"limit"?:number} (at least one of name/url/id; never a free-text query). Omit "intent" to default to web_search. Never emit questionId — ids are assigned by the controller. (Wave 9/D4: video/social lanes have no executor tool surface, so they are not offered here; the intent validator still accepts those kinds for back-compat, but the snapshot degrades them to web.)',
+    'For github_search, repoHint belongs to the code scope (optional) and the files scope (required); the repo scope takes no repo selector; the issues scope is a bounded listing filter (repoHint required, optional state/labels/number, never a query — free-text issue search is not offered). Files scope requires a path-like query plus repoHint.',
     'Ask 2-5 answerable questions covering the goal\'s distinct dimensions.',
     'Constraints:',
     '- no questions requiring live data beyond search/fetch',
+    '- web_fetch only for a bounded research-source candidate url (normalized match); never invent urls',
     '- each question self-contained',
     '- value-seeking phrasing',
   ].join('\n');

@@ -411,3 +411,347 @@ test('admitFromFetch surfaces merged count on refetch for a new question', async
   const linked = state.admittedEvidence.filter((e) => e.questionIds.includes('q-2'));
   assert.equal(linked.length, first.evidence.length, 'refetch links every chunk to the new question');
 });
+
+test('specialist routes admit with url identity and char-range locators', () => {
+  const state = createAgentState({ goal: 'g' });
+  const routes = ['research', 'github', 'social', 'video', 'kg'] as const;
+  for (const route of routes) {
+    const excerpt = `${route} evidence passage with enough text`;
+    const result = state.addEvidence({
+      sourceRef: { canonicalUrl: `https://example.com/${route}`, sourceClass: 'unknown', acquisitionRoute: route },
+      documentHash: `hash-${route}`,
+      locator: { start: 0, end: excerpt.length },
+      excerpt,
+      questionIds: ['q-1'],
+      round: 1,
+      status: 'admitted',
+    });
+    assert.ok(!('rejected' in result), `${route} must admit: ${JSON.stringify(result)}`);
+    assert.equal(result.sourceRef.acquisitionRoute, route);
+  }
+  assert.equal(state.admittedEvidence.length, routes.length);
+});
+
+test('metadata rows carry no excerpt and reject; abstract text admits', () => {
+  const state = createAgentState({ goal: 'g' });
+  // A bare metadata row (title/year, no retrieved abstract) has no document
+  // content: it is a candidate, never conclusion-grade evidence.
+  const metadata = state.addEvidence({
+    sourceRef: { canonicalUrl: 'https://example.com/paper', sourceClass: 'academic', acquisitionRoute: 'research' },
+    documentHash: 'hash-meta',
+    locator: { start: 0, end: 10 },
+    excerpt: '   ',
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok('rejected' in metadata);
+  assert.equal(metadata.rejected.reason, 'excerpt is empty');
+  const abstract = 'Returned abstract text supporting claims limited to that abstract';
+  const admitted = state.addEvidence({
+    sourceRef: { canonicalUrl: 'https://example.com/paper', sourceClass: 'academic', acquisitionRoute: 'research' },
+    documentHash: 'hash-abstract',
+    locator: { start: 0, end: abstract.length },
+    excerpt: abstract,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in admitted));
+  assert.equal(state.admittedEvidence.length, 1);
+});
+
+test('structured identity admits; url-xor-identity enforced', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'KG field value about zebra herds';
+  const admitted = state.addEvidence({
+    sourceRef: { canonicalUrl: '', identity: { provider: 'kg', query: 'zebra herds', nodeId: 'Q123' }, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-kg',
+    locator: { nodeId: 'Q123', field: 'description' },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in admitted), `structured identity must admit: ${JSON.stringify(admitted)}`);
+  if (!('rejected' in admitted)) {
+    assert.equal(admitted.sourceRef.canonicalUrl, '');
+    assert.deepEqual(admitted.sourceRef.identity, { provider: 'kg', query: 'zebra herds', nodeId: 'Q123' });
+  }
+  const both = state.addEvidence({
+    sourceRef: { canonicalUrl: 'https://example.com/x', identity: { provider: 'kg', query: 'q' }, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-both',
+    locator: { nodeId: 'Q1', field: 'f' },
+    excerpt: 'both identities present here',
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok('rejected' in both);
+  assert.equal(both.rejected.reason, 'source identity must be exactly one of canonicalUrl or structured identity');
+  const neither = state.addEvidence({
+    sourceRef: { canonicalUrl: '', sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-neither',
+    locator: { nodeId: 'Q1', field: 'f' },
+    excerpt: 'neither identity present here',
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok('rejected' in neither);
+  assert.equal(neither.rejected.reason, 'source identity must be exactly one of canonicalUrl or structured identity');
+  assert.equal(state.admittedEvidence.length, 1);
+});
+
+test('structured identity fields validate with bounded rejects', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'bounded identity field case';
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ provider: '', query: 'q' }, 'invalid structured identity provider'],
+    [{ provider: 'p'.repeat(65), query: 'q' }, 'invalid structured identity provider'],
+    [{ provider: 'kg', query: '' }, 'invalid structured identity query'],
+    [{ provider: 'kg', query: 'q', nodeId: '' }, 'invalid structured identity nodeId'],
+    [{ provider: 'kg', query: 'q', nodeId: 'n'.repeat(257) }, 'invalid structured identity nodeId'],
+    ['not-an-object' as unknown as Record<string, unknown>, 'invalid structured identity'],
+  ];
+  for (const [identity, expected] of cases) {
+    const result = state.addEvidence({
+      sourceRef: { canonicalUrl: '', identity: identity as never, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+      documentHash: 'hash-id',
+      locator: { nodeId: 'Q1', field: 'f' },
+      excerpt,
+      questionIds: ['q-1'],
+      round: 1,
+      status: 'admitted',
+    });
+    assert.ok('rejected' in result, `expected rejection for ${expected}`);
+    assert.equal(result.rejected.reason, expected);
+  }
+  assert.equal(state.admittedEvidence.length, 0);
+});
+
+test('KG locator requires both nodeId and field', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'kg locator shape case text';
+  const badLocators: unknown[] = [{}, { nodeId: 'Q1' }, { field: 'f' }, { nodeId: '', field: 'f' }, { nodeId: 'Q1', field: '' }, { nodeId: 'Q1', field: 'f', extra: 1 }];
+  for (const locator of badLocators) {
+    const result = state.addEvidence({
+      sourceRef: { canonicalUrl: '', identity: { provider: 'kg', query: 'q' }, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+      documentHash: 'hash-kg-loc',
+      locator: locator as never,
+      excerpt,
+      questionIds: ['q-1'],
+      round: 1,
+      status: 'admitted',
+    });
+    assert.ok('rejected' in result, `expected rejection for ${JSON.stringify(locator)}`);
+    assert.equal(result.rejected.reason, 'invalid locator');
+  }
+  assert.equal(state.admittedEvidence.length, 0);
+});
+
+test('alternate locators admit on specialist routes; legacy web routes pin char-range', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'alternate locator passage text';
+  const okCases: Array<[AgentEvidenceInput['sourceRef'], AgentEvidenceInput['locator']]> = [
+    [{ canonicalUrl: 'https://example.com/r', sourceClass: 'academic', acquisitionRoute: 'research' }, { page: 2 }],
+    [{ canonicalUrl: 'https://example.com/s', sourceClass: 'community', acquisitionRoute: 'social' }, { line: 7 }],
+    [{ canonicalUrl: 'https://example.com/v', sourceClass: 'unknown', acquisitionRoute: 'video' }, { timestamp: 83.5 }],
+    [{ canonicalUrl: 'https://github.com/o/r/issues/1', sourceClass: 'repo', acquisitionRoute: 'github' }, { ref: 'o/r#1' }],
+  ];
+  for (const [sourceRef, locator] of okCases) {
+    const result = state.addEvidence({
+      sourceRef, documentHash: 'hash-alt', locator, excerpt, questionIds: ['q-1'], round: 1, status: 'admitted',
+    });
+    assert.ok(!('rejected' in result), `alternate locator must admit: ${JSON.stringify(result)}`);
+  }
+  const pinnedRoutes = ['fetch', 'report-suggested-fetch'] as const;
+  for (const route of pinnedRoutes) {
+    const result = state.addEvidence({
+      sourceRef: { canonicalUrl: 'https://example.com/web', sourceClass: 'unknown', acquisitionRoute: route },
+      documentHash: 'hash-pin',
+      locator: { page: 1 },
+      excerpt,
+      questionIds: ['q-1'],
+      round: 1,
+      status: 'admitted',
+    });
+    assert.ok('rejected' in result, `${route} must pin char-range`);
+    assert.equal(result.rejected.reason, 'invalid locator');
+  }
+});
+
+test('unknown acquisition route rejects', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'unknown route case text here';
+  const result = state.addEvidence({
+    sourceRef: { canonicalUrl: 'https://example.com/x', sourceClass: 'unknown', acquisitionRoute: 'telegraph' as never },
+    documentHash: 'hash-route',
+    locator: { start: 0, end: excerpt.length },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok('rejected' in result);
+  assert.equal(result.rejected.reason, 'unknown acquisition route');
+});
+
+test('legacy entries keep shape and stable ids', async () => {
+  const { createHash } = await import('node:crypto');
+  const { normalizeUrl } = await import('../../../src/search/fusion.js');
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'Sample evidence excerpt text';
+  const result = state.addEvidence(baseInput());
+  assert.ok(!('rejected' in result));
+  // Stored shape: url entry carries no identity key; locator stays char-range.
+  assert.ok(!('identity' in result.sourceRef));
+  assert.deepEqual(result.locator, { start: 0, end: excerpt.length });
+  const excerptHash = createHash('sha256').update(excerpt).digest('hex');
+  const expected = `ev-${createHash('sha256').update(normalizeUrl('https://example.com/page') + excerptHash).digest('hex')}`;
+  assert.equal(result.id, expected, 'legacy stable id formula unchanged');
+});
+
+test('locator-aware identity: same transcript phrase at two timestamps yields two entries', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'the host explains the migration pattern in detail here';
+  const first = state.addEvidence({
+    sourceRef: { canonicalUrl: 'https://example.com/video', sourceClass: 'unknown', acquisitionRoute: 'video' },
+    documentHash: 'hash-video',
+    locator: { timestamp: 10 },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  const second = state.addEvidence({
+    sourceRef: { canonicalUrl: 'https://example.com/video', sourceClass: 'unknown', acquisitionRoute: 'video' },
+    documentHash: 'hash-video',
+    locator: { timestamp: 95.5 },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in first), `first timestamp must admit: ${JSON.stringify(first)}`);
+  assert.ok(!('rejected' in second), `second timestamp must admit: ${JSON.stringify(second)}`);
+  assert.notEqual(first.id, second.id, 'different timestamps must not collide');
+  assert.equal(state.admittedEvidence.length, 2);
+  assert.deepEqual(first.locator, { timestamp: 10 });
+  assert.deepEqual(second.locator, { timestamp: 95.5 });
+});
+
+test('locator-aware identity: same KG value in two fields on one node yields two entries', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'identical field value text here';
+  const label = state.addEvidence({
+    sourceRef: { canonicalUrl: '', identity: { provider: 'kg', query: 'q', nodeId: 'Q7' }, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-kg',
+    locator: { nodeId: 'Q7', field: 'label' },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  const description = state.addEvidence({
+    sourceRef: { canonicalUrl: '', identity: { provider: 'kg', query: 'q', nodeId: 'Q7' }, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-kg',
+    locator: { nodeId: 'Q7', field: 'description' },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in label), `label field must admit: ${JSON.stringify(label)}`);
+  assert.ok(!('rejected' in description), `description field must admit: ${JSON.stringify(description)}`);
+  assert.notEqual(label.id, description.id, 'different KG fields must not collide');
+  assert.equal(state.admittedEvidence.length, 2);
+});
+
+test('locator-aware identity: web char-range rows keep the legacy URL+excerpt id', async () => {
+  const { createHash } = await import('node:crypto');
+  const { normalizeUrl } = await import('../../../src/search/fusion.js');
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'legacy web passage with stable identity here';
+  const first = state.addEvidence(baseInput({ excerpt, locator: { start: 0, end: excerpt.length }, contentLength: 500 }));
+  assert.ok(!('rejected' in first));
+  const excerptHash = createHash('sha256').update(excerpt).digest('hex');
+  const expected = `ev-${createHash('sha256').update(normalizeUrl('https://example.com/page') + excerptHash).digest('hex')}`;
+  assert.equal(first.id, expected, 'char-range locator must not perturb the legacy id');
+  // Same URL+excerpt at a different char offset dedupes: char-range is not identity.
+  const shifted = state.addEvidence(baseInput({
+    excerpt,
+    locator: { start: 10, end: 10 + excerpt.length },
+    contentLength: 500,
+    questionIds: ['q-2'],
+  }));
+  assert.ok(!('rejected' in shifted));
+  assert.equal(shifted.id, expected, 'char-range offsets must not fork identity');
+  assert.equal(state.admittedEvidence.length, 1, 'shifted web row merges first-seen');
+});
+
+test('locator-aware identity: same row re-seen with same typed locator dedupes', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'github issue passage quoted verbatim here';
+  const input = {
+    sourceRef: { canonicalUrl: 'https://github.com/o/r/issues/1', sourceClass: 'repo' as const, acquisitionRoute: 'github' as const },
+    documentHash: 'hash-gh',
+    locator: { ref: 'o/r#1' },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted' as const,
+  };
+  const first = state.addEvidence(input);
+  assert.ok(!('rejected' in first));
+  const same = state.addEvidence({ ...input, questionIds: ['q-1'] });
+  assert.ok(!('rejected' in same));
+  assert.equal(same.id, first.id, 'same locator re-seen must dedupe');
+  assert.equal(state.admittedEvidence.length, 1);
+  // Same excerpt, different ref forks identity.
+  const otherRef = state.addEvidence({
+    ...input,
+    locator: { ref: 'o/r#2' },
+    sourceRef: { canonicalUrl: 'https://github.com/o/r/issues/2', sourceClass: 'repo' as const, acquisitionRoute: 'github' as const },
+  });
+  assert.ok(!('rejected' in otherRef));
+  assert.notEqual(otherRef.id, first.id, 'different refs must not collide');
+  assert.equal(state.admittedEvidence.length, 2);
+});
+test('structured entries allowlist identity keys and dedupe on identity', () => {
+  const state = createAgentState({ goal: 'g' });
+  const excerpt = 'structured allowlist dedupe text';
+  const first = state.addEvidence({
+    sourceRef: { canonicalUrl: '', identity: { provider: 'kg', query: 'q', extra: 'evil' } as never, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-allow',
+    locator: { nodeId: 'Q9', field: 'label' },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in first));
+  assert.deepEqual(first.sourceRef.identity, { provider: 'kg', query: 'q' });
+  const same = state.addEvidence({
+    sourceRef: { canonicalUrl: '', identity: { provider: 'kg', query: 'q' }, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-allow',
+    locator: { nodeId: 'Q9', field: 'label' },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in same));
+  assert.equal(state.admittedEvidence.length, 1, 'same identity+excerpt dedupes');
+  const otherNode = state.addEvidence({
+    sourceRef: { canonicalUrl: '', identity: { provider: 'kg', query: 'q', nodeId: 'Q10' }, sourceClass: 'unknown', acquisitionRoute: 'kg' },
+    documentHash: 'hash-allow',
+    locator: { nodeId: 'Q10', field: 'label' },
+    excerpt,
+    questionIds: ['q-1'],
+    round: 1,
+    status: 'admitted',
+  });
+  assert.ok(!('rejected' in otherNode));
+  assert.equal(state.admittedEvidence.length, 2, 'different nodeId is a distinct entry');
+});

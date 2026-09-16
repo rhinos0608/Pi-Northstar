@@ -308,8 +308,17 @@ test('web_search schema research-visible limit cap', async () => {
   const branches = schema.anyOf ?? [];
   assert.equal(branches.length, 5);
   for (const branch of branches) {
-    // Per-category caps are schema-visible: 20 on plain/agent branches,
-    // 30 on research-pinned branches, so out-of-range rejects at validation.
+    const isAgent = (branch.properties.mode as { const?: string } | undefined)?.const === 'agent';
+    if (isAgent) {
+      // Agent jobs take only query + mode + optional depth. Search filters such
+      // as limit/yearFrom are rejected by the route because the controller
+      // cannot honor them end to end; the public schema must not advertise them.
+      assert.equal(branch.properties.limit, undefined);
+      assert.equal(branch.properties.yearFrom, undefined);
+      continue;
+    }
+    // Per-category caps are schema-visible: 20 on plain branches and 30 on
+    // research-pinned branches, so out-of-range rejects at validation.
     const isResearch = (branch.properties.category as { const?: string } | undefined)?.const === 'research';
     assert.equal(branch.properties.limit?.maximum, isResearch ? 30 : 20, 'web_search limit cap must match the branch category');
     assert.equal(branch.properties.limit?.minimum, 1);

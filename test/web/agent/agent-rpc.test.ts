@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { getLeafRuntimeProvider, negotiateAgentRpc, setLeafRuntimeProvider, shutdownLeafRuntime } from '../../../src/web/agent/agent-rpc.js';
 import { runAgentCore } from '../../../src/web/agent/agent-core.js';
+import { validateAgentResult } from '../../../src/web/agent/agent-contract.js';
 
 test('no-RPC path records negotiated:false and runs standalone', async () => {
   const record = negotiateAgentRpc();
@@ -19,11 +20,13 @@ test('no-RPC path records negotiated:false and runs standalone', async () => {
   // Standalone execution needs no RPC: core completes on injected legs.
   const result = await runAgentCore('standalone probe', {
     search: async () => [{ title: 'S', url: 'https://example.com/s', snippet: 'words' }],
-    fetchText: async () => 'words about the probe topic',
-    report: async () => { throw new Error('no transport'); },
+    fetchText: async () =>
+      'words about the probe topic with plenty of detail here for the passage. Additional background context about the product lineup and release notes follows here for completeness and extra length.',
   });
   assert.equal(result.query, 'standalone probe');
-  assert.ok(result.warnings.some((warning) => /local evidence only/.test(warning)));
+  assert.ok(validateAgentResult(result).ok, JSON.stringify(validateAgentResult(result).issues));
+  assert.ok(result.sources.length > 0, 'evidence-only floor composes sources from the admitted ledger');
+  assert.ok(result.warnings.some((warning) => /^round 1:/.test(warning)), 'adaptive loop ran');
 });
 
 test('shutdown clears the seam even when dispose throws', () => {

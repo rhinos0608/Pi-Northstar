@@ -35,6 +35,9 @@ export interface AgentClaimV1 {
 
 export interface AgentSourceV1 {
   id: string;
+  /** Claim anchor: an http(s) URL, or a bounded structured identity
+   *  `provider:nodeId/field` for URL-less ledger evidence (KG rows).
+   *  Unknown formats reject at validation (never coerced). */
   url: string;
   title: string;
   /** Document contract: derived docs carry sourceKind + locator + warnings. */
@@ -92,8 +95,39 @@ function canonicalize(value: unknown): unknown {
 /** Source entry fields the validator recognizes; anything else rejects (never silently passed). */
 const ALLOWED_SOURCE_FIELDS = new Set(['id', 'url', 'title', 'sourceKind', 'locator', 'warnings']);
 
-/** Locator fields the validator recognizes; anything else rejects. */
-const ALLOWED_LOCATOR_FIELDS = new Set(['page', 'timestamp', 'location']);
+/** Locator fields the validator recognizes; anything else rejects.
+ *  nodeId/field carry KG evidence locators (mirrors agent-state exact-keys
+ *  {nodeId, field}); they must appear together, never singly. */
+const ALLOWED_LOCATOR_FIELDS = new Set(['page', 'timestamp', 'location', 'nodeId', 'field']);
+
+/** Structured source identity: `provider:nodeId/field` (e.g. `wikidata:Q-quartz-9/releaseNotes`).
+ *  Bounded and charset-pinned so unknown formats reject deterministically
+ *  (reject-not-clamp, same convention as the http(s) branch below). Mirrors
+ *  the agent-state structured-identity bounds (provider <=64B, nodeId <=256B,
+ *  field <=128B); the query part of the ledger identity never enters the URL. */
+export const STRUCTURED_SOURCE_URL_PATTERN = /^([A-Za-z0-9][A-Za-z0-9_-]{0,63}):([A-Za-z0-9_.-]{1,256})\/([A-Za-z0-9_.-]{1,128})$/;
+
+/** True for bounded structured identities (`provider:nodeId/field`); false otherwise. */
+export function isStructuredSourceUrl(value: unknown): boolean {
+  return typeof value === 'string' && STRUCTURED_SOURCE_URL_PATTERN.test(value);
+}
+
+/** Parse a structured identity URL into its parts; undefined when the format is unknown. */
+export function parseStructuredSourceUrl(value: string): { provider: string; nodeId: string; field: string } | undefined {
+  const match = STRUCTURED_SOURCE_URL_PATTERN.exec(value);
+  if (match === null) return undefined;
+  return { provider: match[1] as string, nodeId: match[2] as string, field: match[3] as string };
+}
+
+/** Deterministic structured-identity URL for URL-less ledger evidence.
+ *  Returns undefined for out-of-shape inputs (reject-not-clamp: the caller
+ *  skips the entry instead of shipping a coerced URL). No transformation is
+ *  applied — inputs must already be trimmed and bounded. */
+export function formatStructuredSourceUrl(provider: string, nodeId: string, field: string): string | undefined {
+  if (typeof provider !== 'string' || typeof nodeId !== 'string' || typeof field !== 'string') return undefined;
+  const candidate = `${provider}:${nodeId}/${field}`;
+  return STRUCTURED_SOURCE_URL_PATTERN.test(candidate) ? candidate : undefined;
+}
 
 /** Derived locator check: non-empty object, known fields only, bounded values. */
 function checkAgentLocator(locator: unknown, index: number): string[] {
@@ -108,8 +142,24 @@ function checkAgentLocator(locator: unknown, index: number): string[] {
   }
   const present = [...ALLOWED_LOCATOR_FIELDS].filter((key) => record[key] !== undefined);
   if (present.length === 0) {
-    out.push(`${prefix} must carry at least one of page, timestamp, location`);
+    out.push(`${prefix} must carry at least one of page, timestamp, location, nodeId, field`);
     return out;
+  }
+  // KG locator: nodeId/field must appear together (mirrors agent-state
+  // exact-keys {nodeId, field}), each a bounded non-empty string.
+  const hasNodeId = record['nodeId'] !== undefined;
+  const hasField = record['field'] !== undefined;
+  if (hasNodeId !== hasField) {
+    out.push(`${prefix} must carry nodeId and field together`);
+  } else if (hasNodeId && hasField) {
+    const nodeId = record['nodeId'];
+    const field = record['field'];
+    if (typeof nodeId !== 'string' || nodeId.trim() === '' || Buffer.byteLength(nodeId, 'utf8') > 256) {
+      out.push(`${prefix}.nodeId must be a non-empty string within 256 bytes (UTF-8)`);
+    }
+    if (typeof field !== 'string' || field.trim() === '' || Buffer.byteLength(field, 'utf8') > 128) {
+      out.push(`${prefix}.field must be a non-empty string within 128 bytes (UTF-8)`);
+    }
   }
   const page = record['page'];
   if (page !== undefined && (typeof page !== 'number' || !Number.isInteger(page) || page < 0)) {
@@ -170,8 +220,8 @@ export function validateAgentResult(value: unknown): { ok: boolean; issues: stri
       if (typeof entry['id'] !== 'string' || (entry['id'] as string) === '') issues.push(`sources[${index}].id is required`);
       else if (ids.has(entry['id'] as string)) issues.push(`sources[${index}].id is a duplicate`);
       else ids.add(entry['id'] as string);
-      if (typeof entry['url'] !== 'string' || !/^https?:\/\//i.test(entry['url'] as string)) {
-        issues.push(`sources[${index}].url must be an http(s) URL`);
+      if (typeof entry['url'] !== 'string' || (!/^https?:\/\//i.test(entry['url'] as string) && !isStructuredSourceUrl(entry['url']))) {
+        issues.push(`sources[${index}].url must be an http(s) URL or a structured source identity (provider:nodeId/field)`);
       }
       if (typeof entry['title'] !== 'string') issues.push(`sources[${index}].title must be a string`);
       if (entry['sourceKind'] !== 'extracted' && entry['sourceKind'] !== 'derived') {

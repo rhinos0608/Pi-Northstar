@@ -3,6 +3,7 @@
 // agent_jobs_unavailable throw ships on the green gate.
 
 import { createAgentJobEntry, UNSUPPORTED_AGENT_JOB_FIELDS } from './agent-jobs.js';
+import type { AgentJobDepth } from './agent-jobs.js';
 import type { AgentResearchEvent } from './agent-events.js';
 
 export interface AgentJobPointer {
@@ -18,6 +19,12 @@ export interface CreateAgentJobParams {
   deadlineMs?: number;
   signal?: AbortSignal;
   eventSink?: (event: AgentResearchEvent) => void;
+  /**
+   * Optional gather depth, forwarded to the jobs registry (validated
+   * reject-not-clamp there; absent = balanced default). Supported
+   * end-to-end — never added to UNSUPPORTED_JOB_FIELDS.
+   */
+  depth?: AgentJobDepth;
 }
 
 let creator: (params: CreateAgentJobParams) => AgentJobPointer = (params) => {
@@ -27,6 +34,7 @@ let creator: (params: CreateAgentJobParams) => AgentJobPointer = (params) => {
     ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
     ...(params.signal !== undefined ? { signal: params.signal } : {}),
     ...(params.eventSink !== undefined ? { eventSink: params.eventSink } : {}),
+    ...(params.depth !== undefined ? { depth: params.depth } : {}),
   });
   return { jobId: job.jobId };
 };
@@ -42,6 +50,7 @@ export function __setAgentJobCreator(next: ((params: CreateAgentJobParams) => Ag
         ...(params.deadlineMs !== undefined ? { deadlineMs: params.deadlineMs } : {}),
         ...(params.signal !== undefined ? { signal: params.signal } : {}),
         ...(params.eventSink !== undefined ? { eventSink: params.eventSink } : {}),
+        ...(params.depth !== undefined ? { depth: params.depth } : {}),
       });
       return { jobId: job.jobId };
     });

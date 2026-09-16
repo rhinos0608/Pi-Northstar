@@ -1,18 +1,16 @@
 // Agent core (Plan C2): deterministic shell over existing search + fetch +
-// fusion ranking, with a BM25 lexical pass over src/search/bm25.ts.
+// fusion ranking, with evidence-ledger composition.
 // Provider/model opacity: provenance fields on dependency outputs are
 // stripped before composition and never appear model-visible.
 //
-// Phase 2: runAgentCore dispatches to runSingleCycle (byte-identical legacy
-// path) unless adaptive options are present, in which case runAdaptiveCore
-// runs the PLAN → GATHER → EVALUATE → REFINE loop under code-enforced stop
-// rules (evaluator output is advisory only).
+// Task 10: the adaptive PLAN → GATHER → EVALUATE → REFINE loop is the only
+// path (legacy single-cycle/report-leg path deleted). Absent synthesizer
+// and synthesis failure both degrade to the evidence-only floor (Wave 6
+// ladder: no model, no passage-composed prose).
 
-import { BM25Index } from '../../search/bm25.js';
-import { normalizeUrl, rrfMerge } from '../../search/fusion.js';
+import { normalizeUrl } from '../../search/fusion.js';
 import {
   AGENT_CLAIM_MAX_BYTES,
-  AGENT_LOCAL_MAX_SOURCES,
   AGENT_MAX_FETCH_ROUNDS,
   AGENT_MAX_SOURCES,
   AGENT_REPORT_MAX_BYTES,
@@ -24,9 +22,11 @@ import {
   type AgentSourceV1,
 } from './agent-contract.js';
 import { admitFromFetch, MAX_FETCH_CONTENT_BYTES } from './agent-acquisition.js';
+import { addRoundCandidates, createCandidateStore } from './agent-candidates.js';
 import {
   buildSynthesisPrompt,
   compileSourceSet,
+  evidenceSourceKey,
   renderResultFromIR,
   validateSynthesisOutput,
 } from './agent-synthesizer.js';
@@ -35,9 +35,17 @@ import {
   fenceEvidenceExcerpt,
   sanitizeEvaluatorQuery,
   validateEvaluation,
+  type AgentNextAction,
   type AgentRoundDigest,
 } from './agent-evaluator.js';
 import type { AgentModelClient } from './agent-model.js';
+import type { GatherExecutorFn } from './agent-gather.js';
+import {
+  actionSearchText,
+  intentRoute,
+  intentToGatherActionLike,
+  type GatherIntent,
+} from './agent-gather-intents.js';
 import {
   verifyClaim,
   verifyReport,
@@ -55,14 +63,22 @@ import {
   formatCapabilitiesForPrompt,
   gatherActionAdmissibility,
   type EffectiveCapabilitiesSnapshot,
-  type GatherActionLike,
 } from './agent-capabilities.js';
 import {
+  admissibleGatherLanes,
+  deriveProfileForPlan,
   detectConflicts,
+  effectiveLaneCaps,
+  evaluatorUtilityHeadroom,
+  verifyUtilityHeadroom,
+  GATHER_LANES,
   resolveBudgets,
   semanticGrowth,
   stopPolicy,
+  widthForRound,
   type AgentBudgets,
+  type GatherLane,
+  type GatherProfile,
 } from './agent-policy.js';
 import {
   createAgentState,
@@ -71,12 +87,6 @@ import {
 } from './agent-state.js';
 import { truncateUtf8Bytes } from './agent-report-route.js';
 import { chunkText } from '../../search/chunker.js';
-
-/** Cap provider-controlled report arrays before composition (unbounded-
- *  provider-input guard; overflow stops with a single warning). */
-export const MAX_REPORT_SOURCES = 64;
-export const MAX_REPORT_WARNINGS = 64;
-export const MAX_STRUCTURED_CLAIMS = 64;
 
 export interface AgentSearchHit {
   title: string;
@@ -109,6 +119,10 @@ export interface AgentProgressDetail {
   evaluationAnswered?: number;
   evaluationNextQueries?: number;
   evaluationDropped?: number;
+  /** Count-only candidate accounting for the executor gather leg: accepted
+   *  vs deduped/dropped this round. Counts only — never candidate content. */
+  candidatesAdded?: number;
+  candidatesDropped?: number;
   round?: number;
 }
 
@@ -119,7 +133,7 @@ export interface AgentProgress {
   questionsTotal: number;
   searchesUsed: number;
   fetchesUsed: number;
-  /** Model utility calls consumed so far (planner/evaluator/verifier/repair). Additive; absent = untracked. */
+  /** Model utility calls consumed so far (planner/evaluator/synthesis/verifier/repair). Additive; absent = untracked. */
   utilityCallsUsed?: number;
   /** Journal-fidelity detail (todo #14): real ids/counts for the jobs shell.
    *  Absent = legacy journal mapping. Never affects result bytes. */
@@ -129,20 +143,14 @@ export interface AgentProgress {
 export interface AgentCoreDeps {
   search(query: string): Promise<AgentSearchHit[]>;
   fetchText(url: string): Promise<string>;
-  report(query: string): Promise<{
-    text: string;
-    sources: Array<{ url: string; title: string }>;
-    warnings?: string[];
-    /** Optional structured claims carrying their own source associations.
-     *  sourceIds must reference composed source ids; unverifiable entries drop. */
-    claims?: Array<{ text: string; sourceIds: string[] }>;
-  }>;
-  /** Adaptive loop seams (Phase 2). Absent = legacy single-cycle path. */
+  /** Adaptive loop seams. Absent planner/evaluator/synthesizer fall back to
+   *  the deterministic ladder (root plan, stop rules, evidence-only result,
+   *  skipped verify/repair) — never a throw. */
   planner?: (goal: string, budgets: AgentBudgets) => Promise<unknown>;
-  /** Phase 3: evidence-IR synthesis seam. Absent = Phase 2 composition floor.
+  /** Phase 3: evidence-IR synthesis seam. Absent = evidence-only result.
    *  Receives the deterministic synthesis prompt; returns model-proposed IR
-   *  (object or JSON string). Failures and invalid IR fall back to cycle
-   *  composition, never throw. */
+   *  (object or JSON string). Failures and invalid IR fall back to
+   *  evidence-only composition, never throw. */
   synthesizer?: (args: { prompt: string }) => Promise<unknown>;
   evaluator?: (args: { prompt: string }) => Promise<unknown>;
   deadlineMs?: number;
@@ -165,6 +173,18 @@ export interface AgentCoreDeps {
    *  shell via snapshotForJob(env). Absent = compat: planner prompt unchanged,
    *  every question route resolves to 'web'. Never affects isAdaptive. */
   capabilitiesSnapshot?: EffectiveCapabilitiesSnapshot;
+  /** Task 7 gather executor seam: when present and the round carries typed
+   *  actions, the GATHER leg routes through the executor instead of the
+   *  legacy per-query search/fetch legs. Absent = legacy path. Presence
+   *  never forces adaptive (isAdaptive unchanged). */
+  gatherExecutor?: GatherExecutorFn;
+  /**
+   * Task 8 code-owned width profile (balanced/deep/narrow). Present =
+   * descending width dispatch per round ("up to" semantics) + narrow
+   * refinement post-plan. Absent = unscheduled legacy path (compat: no
+   * slicing, no refinement). The jobs shell always sets 'balanced'.
+   */
+  gatherProfile?: GatherProfile;
 }
 
 /** Strip provider/model/secret provenance before composition. Substring stems
@@ -232,13 +252,6 @@ export function accountAdmission(
   return { truncatedBytes, evidenceRejected };
 }
 
-function splitClaims(text: string): string[] {
-  return text
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.length > 0);
-}
-
 export const DEADLINE_MESSAGE = 'agent job deadline exceeded';
 
 /** Deadline throw carrying the research-debt warnings accumulated so far.
@@ -254,181 +267,134 @@ export class AgentDeadlineError extends Error {
 }
 const PLANNER_FALLBACK_WARNING = 'planner output invalid; fallback plan used';
 
-interface Passage {
-  id: string;
-  url: string;
-  title: string;
-  text: string;
-}
-
-function isAdaptive(deps: AgentCoreDeps): boolean {
-  return (
-    deps.planner !== undefined ||
-    deps.evaluator !== undefined ||
-    deps.utilityModelClient !== undefined ||
-    deps.synthesizer !== undefined ||
-    deps.budgets !== undefined ||
-    deps.deadlineMs !== undefined ||
-    deps.signal !== undefined ||
-    deps.now !== undefined ||
-    deps.verifier !== undefined ||
-    deps.repairer !== undefined ||
-    deps.onProgress !== undefined
-  );
-}
-
 export async function runAgentCore(query: string, deps: AgentCoreDeps): Promise<AgentResultV1> {
-  if (isAdaptive(deps)) return runAdaptiveCore(query, deps);
-  return runSingleCycle(query, deps);
+  return runAdaptiveCore(query, deps);
 }
 
-interface ReportLeg {
-  reportText: string;
-  reportSources: Array<{ url: string; title: string }>;
-  structuredClaims: Array<{ text: string; sourceIds: string[] }>;
-}
 
-async function runReportLeg(
-  trimmed: string,
-  deps: Pick<AgentCoreDeps, 'report'>,
+
+/** Task 3 no-model floor: fixed safe marker when synthesis degrades to
+ *  evidence-only composition. */
+export const EVIDENCE_ONLY_DEGRADED_WARNING =
+  'synthesis unavailable; evidence-only result composed from admitted evidence';
+/** Empty-ledger marker: evidence-only compose with no admitted evidence
+ *  ships a safe no-result state (no claims, no sources), never throws. */
+export const EVIDENCE_ONLY_EMPTY_WARNING = 'no admissible evidence; evidence-only result carries no claims';
+
+/**
+ * Deterministic evidence-only composition (Task 3 no-model floor): renders
+ * admitted ledger evidence only — no model calls, no provider prose. Claims
+ * group by question (ledger order within each question, unlinked entries
+ * last); each claim cites its URL-group source id. Sources map from the
+ * ledger (one extracted source per fetched URL, first-seen order, capped at
+ * AGENT_MAX_SOURCES). Fail-closed degrade to a minimal valid result, never
+ * throw or ship invalid output.
+ */
+export function composeEvidenceOnlyResult(
+  query: string,
+  state: ReturnType<typeof createAgentState>,
   warnings: string[],
-): Promise<ReportLeg> {
-  // Opaque Tavily leg runs synchronously inside the job; failure degrades to
-  // local-only evidence with a warning (never a throw that kills the job).
-  let reportText = '';
-  const reportSources: Array<{ url: string; title: string }> = [];
-  let structuredClaims: Array<{ text: string; sourceIds: string[] }> = [];
-  try {
-    const report = redactProvenance(await deps.report(trimmed));
-    // Provider-controlled text is untyped in practice: non-string report text
-    // degrades to unavailable text instead of throwing past the fail-closed
-    // boundary below.
-    const reportRaw: unknown = (report as { text?: unknown }).text;
-    reportText = typeof reportRaw === 'string' ? reportRaw : '';
-    const rawSources: unknown = (report as { sources?: unknown }).sources;
-    if (Array.isArray(rawSources)) {
-      for (const source of rawSources) {
-        if (reportSources.length >= MAX_REPORT_SOURCES) {
-          warnings.push('report source cap reached');
-          break;
-        }
-        if (typeof source !== 'object' || source === null) continue;
-        reportSources.push(source as { url: string; title: string });
-      }
-    }
-    const rawWarnings: unknown = (report as { warnings?: unknown }).warnings;
-    if (Array.isArray(rawWarnings)) {
-      let admittedWarnings = 0;
-      for (const warning of rawWarnings) {
-        if (admittedWarnings >= MAX_REPORT_WARNINGS) {
-          warnings.push('report warning cap reached');
-          break;
-        }
-        if (typeof warning !== 'string') continue;
-        admittedWarnings += 1;
-        warnings.push(truncateUtf8Bytes(sanitizeForWarning(warning), AGENT_WARNING_MAX_BYTES));
-      }
-    }
-    const rawClaims: unknown = (report as { claims?: unknown }).claims;
-    structuredClaims = (Array.isArray(rawClaims) ? rawClaims : []).slice(0, MAX_STRUCTURED_CLAIMS);
-  } catch {
-    warnings.push('opaque report leg unavailable; local evidence only');
+  stopReason: string,
+): AgentResultV1 {
+  const trimmed = query.trim();
+  const admitted = state.admittedEvidence.filter((entry) => entry.status === 'admitted');
+  // Source grouping derived once per admitted entry (shared evidenceSourceKey
+  // derivation: normalized http(s) canonical URL, or the raw deterministic
+  // structured identity for URL-less ledger evidence). Undefined = no well-formed
+  // identity; the composer drops the entry and warns (never silently, never coerced).
+  const groupedById = new Map<string, { key: string; url: string } | undefined>();
+  for (const entry of admitted) {
+    const grouped = evidenceSourceKey(entry);
+    groupedById.set(entry.id, grouped === undefined ? undefined : { key: grouped.key, url: grouped.url });
   }
-  return { reportText, reportSources, structuredClaims };
-}
+  const allWarnings = [...warnings, cappedWarning(`evidence-only composition; stop reason: ${stopReason}`)];
 
-function composeAgentResult(args: {
-  trimmed: string;
-  passages: Passage[];
-  normalizedFetchUrls: Set<string>;
-  reportText: string;
-  reportSources: Array<{ url: string; title: string }>;
-  structuredClaims: Array<{ text: string; sourceIds: string[] }>;
-  warnings: string[];
-}): AgentResultV1 {
-  const { trimmed, passages, normalizedFetchUrls, reportText, reportSources, structuredClaims, warnings } = args;
-  // Lexical contract: BM25 pass over the fetched passages.
-  const bm25 = new BM25Index();
-  for (const passage of passages) bm25.add(passage.id, `${passage.title}\n${passage.text}`);
-  const ranked = bm25.search(trimmed, AGENT_MAX_SOURCES);
-  const rankIndex = new Map(ranked.map((entry, order) => [entry.id, order]));
-  // One RRF pass fusing fetch order with the BM25 lexical ranking.
-  const fused = rrfMerge([passages.map((p) => p.id), ranked.map((r) => r.id)], { keyFn: (id: string) => id });
-  const fusedOrder = new Map(fused.map((entry, order) => [entry.item, order]));
-  const ordered = [...passages].sort((a, b) => {
-    const fa = fusedOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER;
-    const fb = fusedOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER;
-    if (fa !== fb) return fa - fb;
-    return (rankIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rankIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER);
-  });
-
-  // Compose sources: report sources first (extracted), then lexical top-ups.
-  const seen = new Set<string>();
+  // Sources: one extracted entry per URL or structured identity
+  // (first-seen order). Structured-identity ledger entries (canonicalUrl '')
+  // ship as claimable sources under their deterministic identity URL, so ''
+  // can never become a composed source.
+  // Extracted sources keep locator/warnings optional under the validator.
+  const seen = new Map<string, string>();
   const sources: AgentSourceV1[] = [];
-  const pushSource = (url: string, title: string): string | undefined => {
-    if (sources.length >= AGENT_MAX_SOURCES) return undefined;
-    if (typeof url !== 'string' || !/^https?:\/\//i.test(url) || seen.has(url)) return undefined;
-    seen.add(url);
+  let sourceCapHit = false;
+  let unclaimableCount = 0;
+  for (const entry of admitted) {
+    const grouped = groupedById.get(entry.id);
+    if (grouped === undefined) {
+      unclaimableCount += 1;
+      continue;
+    }
+    if (seen.has(grouped.key)) continue;
+    if (sources.length >= AGENT_MAX_SOURCES) {
+      sourceCapHit = true;
+      break;
+    }
     const id = `src-${sources.length}`;
-    const safeTitle = typeof title === 'string' && title !== '' ? title : url;
-    sources.push({ id, url, title: safeTitle, sourceKind: 'extracted' });
-    return id;
-  };
-  for (const source of reportSources) pushSource(source.url, source.title);
-  for (const passage of ordered) pushSource(passage.url, passage.title);
-  if (sources.length === 0) {
-    warnings.push('no admissible sources; result carries no claims');
+    seen.set(grouped.key, id);
+    sources.push({ id, url: grouped.url, title: grouped.url, sourceKind: 'extracted' });
+  }
+  if (sourceCapHit) allWarnings.push('evidence-only source cap reached');
+  if (unclaimableCount > 0) {
+    allWarnings.push(
+      cappedWarning(
+        `${unclaimableCount} admitted evidence ${unclaimableCount === 1 ? 'entry has' : 'entries have'} no claimable source and ${unclaimableCount === 1 ? 'was' : 'were'} excluded`,
+      ),
+    );
+  }
+  if (sources.length === 0) allWarnings.push(EVIDENCE_ONLY_EMPTY_WARNING);
+
+  // Claims grouped by question: ledger order within each state question (in
+  // state order), then entries linked to no state question. One claim per
+  // admitted excerpt, citing its source-group id (URL or structured);
+  // uncapped-source entries drop (their source id does not exist).
+  const ordered: typeof admitted = [];
+  const claimed = new Set<string>();
+  for (const question of state.questions) {
+    for (const entry of admitted) {
+      if (!claimed.has(entry.id) && entry.questionIds.includes(question.id)) {
+        claimed.add(entry.id);
+        ordered.push(entry);
+      }
+    }
+  }
+  for (const entry of admitted) {
+    if (!claimed.has(entry.id)) {
+      claimed.add(entry.id);
+      ordered.push(entry);
+    }
+  }
+  const claims: AgentClaimV1[] = [];
+  for (const entry of ordered) {
+    const grouped = groupedById.get(entry.id);
+    const sourceId = grouped === undefined ? undefined : seen.get(grouped.key);
+    if (sourceId === undefined) continue;
+    const text = truncateUtf8Bytes(entry.excerpt.trim(), AGENT_CLAIM_MAX_BYTES);
+    if (text.trim() === '') continue;
+    claims.push({ text, sourceIds: [sourceId] });
   }
 
-  // Claims: every claim cites >=1 source id (citation contract). Only claims
-  // with verifiable source associations ship: structured report claims whose
-  // ids all exist, else claims derived from fetched passages (each cites its
-  // own passage source). Report sentences without structured evidence never
-  // become claims — no round-robin citation.
-  const claims: AgentClaimV1[] = [];
-  const citedIds = sources.map((source) => source.id);
-  const validIds = new Set(citedIds);
-  const idToUrl = new Map(sources.map((source) => [source.id, source.url] as const));
-  const droppedClaimWarnings = new Set<string>();
-  if (citedIds.length > 0) {
-    let claimAttempts = 0;
-    for (const candidate of structuredClaims) {
-      claimAttempts += 1;
-      // Attempt cap: break even when every candidate drops (the claims cap
-      // below only fires on successful adds).
-      if (claimAttempts > MAX_STRUCTURED_CLAIMS * 2) break;
-      if (claims.length >= citedIds.length * 4) break;
-      if (typeof candidate?.text !== 'string' || candidate.text.trim() === '') continue;
-      // Claim ceiling enforced at composition: overlong report claims clip to
-      // the byte budget instead of shipping validator-rejected output.
-      const clipped = truncateUtf8Bytes(candidate.text, AGENT_CLAIM_MAX_BYTES);
-      if (clipped.trim() === '') continue;
-      if (!Array.isArray(candidate.sourceIds) || candidate.sourceIds.length === 0) continue;
-      if (!candidate.sourceIds.every((id) => typeof id === 'string' && validIds.has(id))) continue;
-      // Evidence-first invariant: every cited source must have been fetched
-      // locally. A report-suggested source that was never fetched cannot
-      // support a final claim, even when its id resolves to a composed source.
-      const unfetchedUrl = candidate.sourceIds
-        .map((id) => idToUrl.get(id))
-        .find((url) => url !== undefined && !normalizedFetchUrls.has(normalizeUrl(url)));
-      if (unfetchedUrl !== undefined) {
-        const warning = truncateUtf8Bytes(`claim dropped; source not fetched locally: ${sanitizeForWarning(unfetchedUrl)}`, AGENT_WARNING_MAX_BYTES);
-        if (!droppedClaimWarnings.has(warning)) {
-          droppedClaimWarnings.add(warning);
-          warnings.push(warning);
-        }
-        continue;
-      }
-      claims.push({ text: clipped, sourceIds: [...candidate.sourceIds] });
+  // Report: one block per covered question (question text + excerpt lines
+  // with source markers), unlinked entries trailing. Excerpts are admitted
+  // ledger data only — never provider prose.
+  const blockTexts: string[] = [];
+  const excerptLines = (entries: typeof admitted): string[] => {
+    const lines: string[] = [];
+    for (const entry of entries) {
+      const grouped = groupedById.get(entry.id);
+      const sourceId = grouped === undefined ? undefined : seen.get(grouped.key);
+      if (sourceId === undefined) continue;
+      lines.push(`- ${entry.excerpt.trim()} [${sourceId}]`);
     }
-    if (claims.length === 0) {
-      for (const passage of ordered.slice(0, citedIds.length)) {
-        const first = truncateUtf8Bytes(splitClaims(passage.text)[0] ?? passage.title, AGENT_CLAIM_MAX_BYTES);
-        const id = sources.find((source) => source.url === passage.url)?.id;
-        if (id !== undefined) claims.push({ text: first, sourceIds: [id] });
-      }
-    }
+    return lines;
+  };
+  for (const question of state.questions) {
+    const lines = excerptLines(admitted.filter((entry) => entry.questionIds.includes(question.id)));
+    if (lines.length > 0) blockTexts.push(`${question.question}\n${lines.join('\n')}`);
   }
+  const ungrouped = admitted.filter((entry) => !state.questions.some((question) => entry.questionIds.includes(question.id)));
+  const ungroupedLines = excerptLines(ungrouped);
+  if (ungroupedLines.length > 0) blockTexts.push(`Ungrouped evidence\n${ungroupedLines.join('\n')}`);
+  const reportText = truncateReportToBlocks(blockTexts, AGENT_REPORT_MAX_BYTES);
 
   const result: AgentResultV1 = {
     version: 1,
@@ -436,15 +402,12 @@ function composeAgentResult(args: {
     reportText,
     claims,
     sources,
-    warnings,
+    warnings: allWarnings,
   };
   // Fail-closed boundary: never throw or ship contract-invalid output past
-  // this point. Validator failure degrades to empty claims/sources with the
-  // issue summary appended to warnings.
+  // this point.
   const validation = validateAgentResult(result);
   if (!validation.ok) {
-    // The degrade path never throws: every truncation step is guarded, and
-    // any throw falls through to the minimal valid result below.
     let summary: string;
     try {
       summary = truncateUtf8Bytes(
@@ -455,13 +418,11 @@ function composeAgentResult(args: {
       summary = 'agent result validation failed';
     }
     try {
-      const clippedWarnings = warnings.map((warning) =>
+      const clippedWarnings = allWarnings.map((warning) =>
         typeof warning === 'string' ? truncateUtf8Bytes(warning, AGENT_WARNING_MAX_BYTES) : '',
       );
-      const clippedReport = typeof reportText === 'string' ? truncateUtf8Bytes(reportText, AGENT_REPORT_MAX_BYTES) : '';
+      const clippedReport = truncateUtf8Bytes(reportText, AGENT_REPORT_MAX_BYTES);
       const degraded: AgentResultV1 = { version: 1, query: trimmed, reportText: clippedReport, claims: [], sources: [], warnings: [...clippedWarnings, summary] };
-      // The degrade path ships a valid result unconditionally: re-validate, and
-      // fall back to a minimal empty result when clipping was not sufficient.
       if (validateAgentResult(degraded).ok) return degraded;
     } catch {
       // Fall through to the minimal result below.
@@ -469,48 +430,6 @@ function composeAgentResult(args: {
     return { version: 1, query: trimmed, reportText: '', claims: [], sources: [], warnings: [summary] };
   }
   return result;
-}
-
-async function runSingleCycle(query: string, deps: AgentCoreDeps): Promise<AgentResultV1> {
-  const trimmed = query.trim();
-  if (trimmed === '') throw new Error('agent core requires a non-empty query');
-  const warnings: string[] = [];
-
-  // Local leg: bounded search, then bounded fetch rounds over the top hits.
-  const rawHits = redactProvenance(await deps.search(trimmed));
-  const hits = rawHits
-    .filter((hit) => typeof hit.url === 'string' && /^https?:\/\//i.test(hit.url))
-    .slice(0, AGENT_LOCAL_MAX_SOURCES);
-  const fetchRounds = Math.min(hits.length, AGENT_MAX_FETCH_ROUNDS);
-  const passages: Passage[] = [];
-  // Locally-fetched provenance: only URLs whose document material actually
-  // crossed the local fetch boundary may support final claims (Phase 1
-  // evidence-first invariant). Deduped by normalizeUrl so variants of the
-  // same document (tracking params, host case) count as fetched.
-  const normalizedFetchUrls = new Set<string>();
-  for (let index = 0; index < fetchRounds; index += 1) {
-    const hit = hits[index]!;
-    try {
-      const body = await deps.fetchText(hit.url);
-      if (body.trim() !== '') {
-        passages.push({ id: `s-${index}`, url: hit.url, title: hit.title || hit.url, text: body });
-        normalizedFetchUrls.add(normalizeUrl(hit.url));
-      }
-    } catch {
-      warnings.push(`fetch round ${index} failed; passage skipped`);
-    }
-  }
-
-  const leg = await runReportLeg(trimmed, deps, warnings);
-  return composeAgentResult({
-    trimmed,
-    passages,
-    normalizedFetchUrls,
-    reportText: leg.reportText,
-    reportSources: leg.reportSources,
-    structuredClaims: leg.structuredClaims,
-    warnings,
-  });
 }
 
 /** Link fetched content to open questions by token overlap; default: all
@@ -562,8 +481,11 @@ function appendResearchDebt(
 /** Phase 3: evidence-IR synthesis stage. Runs after the gather loop stops
  *  (every terminal state except the deadline throw, which throws before
  *  reaching here). Returns the IR-rendered result, or undefined when the
- *  caller must fall back to cycle composition. Fail-closed: synthesizer
- *  throws, unparseable output, and invalid IR all fall back, never throw. */
+ *  caller must fall back to evidence-only composition. Fail-closed:
+ *  synthesizer throws, unparseable output, and invalid IR all fall back,
+ *  never throw. The synthesis model call counts 1 utility call per attempt
+ *  (same attempt semantics as planner/evaluator), reported back alongside
+ *  the result so the verify/repair stage budgets on the true spend. */
 function parseSynthesisRaw(raw: unknown): { ok: true; value: unknown } | { ok: false } {
   try {
     if (typeof raw === 'string') return { ok: true, value: JSON.parse(raw) };
@@ -731,7 +653,20 @@ async function tryVerifyAndRepair(args: {
   }
   const admitted = args.evidence.filter((entry) => entry.status === 'admitted');
   const conflicts = detectConflicts(admitted).length;
-  const counters = { calls: 0, remaining: args.budgets.maxUtilityCalls - utilityCallsUsed, exhausted: false };
+  // Wave 6 reserve integrity: initial semantic verification spends only
+  // headroom above the repair/reverify reserve (2 while a repairer is
+  // present), so the repair gate below stays reachable. At or under the
+  // reserve the capped model degrades every claim to deterministic-only
+  // verification instead of eating repair capacity.
+  const counters = {
+    calls: 0,
+    remaining: verifyUtilityHeadroom({
+      maxUtilityCalls: args.budgets.maxUtilityCalls,
+      utilityCallsUsed,
+      repairerPresent: args.repairer !== undefined,
+    }),
+    exhausted: false,
+  };
   const model = asVerifierModel(args.verifier, counters);
   const claimEvidence: string[][] = base.claims.map((claim) => claimEvidenceIds(claim, base.sources, admitted));
   const verifiable: VerifiableClaim[] = base.claims.map((claim, index) => ({
@@ -990,10 +925,16 @@ async function trySynthesizeFromIR(args: {
   searchesUsed: number;
   fetchesUsed: number;
   roundsCompleted: number;
+  utilityCallsUsed: number;
   synthesizer: NonNullable<AgentCoreDeps['synthesizer']>;
   warnings: string[];
-}): Promise<AgentResultV1 | undefined> {
+}): Promise<{ result: AgentResultV1 | undefined; utilityCallsUsed: number }> {
   const { trimmed, evidence, questions, budgets, synthesizer, warnings } = args;
+  let utilityCallsUsed = args.utilityCallsUsed;
+  const fail = (message: string): { result: undefined; utilityCallsUsed: number } => {
+    warnings.push(message);
+    return { result: undefined, utilityCallsUsed };
+  };
   try {
     const admitted = evidence.filter((e) => e.status === 'admitted');
     const linked = admitted.filter((e) => e.questionIds.length > 0);
@@ -1004,9 +945,14 @@ async function trySynthesizeFromIR(args: {
     // pre-compile set, so units orphaned by the source cap surface as
     // deterministic warnings below instead of silent drops.
     const synthEvidence = linked.length > 0 ? linked : admitted;
-    if (synthEvidence.length === 0) return undefined;
+    if (synthEvidence.length === 0) return { result: undefined, utilityCallsUsed };
     const compiled = compileSourceSet(synthEvidence, { maxSources: AGENT_MAX_SOURCES });
     const selected = new Set(compiled.selectedEvidenceIds);
+    if (compiled.droppedEvidenceIds.length > 0) {
+      warnings.push(
+        `synthesis unclaimable evidence excluded: ${compiled.droppedEvidenceIds.length} admitted ${compiled.droppedEvidenceIds.length === 1 ? 'entry has' : 'entries have'} no claimable source`,
+      );
+    }
     const promptEvidence = synthEvidence.filter((entry) => selected.has(entry.id));
     const openGaps = questions
       .filter((q) => q.required && q.status !== 'grounded')
@@ -1022,15 +968,16 @@ async function trySynthesizeFromIR(args: {
         fetches: Math.max(0, budgets.maxFetches - args.fetchesUsed),
       },
     });
+    // The synthesis model call counts 1 utility call per attempt — increment
+    // before the call so failures and invalid IR still report the spend.
+    utilityCallsUsed += 1;
     const parsed = parseSynthesisRaw(await synthesizer({ prompt }));
     if (!parsed.ok) {
-      warnings.push('synthesis IR invalid; using cycle composition');
-      return undefined;
+      return fail('synthesis IR invalid; using cycle composition');
     }
     const validated = validateSynthesisOutput(parsed.value, synthEvidence);
     if (!validated.ok) {
-      warnings.push('synthesis IR invalid; using cycle composition');
-      return undefined;
+      return fail('synthesis IR invalid; using cycle composition');
     }
     const rendered = renderResultFromIR(validated.value, compiled, trimmed);
     const synthWarnings = ['synthesis from evidence IR'];
@@ -1076,72 +1023,38 @@ async function trySynthesizeFromIR(args: {
     // Renderer output is contract-shaped by construction; a failed final
     // check still falls back rather than shipping an invalid result.
     if (!validateAgentResult(result).ok) {
-      warnings.push('synthesis IR invalid; using cycle composition');
-      return undefined;
+      return fail('synthesis IR invalid; using cycle composition');
     }
     warnings.push(...synthWarnings.map((w) => truncateUtf8Bytes(sanitizeForWarning(w), AGENT_WARNING_MAX_BYTES)));
-    return result;
+    return { result, utilityCallsUsed };
   } catch {
-    warnings.push('synthesis IR invalid; using cycle composition');
-    return undefined;
+    return fail('synthesis IR invalid; using cycle composition');
   }
 }
 
-/** Phase 8 gather routes (R5): planner proposes, code validates. normalizePlan
- *  lives in agent-planner.ts (allowlist, route-blind); routes validate here at
- *  the core layer against the effective-capabilities snapshot. */
+/** Phase 8 gather routes (R5): planner proposes nested intents, code
+ *  validates. normalizePlan lives in agent-planner.ts (allowlist +
+ *  domain-validated intents); routes validate here at the core layer against
+ *  the effective-capabilities snapshot. */
 export type AgentGatherRoute = 'web' | 'research' | 'video' | 'social' | 'kg' | 'graph' | 'github';
 
-const PLAN_ROUTES = new Set<string>(['web', 'research', 'video', 'social', 'kg', 'graph', 'github']);
-
-function routeToGatherAction(route: AgentGatherRoute, routeArg: string | undefined): GatherActionLike {
-  switch (route) {
-    case 'research':
-      return { kind: 'research_search' };
-    case 'video':
-      return { kind: 'media_video', platform: routeArg === 'bilibili' ? 'bilibili' : 'youtube' };
-    case 'social':
-      return routeArg === undefined || routeArg === '' ? { kind: 'social' } : { kind: 'social', platform: routeArg };
-    case 'kg':
-      return { kind: 'kg' };
-    case 'graph':
-      return { kind: 'graph' };
-    case 'github':
-      return { kind: 'github' };
-    case 'web':
-      return { kind: 'web_search' };
-  }
-}
-
-/** Validate planner-proposed routes (raw entries by index; normalizePlan
- *  preserves order, so index alignment holds). Degradation is explicit:
- *  unavailable routes force 'web' with a warning, never silent equivalence.
- *  Returns the per-question-id route map (default 'web'). */
+/** Validate planner-proposed intents (attached post-normalizePlan, so index
+ *  alignment with questions holds). Degradation is explicit: unavailable
+ *  routes force 'web' with a warning, never silent equivalence. Returns the
+ *  per-question-id route map (default 'web'). */
 function applyPlanRoutes(args: {
-  questions: Array<{ id: string; question: string }>;
-  rawEntries: unknown[];
+  questions: Array<{ id: string; question: string; intent?: GatherIntent }>;
   snapshot: EffectiveCapabilitiesSnapshot | undefined;
   warnings: string[];
 }): Map<string, AgentGatherRoute> {
   const routes = new Map<string, AgentGatherRoute>();
-  for (let index = 0; index < args.questions.length; index += 1) {
-    const entry = args.questions[index]!;
-    const raw = args.rawEntries[index];
-    const record = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : undefined;
-    const rawRoute = record?.route;
-    const rawArg = record?.routeArg;
-    const routeArg = typeof rawArg === 'string' ? rawArg : undefined;
-    if (rawRoute === undefined) {
+  for (const entry of args.questions) {
+    const intent = entry.intent;
+    if (intent === undefined) {
       routes.set(entry.id, 'web');
       continue;
     }
-    if (typeof rawRoute !== 'string' || !PLAN_ROUTES.has(rawRoute)) {
-      const label = typeof rawRoute === 'string' && rawRoute !== '' ? rawRoute.slice(0, 32) : 'unknown';
-      args.warnings.push(truncateUtf8Bytes(`route degraded: ${label} unavailable (unknown route)`, AGENT_WARNING_MAX_BYTES));
-      routes.set(entry.id, 'web');
-      continue;
-    }
-    const route = rawRoute as AgentGatherRoute;
+    const route = intentRoute(intent) as AgentGatherRoute;
     if (route === 'web') {
       routes.set(entry.id, 'web');
       continue;
@@ -1151,17 +1064,26 @@ function applyPlanRoutes(args: {
       routes.set(entry.id, 'web');
       continue;
     }
-    const admissibility = gatherActionAdmissibility(routeToGatherAction(route, routeArg), args.snapshot);
+    const admissibility = gatherActionAdmissibility(intentToGatherActionLike(intent), args.snapshot);
     if (!admissibility.allowed) {
       args.warnings.push(truncateUtf8Bytes(`route degraded: ${route} unavailable (${admissibility.reason ?? 'unavailable'})`, AGENT_WARNING_MAX_BYTES));
       routes.set(entry.id, 'web');
       continue;
     }
     routes.set(entry.id, route);
-    args.warnings.push(`route noted: ${route} (execution pending Phase 9)`);
+    // Allowed specialist routes execute in the controller loop (admission +
+    // dispatch wired); only a degraded-quality reason is worth a warning.
     if (admissibility.reason !== undefined) args.warnings.push(truncateUtf8Bytes(admissibility.reason, AGENT_WARNING_MAX_BYTES));
   }
   return routes;
+}
+
+/** Task 8 lane accounting: degraded executor actions ride the web lane;
+ *  unknown routes fall back to web (never an unkeyed lane). Legacy
+ *  search/fetch legs always count as web actions. */
+export function gatherLaneForAction(route: string, degraded: boolean): GatherLane {
+  if (degraded) return 'web';
+  return (GATHER_LANES as readonly string[]).includes(route) ? (route as GatherLane) : 'web';
 }
 
 export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promise<AgentResultV1> {
@@ -1217,13 +1139,22 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
   }
   const warnings: string[] = [];
   const state = createAgentState({ goal: trimmed });
+  // Wave 2 (D6) candidate routing: discovery-only results accumulate here
+  // (≤12/round, ≤24/job, deduped kind+identity) for evaluator/planner
+  // follow-up compilation. Never evidence IDs, never the ledger.
+  const candidateStore = createCandidateStore();
   let searchesUsed = 0;
   let fetchesUsed = 0;
+  // Task 8 envelope spend: executor actions tallied here per round.
+  let gatherActionsUsed = 0;
+  const laneActionsUsed: Record<GatherLane, number> = { web: 0, research: 0, github: 0, social: 0, video: 0, kg: 0 };
 
   // PLAN: direct planner fn wins; else route through the utility model client;
   // else fall back silently (no planner call, no warning).
   let planRaw: unknown;
   let planned = false;
+  let planValid = false;
+  let planRoutes: string[] = [];
   if (deps.planner !== undefined) {
     utilityCallsUsed += 1;
     try {
@@ -1235,7 +1166,7 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
   } else if (deps.utilityModelClient !== undefined) {
     utilityCallsUsed += 1;
     try {
-      const plannerBase = buildPlannerPrompt(trimmed, budgets);
+      const plannerBase = buildPlannerPrompt(trimmed, budgets, candidateStore.candidates);
       const plannerPrompt =
         deps.capabilitiesSnapshot === undefined
           ? plannerBase
@@ -1250,52 +1181,84 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
     }
     planned = true;
   }
-  let questionRoutes = new Map<string, AgentGatherRoute>();
+  // Round-1 seeds: normalized plan questions carry the wide-first dispatch.
+  // Each question contributes its nested intent, else a web_search intent from
+  // the question text. The root seed is one of the dispatched actions (inside
+  // the envelope, never extra). Executor-absent runs ignore this and keep the
+  // legacy root query exactly.
+  let planSeeds: Array<{ questionId: string; intent: GatherIntent }> = [];
+  const seedFromQuestions = (questions: Array<{ id: string; question: string; intent?: GatherIntent }>): void => {
+    planSeeds = questions.map((q) => ({
+      questionId: q.id,
+      intent: q.intent ?? { kind: 'web_search', query: q.question },
+    }));
+  };
   if (planned) {
-    const normalized = normalizePlan(planRaw);
+    const normalized = normalizePlan(planRaw, candidateStore.candidates);
     if (normalized.ok) {
       for (const q of normalized.plan.questions) {
         state.addQuestion({ question: q.question, priority: q.priority, required: q.required });
       }
-      const rawRecord = typeof planRaw === 'object' && planRaw !== null ? (planRaw as Record<string, unknown>) : undefined;
-      const rawEntries = Array.isArray(rawRecord?.questions) ? (rawRecord.questions as unknown[]) : [];
-      questionRoutes = applyPlanRoutes({ questions: normalized.plan.questions, rawEntries, snapshot: deps.capabilitiesSnapshot, warnings });
+      seedFromQuestions(normalized.plan.questions);
+      // Nested intents validate here against the snapshot (degradation
+      // warnings); per-action routes resolve from intents at gather time.
+      applyPlanRoutes({ questions: normalized.plan.questions, snapshot: deps.capabilitiesSnapshot, warnings });
+      planValid = true;
+      planRoutes = normalized.plan.questions.map((q) => (q.intent === undefined ? 'web' : intentRoute(q.intent)));
     } else {
       warnings.push(PLANNER_FALLBACK_WARNING);
-      for (const q of fallbackPlan(trimmed).questions) {
+      const fallback = fallbackPlan(trimmed);
+      for (const q of fallback.questions) {
         state.addQuestion({ question: q.question, priority: q.priority, required: q.required });
       }
+      seedFromQuestions(fallback.questions);
     }
   } else {
-    for (const q of fallbackPlan(trimmed).questions) {
+    const fallback = fallbackPlan(trimmed);
+    for (const q of fallback.questions) {
       state.addQuestion({ question: q.question, priority: q.priority, required: q.required });
     }
+    seedFromQuestions(fallback.questions);
   }
   state.recordQuery({ query: trimmed, route: 'root' });
+  // Task 8 code-owned profile (Wave 7 gate): explicit 'deep' stays; otherwise
+  // deriveProfileForPlan owns the decision — single required question with no
+  // servable specialist intent narrows, else balanced; missing/invalid plans
+  // stay balanced (fail toward more capacity). Only runs when the caller set a
+  // profile (absent = unscheduled legacy path).
+  let gatherProfile: GatherProfile = 'balanced';
+  if (deps.gatherProfile !== undefined) {
+    if (deps.gatherProfile === 'deep') {
+      gatherProfile = 'deep';
+    } else {
+      const requiredCount = state.questions.filter((q) => q.required).length;
+      gatherProfile = deriveProfileForPlan({
+        requiredQuestionCount: requiredCount,
+        routes: planRoutes,
+        ...(deps.capabilitiesSnapshot === undefined ? {} : { snapshot: deps.capabilitiesSnapshot }),
+        planValid,
+      });
+    }
+  }
   reportProgress('plan', 0, state.questions, searchesUsed, fetchesUsed, {
     planQuestionIds: state.questions.map((q) => q.id),
     round: 0,
   });
-  // Phase 8: follow-up queries inherit the route of the first planned question
-  // whose tokens they match (default 'web'). Root stays 'root'; degraded routes
-  // already forced to 'web' above, so gather never sees them. Non-web routes
-  // only change the ledger record — SEARCH/FETCH still runs on web (Phase 9
-  // wires real vertical calls).
-  const resolveQueryRoute = (queryText: string): string => {
-    const lower = queryText.toLowerCase();
-    for (const q of state.questions) {
-      const routed = questionRoutes.get(q.id) ?? 'web';
-      if (routed === 'web') continue;
-      const tokens = q.question.toLowerCase().match(/[a-z0-9]+/gu) ?? [];
-      if (tokens.some((token) => token.length >= 4 && lower.includes(token))) return routed;
-    }
-    return 'web';
-  };
+  // Typed gather actions: planner intents ride on normalized questions (real
+  // ids, index-aligned); evaluator nextActions carry questionId + intent. recordQuery
+  // stores the intent route per action. Where no typed action exists the
+  // route resolves to 'web' deterministically — token-overlap route inference
+  // is deleted. Non-web routes only change the ledger record — SEARCH/FETCH
+  // still runs on web (Task 7 wires real vertical calls).
+  interface RoundQuery { text: string; route: string; questionId?: string }
+  const toRoundQueries = (actions: AgentNextAction[]): RoundQuery[] =>
+    actions.map((action) => ({
+      text: actionSearchText(action.intent),
+      route: intentRoute(action.intent),
+      questionId: action.questionId,
+    }));
 
-  const passages: Passage[] = [];
-  const normalizedFetchUrls = new Set<string>();
-  let passageSeq = 0;
-  let pendingQueries: string[] = [trimmed];
+  let pendingActions: AgentNextAction[] = [];
   let growthWindow: [number, number] = [1, 1];
   const priorRounds: AgentRoundDigest[] = [];
   let lastStopReason = 'round_cap';
@@ -1306,7 +1269,31 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       throw new AgentDeadlineError(warnings);
     }
     deps.signal?.throwIfAborted();
-    const roundQueries = round === 1 ? [trimmed] : pendingQueries;
+    // Task 8 descending width dispatch: "up to" semantics — N gaps dispatch
+    // at most N tasks. Round 1 seeds from the plan questions (wide-first):
+    // min(widthForRound(profile, 1), seedCount) parallel actions through the
+    // executor when present. Unscheduled (no profile) or executor-absent
+    // round 1 keeps the legacy single root query exactly.
+    // Width-binding note: follow-up rounds slice pendingActions to
+    // widthForRound(profile, round - 1), but the evaluator caps proposals at
+    // MAX_NEXT_ACTIONS=2 — so the effective follow-up width is
+    // min(evaluator gap cap 2, widthForRound). The descending schedule binds
+    // round-1 seeding (the wide-first mechanism); later entries only narrow
+    // what the evaluator already capped. Determinism test pins this.
+    const scheduledActions =
+      deps.gatherProfile === undefined
+        ? pendingActions
+        : pendingActions.slice(0, widthForRound(gatherProfile, round - 1));
+    const round1SeedActions: AgentNextAction[] =
+      round === 1 && deps.gatherExecutor !== undefined && deps.gatherProfile !== undefined
+        ? planSeeds
+            .slice(0, widthForRound(gatherProfile, 1))
+            .map((seed) => ({ questionId: seed.questionId, intent: seed.intent }))
+        : [];
+    // Executor-absent round 1 (or empty seeds) falls back to the legacy root
+    // seed below; the root is never an extra action beside the seeds.
+    const executorActions = round === 1 ? round1SeedActions : scheduledActions;
+    const roundQueries: RoundQuery[] = round === 1 ? [{ text: trimmed, route: 'root' }] : toRoundQueries(scheduledActions);
     if (round > 1 && roundQueries.length === 0) {
       lastStopReason = 'no_queries';
       break;
@@ -1325,23 +1312,73 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
     let roundEvidenceRejected = 0;
     let roundQueryRejected = 0;
     const sanitizedCandidates = roundQueries
-      .map((rawNext) => sanitizeEvaluatorQuery(rawNext))
-      .filter((next) => next !== '');
-    if (sanitizedCandidates.length <= 1) {
-    for (const rawNext of roundQueries) {
+      .map((rq) => ({ route: rq.route, questionId: rq.questionId, text: sanitizeEvaluatorQuery(rq.text) }))
+      .filter((rq) => rq.text !== '');
+    // GATHER via Task 7 executor: round-1 plan seeds and typed round follow-up
+    // actions (evaluator nextActions with intents) route through the injected
+    // executor; executor-absent runs keep the legacy legs below.
+    if (deps.gatherExecutor !== undefined && executorActions.length > 0) {
+      const execOutcome = await deps.gatherExecutor(
+        executorActions.map((action) => action.intent),
+        round,
+        {
+          ...(deps.capabilitiesSnapshot === undefined ? {} : { snapshot: deps.capabilitiesSnapshot }),
+          state,
+          counters: { searchesUsed, fetchesUsed, gatherActionsUsed, laneActionsUsed: { ...laneActionsUsed } },
+          budgets: {
+            maxSearches: budgets.maxSearches,
+            maxFetches: budgets.maxFetches,
+            maxGatherActions: budgets.maxGatherActions,
+            laneCaps: effectiveLaneCaps(budgets, gatherProfile),
+            roundFetchCaps: budgets.roundFetchCaps,
+          },
+          questionIds: executorActions.map((action) => action.questionId),
+          tools: { search: deps.search, fetchText: deps.fetchText },
+        },
+      );
+      for (const entry of execOutcome.perAction) {
+        if (entry.skipped !== undefined) continue;
+        const lane = gatherLaneForAction(entry.route, entry.degraded);
+        gatherActionsUsed += 1;
+        laneActionsUsed[lane] += 1;
+      }
+      warnings.push(...execOutcome.warnings);
+      searchesUsed += execOutcome.searchesUsed;
+      fetchesUsed += execOutcome.fetchesUsed;
+      roundSearches += execOutcome.searchesUsed;
+      roundFetches += execOutcome.fetchesUsed;
+      roundQueryRejected += execOutcome.queryRejected;
+      queriesSearched.push(...execOutcome.queriesSearched);
+      roundAdmitted.push(...execOutcome.admitted);
+      // Wave 2: executor discovery candidates feed the bounded navigation
+      // store (evaluator/planner follow-ups); admission paths untouched.
+      const roundCandidates = addRoundCandidates(candidateStore, execOutcome.candidates);
+      reportProgress('gather', round, state.questions, searchesUsed, fetchesUsed, {
+        admittedEvidenceIds: execOutcome.admitted.map((entry) => entry.id),
+        admittedEvidence: toEvidenceDetail(execOutcome.admitted),
+        candidatesAdded: roundCandidates.added.length,
+        candidatesDropped: roundCandidates.dropped,
+        round,
+      });
+    } else if (sanitizedCandidates.length <= 1) {
+    for (const rq of roundQueries) {
       if (searchesUsed >= budgets.maxSearches) break;
       // Evaluator/model-controlled queries sanitize at the search seam too
-      // (validateEvaluation already sanitizes nextQueries; the root query
+      // (validateEvaluation already sanitizes nextAction text; the root query
       // and direct-evaluator bypasses normalize here). Single-line, escape-
       // free, deterministic — no-op on clean fixtures.
-      const next = sanitizeEvaluatorQuery(rawNext);
+      const next = sanitizeEvaluatorQuery(rq.text);
       if (next === '') continue;
       if (round === 1) {
         // Root already recorded at plan time; dup reject is harmless here —
         // round 1 always searches the root query.
         state.recordQuery({ query: next, route: 'root' });
       } else {
-        const recorded = state.recordQuery({ query: next, route: resolveQueryRoute(next) });
+        const recorded = state.recordQuery({
+          query: next,
+          route: rq.route,
+          ...(rq.questionId === undefined ? {} : { questionId: rq.questionId }),
+        });
         if ('rejected' in recorded) {
           if (recorded.rejected.reason === 'query limit reached') roundQueryRejected += 1;
           continue;
@@ -1351,17 +1388,29 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       // Journal fidelity (todo #14): batch start marks the per-query admitted slice.
       const admittedBefore = roundAdmitted.length;
       try {
+        // Attempt-counting (shared definition, see GatherCounters): the
+        // increment lands before the call so failed searches cost too.
         searchesUsed += 1;
         roundSearches += 1;
+        // Legacy legs count toward the envelope/lane tallies (web lane) so
+        // stop-policy lane data stays consistent with the executor path.
+        gatherActionsUsed += 1;
+        laneActionsUsed.web += 1;
         queriesSearched.push(next);
         hits = redactProvenance(await deps.search(next));
       } catch {
         warnings.push('search failed; query skipped');
         continue;
       }
+      // Round-scoped fetch reserve: the same roundFetchCaps slice as the
+      // multi-leg path and the executor — this leg spends at most the round
+      // cap minus what the round already spent, AND never past maxFetches.
+      const roundCap = budgets.roundFetchCaps[Math.min(Math.max(1, round), budgets.roundFetchCaps.length) - 1]!;
+      const fetchBudget = Math.min(roundCap - roundFetches, Math.max(0, budgets.maxFetches - fetchesUsed));
       const filtered = hits
         .filter((hit) => typeof hit.url === 'string' && /^https?:\/\//i.test(hit.url))
-        .slice(0, AGENT_MAX_FETCH_ROUNDS);
+        .slice(0, AGENT_MAX_FETCH_ROUNDS)
+        .slice(0, Math.max(0, fetchBudget));
       for (let index = 0; index < filtered.length; index += 1) {
         if (fetchesUsed >= budgets.maxFetches) break;
         const hit = filtered[index]!;
@@ -1370,9 +1419,6 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
         try {
           const body = await deps.fetchText(hit.url);
           if (body.trim() === '') continue;
-          passages.push({ id: `s-${passageSeq}`, url: hit.url, title: hit.title || hit.url, text: body });
-          passageSeq += 1;
-          normalizedFetchUrls.add(normalizeUrl(hit.url));
           const admission = admitFromFetch(
             state,
             { kind: 'fetch', url: hit.url, canonicalUrl: hit.url, content: body },
@@ -1402,25 +1448,31 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       if (effectiveDeadline !== undefined && now() >= effectiveDeadline) {
         throw new AgentDeadlineError(warnings);
       }
-      interface LegPlan { legIndex: number; query: string; fetchBudget: number }
+      interface LegPlan { legIndex: number; query: string; route: string; questionId?: string; fetchBudget: number }
       const legs: LegPlan[] = [];
-      for (const next of sanitizedCandidates) {
+      for (const cand of sanitizedCandidates) {
         if (legs.length >= Math.max(0, budgets.maxSearches - searchesUsed)) break;
         if (round === 1) {
-          state.recordQuery({ query: next, route: 'root' });
+          state.recordQuery({ query: cand.text, route: 'root' });
         } else {
-          const recorded = state.recordQuery({ query: next, route: resolveQueryRoute(next) });
+          const recorded = state.recordQuery({
+            query: cand.text,
+            route: cand.route,
+            ...(cand.questionId === undefined ? {} : { questionId: cand.questionId }),
+          });
           if ('rejected' in recorded) {
             if (recorded.rejected.reason === 'query limit reached') roundQueryRejected += 1;
             continue;
           }
         }
-        legs.push({ legIndex: legs.length, query: next, fetchBudget: 0 });
+        legs.push({ legIndex: legs.length, query: cand.text, route: cand.route, ...(cand.questionId === undefined ? {} : { questionId: cand.questionId }), fetchBudget: 0 });
       }
       // Deterministic per-leg fetch allocation BEFORE dispatch: floor split
-      // of the remaining TOTAL budget by ledger order, remainder to earlier
-      // legs. Respects the total maxFetches across legs, never per-leg.
-      const fetchRemaining = Math.max(0, budgets.maxFetches - fetchesUsed);
+      // of the remaining budget by ledger order, remainder to earlier legs.
+      // Round-scoped reserve caps this round AND the total maxFetches bounds
+      // it (operator-lower-only overrides shrink the round cap, never grow).
+      const roundCap = budgets.roundFetchCaps[Math.min(Math.max(1, round), budgets.roundFetchCaps.length) - 1]!;
+      const fetchRemaining = Math.min(roundCap, Math.max(0, budgets.maxFetches - fetchesUsed));
       const fetchBase = legs.length > 0 ? Math.floor(fetchRemaining / legs.length) : 0;
       const fetchRemainder = legs.length > 0 ? fetchRemaining % legs.length : 0;
       legs.forEach((leg, order) => {
@@ -1470,6 +1522,10 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       for (const leg of legs) {
         searchesUsed += 1;
         roundSearches += 1;
+        // Legacy legs count toward the envelope/lane tallies (web lane) so
+        // stop-policy lane data stays consistent with the executor path.
+        gatherActionsUsed += 1;
+        laneActionsUsed.web += 1;
         queriesSearched.push(leg.query);
         // Journal fidelity (todo #14): per-leg admitted slice for this merge.
         const legAdmittedBefore = roundAdmitted.length;
@@ -1488,9 +1544,6 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
           }
           const body = fetch.body ?? '';
           if (body.trim() === '') continue;
-          passages.push({ id: `s-${passageSeq}`, url: fetch.url, title: fetch.title, text: body });
-          passageSeq += 1;
-          normalizedFetchUrls.add(normalizeUrl(fetch.url));
           const admission = admitFromFetch(
             state,
             { kind: 'fetch', url: fetch.url, canonicalUrl: fetch.url, content: body },
@@ -1534,12 +1587,26 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       },
       priorRounds,
       currentRoundEvidence: roundAdmitted,
+      candidates: candidateStore.candidates,
       openRequiredQuestions: openRequired,
       conflicts: conflictsSoFar.length,
     });
     let raw: unknown;
     let evaluated = false;
-    if (deps.evaluator !== undefined) {
+    // Task 8 role-aware utility reservation: synthesis + verify/repair capacity
+    // is held BEFORE the evaluator spends the remainder. At zero headroom the
+    // evaluator skips deterministically (no model call, no spend).
+    const evalHeadroom = evaluatorUtilityHeadroom({
+      maxUtilityCalls: budgets.maxUtilityCalls,
+      utilityCallsUsed,
+      synthesizerPresent: deps.synthesizer !== undefined,
+      verifierPresent: deps.verifier !== undefined,
+    });
+    if ((deps.evaluator !== undefined || deps.utilityModelClient !== undefined) && evalHeadroom <= 0) {
+      warnings.push('evaluator skipped; utility reserve held for synthesis/verify');
+      raw = { questionUpdates: [], nextActions: [], shouldContinue: false };
+      evaluated = true;
+    } else if (deps.evaluator !== undefined) {
       utilityCallsUsed += 1;
       try {
         raw = await deps.evaluator({ prompt });
@@ -1557,11 +1624,11 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       }
       evaluated = true;
     } else {
-      raw = { questionUpdates: [], nextQueries: [], shouldContinue: false };
+      raw = { questionUpdates: [], nextActions: [], shouldContinue: false };
       evaluated = true;
     }
     let shouldContinue = false;
-    let remainingNext: string[] = [];
+    let remainingNext: AgentNextAction[] = [];
     // Journal fidelity (todo #14): real stage-time evaluation counts.
     let evalAnswered = 0;
     let evalNextQueries = 0;
@@ -1576,10 +1643,10 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       }
       const validated = raw === undefined
         ? { ok: false as const, issues: ['evaluator output invalid'] }
-        : validateEvaluation(raw, state);
+        : validateEvaluation(raw, state, candidateStore.candidates);
       if (!validated.ok) {
         warnings.push('evaluator output invalid; round skipped');
-        pendingQueries = [];
+        pendingActions = [];
       } else {
         shouldContinue = validated.value.shouldContinue;
         const rawUpdates = Array.isArray((raw as { questionUpdates?: unknown }).questionUpdates)
@@ -1606,19 +1673,20 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
             state.promoteToGrounded(question.id, linked.map((e) => e.id));
           }
         }
-        if (validated.droppedNextQueries.length > 0) {
-          warnings.push(`evaluator dropped ${validated.droppedNextQueries.length} next query(ies)`);
+        if (validated.droppedNextActions.length > 0) {
+          warnings.push(`evaluator dropped ${validated.droppedNextActions.length} next action(s)`);
         }
-        // The gather leg owns the query ledger: nextQueries record (route
-        // 'web') when the next round searches them, not here. remainingNext
-        // is the post-record-query set — queries that would record fresh
-        // today back the stop rule, so duplicate-only proposals read empty.
-        pendingQueries = [...validated.value.nextQueries];
+        // The gather leg owns the query ledger: nextActions record (typed
+        // route + questionId) when the next round searches them, not here.
+        // remainingNext is the post-record-query set — actions that would
+        // record fresh today back the stop rule, so duplicate-only proposals
+        // read empty.
+        pendingActions = [...validated.value.nextActions];
         evalAnswered = validated.value.questionUpdates.length;
-        evalNextQueries = validated.value.nextQueries.length;
-        evalDropped = validated.droppedNextQueries.length;
-        remainingNext = validated.value.nextQueries.filter(
-          (nextQuery) => !state.hasExactDuplicate({ query: nextQuery, route: 'web' }),
+        evalNextQueries = validated.value.nextActions.length;
+        evalDropped = validated.droppedNextActions.length;
+        remainingNext = validated.value.nextActions.filter(
+          (action) => !state.hasExactDuplicate({ query: actionSearchText(action.intent), route: intentRoute(action.intent), questionId: action.questionId }),
         );
       }
     }
@@ -1662,8 +1730,16 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       budgets,
       allRequiredGrounded: allRequired.length > 0 && allRequired.every((q) => q.status === 'grounded'),
       growthLastTwoRounds: growthWindow,
-      remainingNextQueries: remainingNext,
+      remainingNextQueries: remainingNext.map((action) => actionSearchText(action.intent)),
       evaluatorRequestedContinue: shouldContinue,
+      pendingWebFetches: remainingNext.filter((action) => action.intent.kind === 'web_fetch').length,
+      gatherActionsUsed,
+      laneActionsUsed: { ...laneActionsUsed },
+      // Lane-aware envelope stop rides the frozen snapshot; absent snapshot
+      // keeps the legacy scalar search/fetch stop (compat).
+      ...(deps.capabilitiesSnapshot === undefined
+        ? {}
+        : { admissibleLanes: admissibleGatherLanes(deps.capabilitiesSnapshot) }),
     });
     if (stop.stop) {
       lastStopReason = stop.reason;
@@ -1676,23 +1752,14 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
   }
 
   appendResearchDebt(state, lastStopReason, warnings);
-  const leg = await runReportLeg(trimmed, deps, warnings);
-  const composed = (): AgentResultV1 =>
-    composeAgentResult({
-      trimmed,
-      passages,
-      normalizedFetchUrls,
-      reportText: leg.reportText,
-      reportSources: leg.reportSources,
-      structuredClaims: leg.structuredClaims,
-      warnings,
-    });
-  // Phase 3 SYNTHESIZE: when the seam is present the IR-rendered body
-  // replaces provider report text; absent = Phase 2 composition floor.
-  // Phase 4 VERIFY/REPAIR runs over whichever body shipped.
+  // Phase 3 SYNTHESIZE: present seam = IR synthesis; present-but-failed and
+  // absent (kill-switch) both degrade to the evidence-only floor — no model,
+  // no passage-composed prose. Phase 4 VERIFY/REPAIR runs over whichever
+  // body shipped.
   let base: AgentResultV1;
   if (deps.synthesizer === undefined) {
-    base = composed();
+    warnings.push(EVIDENCE_ONLY_DEGRADED_WARNING);
+    base = composeEvidenceOnlyResult(trimmed, state, warnings, lastStopReason);
   } else {
     const synthesized = await trySynthesizeFromIR({
       trimmed,
@@ -1702,10 +1769,19 @@ export async function runAdaptiveCore(query: string, deps: AgentCoreDeps): Promi
       searchesUsed,
       fetchesUsed,
       roundsCompleted,
+      utilityCallsUsed,
       synthesizer: deps.synthesizer,
       warnings,
     });
-    base = synthesized ?? composed();
+    utilityCallsUsed = synthesized.utilityCallsUsed;
+    if (synthesized.result !== undefined) {
+      base = synthesized.result;
+    } else {
+      // Task 3: synthesis failure prefers the deterministic evidence-only
+      // floor over fabricated prose.
+      warnings.push(EVIDENCE_ONLY_DEGRADED_WARNING);
+      base = composeEvidenceOnlyResult(trimmed, state, warnings, lastStopReason);
+    }
   }
   if (deps.synthesizer !== undefined) {
     reportProgress('synthesize', roundsCompleted, state.questions, searchesUsed, fetchesUsed);

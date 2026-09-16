@@ -91,9 +91,11 @@ export function buildWebSearchParameters(): TSchema {
     // "research": pass a single query), so the schema must not advertise it.
     Type.Object({
       query: queryField,
-      mode: Type.Literal('agent', { description: 'Agent mode: returns a provider-generated research report as the tool text (untrusted evidence). Single-query only; no cursor/source/knowledge/research category.' }),
-      ...webFilterFields({ agent: true, limitMax: WEB_SEARCH_LIMIT_MAX }),
-    }, { additionalProperties: false, description: 'Agent research report (single query, no cursor/source/knowledge/research).' }),
+      mode: Type.Literal('agent', { description: 'Agent mode: creates a parent-owned adaptive research job and returns a job pointer for agent_poll. Single-query only; no cursor/source/knowledge/research category.' }),
+      // Depth mirrors runtime validation (web-contract): 'balanced' default
+      // when absent; any other value rejects. Schema cannot drift from it.
+      depth: Type.Optional(StringEnum(['balanced', 'deep'], { description: 'Agent-job gather depth (default balanced; deep widens the gather profile).' })),
+    }, { additionalProperties: false, description: 'Adaptive agent research job (single query, no cursor/source/knowledge/research).' }),
   ], { description: 'Single {query} | batch {queries[1..8]} | agent {query, mode:"agent"}. Exactly one of query (single/agent) or queries (batch, 1..8).' });
 }
 

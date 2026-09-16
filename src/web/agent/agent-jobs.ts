@@ -1,13 +1,14 @@
 // Parent-owned in-memory agent jobs (Plan C3): expiry, owner-bound entries,
-// and byte-stable poll snapshots. The opaque Tavily leg stays
-// synchronous-inside-job; poll serves the snapshot only.
+// and byte-stable poll snapshots. The adaptive core runs synchronous-
+// inside-job; poll serves the snapshot only.
 //
-// Leaf-runtime report leg: when a provider is registered via
+// Leaf-runtime steering: when a provider is registered via
 // setLeafRuntimeProvider (agent-rpc.ts seam), PI_NORTHSTAR_LEAF_MODEL names
 // the exact model (read here at call time, never inside the client), and a
-// per-job refreshReady() succeeds, the report leg runs on the leaf runtime.
-// Any leaf failure falls back to the opaque leg with a safe-code warning.
-// Snapshots carry transport + safe reason only, never provider/model identity.
+// per-job refreshReady() succeeds, planner/evaluator/synthesizer/verifier/
+// repair steer through the leaf runtime. Leaf seam failures degrade to the
+// deterministic ladder with fixed safe reasons. Snapshots carry transport +
+// safe reason only, never provider/model identity.
 
 import { randomUUID } from 'node:crypto';
 import {
@@ -17,20 +18,17 @@ import {
   type AgentJobV1,
   type AgentResultV1,
 } from './agent-contract.js';
-import { runAgentCore, redactProvenance, AgentDeadlineError, DEADLINE_MESSAGE, type AgentCoreDeps, type AgentProgressDetail } from './agent-core.js';
+import { runAgentCore, AgentDeadlineError, DEADLINE_MESSAGE, type AgentCoreDeps, type AgentProgressDetail } from './agent-core.js';
 import { snapshotForJob } from './agent-capabilities.js';
+import { createAgentModelSeams } from './agent-model.js';
 import { sanitizeEvaluatorQuery } from './agent-evaluator.js';
-import { sanitizeGoal } from './agent-planner.js';
-import { cleanUntrustedText } from '../../core/untrusted-content.js';
-import { runAgentReportRoute, truncateUtf8Bytes } from './agent-report-route.js';
+import { truncateUtf8Bytes } from './agent-report-route.js';
 import {
   AGENT_POLL_VISIBILITY_TTL_MS,
-  AGENT_REPORT_MAX_BYTES,
   AGENT_RESULT_RETENTION_TTL_MS,
   AGENT_RUN_DEADLINE_MAX_MS,
   AGENT_RUN_DEADLINE_MS,
 } from './agent-contract.js';
-import { RUNTIME_RPC_BOUNDS } from '../../runtime/runtime-rpc-protocol.js';
 import {
   AGENT_EVENT_QUERY_MAX_BYTES,
   createAgentEventJournal,
@@ -52,10 +50,16 @@ export interface AgentJobRunnerDeps {
   eventSink?: (event: AgentResearchEvent) => void;
 }
 
+export type AgentJobDepth = 'balanced' | 'deep';
+
 export interface CreateAgentJobInput {
   query: string;
   owner?: string;
   rpc?: AgentRpcNegotiationInput;
+  /** Optional job depth: explicit 'deep' selects the deep gather profile;
+   *  absent (or 'balanced') keeps the balanced default with deterministic
+   *  narrow refinement. Rejects any other value, never clamps. */
+  depth?: AgentJobDepth;
   /** Optional run deadline (ms): enforced by the drive race + controller.
    *  Rejects past AGENT_RUN_DEADLINE_MAX_MS, never clamps. Absent = default. */
   deadlineMs?: number;
@@ -68,6 +72,8 @@ export interface CreateAgentJobInput {
 /** Per-call drive overrides. A valid deadline persists on the job. */
 export interface ExecuteAgentJobOptions {
   deadlineMs?: number;
+  /** Optional job depth override (persists like deadlineMs). */
+  depth?: AgentJobDepth;
   signal?: AbortSignal;
   /** Optional per-job sink override (persists like deadlineMs). Function-only, never serialized. */
   eventSink?: (event: AgentResearchEvent) => void;
@@ -79,6 +85,15 @@ function validateEventSink(value: unknown): ((event: AgentResearchEvent) => void
   if (value === undefined) return undefined;
   if (typeof value !== 'function') throw new TypeError('eventSink must be a function');
   return value as (event: AgentResearchEvent) => void;
+}
+
+/** Reject-not-clamp depth validation (budgets pattern). Absent = balanced default. */
+function validateDepth(depth: unknown): AgentJobDepth | undefined {
+  if (depth === undefined) return undefined;
+  if (depth !== 'balanced' && depth !== 'deep') {
+    throw new RangeError('depth must be "balanced" or "deep"');
+  }
+  return depth;
 }
 
 /** Reject-not-clamp deadline validation (budgets pattern). */
@@ -156,8 +171,31 @@ const inFlight = new Map<string, Promise<AgentJobV1>>();
 /** Exact env name for the configured leaf model. Read at call time, never in the client. */
 export const LEAF_MODEL_ENV_VAR = 'PI_NORTHSTAR_LEAF_MODEL';
 
-/** Per-request leaf timeout: 60s bounded by the protocol maximum. */
-export const LEAF_REPORT_TIMEOUT_MS = Math.min(60_000, RUNTIME_RPC_BOUNDS.maxTimeoutMs);
+/** Exact env name for the no-model steering kill-switch. Read at call time,
+ *  same convention as LEAF_MODEL_ENV_VAR. Exact '0' runs the deterministic
+ *  ladder without model calls. */
+export const AGENT_STEERING_ENV_VAR = 'PI_NORTHSTAR_AGENT_STEERING';
+
+/** No-model ladder selector (Task 3): exact '0' disables steering.
+ *  Any other value (including absent) keeps steering enabled. */
+export function isAgentSteeringDisabled(env: Record<string, string | undefined>): boolean {
+  return env[AGENT_STEERING_ENV_VAR] === '0';
+}
+
+/** Strip every model-call dep so the job runs the deterministic ladder:
+ *  root-plan fallback (planner absent), deterministic stop conditions
+ *  (evaluator absent), evidence-only composition (synthesizer absent), skipped
+ *  verify/repair (absent). Non-model deps pass through untouched. */
+export function stripAgentModelDeps(deps: AgentCoreDeps): AgentCoreDeps {
+  const stripped: AgentCoreDeps = { ...deps };
+  delete stripped.planner;
+  delete stripped.evaluator;
+  delete stripped.synthesizer;
+  delete stripped.verifier;
+  delete stripped.repairer;
+  delete stripped.utilityModelClient;
+  return stripped;
+}
 
 /** Search-constraint fields the job runtime cannot honor: fail closed on every
  *  entry path (seam validator and direct createAgentJobEntry calls alike). */
@@ -225,6 +263,9 @@ const jobProgress = new Map<string, AgentJobProgress>();
 
 /** Per-job configured run deadlines (create or execute opts; else default). */
 const jobDeadlines = new Map<string, number>();
+
+/** Per-job configured depth (create or execute opts; else balanced default). */
+const jobDepths = new Map<string, AgentJobDepth>();
 
 /** Phase 7: per-job typed event journals (internal state, never in snapshots).
  *  Live mutable state stays authoritative; the journal is a replayable shadow.
@@ -527,6 +568,24 @@ function emitProgressJournal(args: {
       // Leg deltas already drained above (record order, all post-plan stages).
       // Journal fidelity (todo #14): admitted batch → EvidenceAdmitted events.
       emitEvidenceAdmitted(jobId, event, round);
+      // Count-only candidate telemetry: one CandidatesAccumulated per gather
+      // boundary when the core reports accounting. Reject-never-clamp: both
+      // fields must be non-negative integers or nothing emits (no zero-fill,
+      // no asCount clamping — a malformed detail never becomes journal bytes).
+      const candidatesAdded = event.detail?.candidatesAdded;
+      const candidatesDropped = event.detail?.candidatesDropped;
+      if (
+        typeof candidatesAdded === 'number' && Number.isInteger(candidatesAdded) && candidatesAdded >= 0 &&
+        typeof candidatesDropped === 'number' && Number.isInteger(candidatesDropped) && candidatesDropped >= 0
+      ) {
+        emitJournalEvent(jobId, {
+          type: 'CandidatesAccumulated',
+          jobId,
+          round,
+          added: candidatesAdded,
+          dropped: candidatesDropped,
+        });
+      }
       return;
     }
     if (event.stage === 'evaluate') {
@@ -630,6 +689,7 @@ export function __resetAgentJobs(): void {
   inFlight.clear();
   jobProgress.clear();
   jobDeadlines.clear();
+  jobDepths.clear();
   jobJournals.clear();
   jobSinks.clear();
 }
@@ -651,6 +711,7 @@ function prune(at: number = store.now()): void {
       inFlight.delete(jobId);
       jobProgress.delete(jobId);
       jobDeadlines.delete(jobId);
+      jobDepths.delete(jobId);
       jobJournals.delete(jobId);
       jobSinks.delete(jobId);
     }
@@ -692,6 +753,9 @@ export function createAgentJobEntry(input: CreateAgentJobInput): AgentJobV1 {
       throw new Error(`agent job rejects search constraint "${field}": unsupported by the job runtime`);
     }
   }
+  // Fail-closed depth admission before prune/registration: an invalid value
+  // registers no job (consistent with the event-sink gate above).
+  const depth = validateDepth(record['depth']);
   prune();
   const at = store.now();
   const job: AgentJobV1 = {
@@ -706,6 +770,7 @@ export function createAgentJobEntry(input: CreateAgentJobInput): AgentJobV1 {
   store.jobs.set(job.jobId, job);
   const deadlineMs = validateDeadlineMs(input.deadlineMs);
   if (deadlineMs !== undefined) jobDeadlines.set(job.jobId, deadlineMs);
+  if (depth !== undefined) jobDepths.set(job.jobId, depth);
   if (sink !== undefined) jobSinks.set(job.jobId, sink);
   // Phase 7: journal opens at creation; JobCreated first (best-effort, never fails admission).
   getOrCreateJournal(job.jobId);
@@ -724,13 +789,6 @@ export function createAgentJobEntry(input: CreateAgentJobInput): AgentJobV1 {
     // against bookkeeping throws escaping into the creator.
   });
   return job;
-}
-
-/** Safe leaf failure code: allowlisted token only, never exception text. */
-function safeLeafCode(error: unknown): string {
-  const code = (error as { code?: unknown })?.code;
-  if (typeof code === 'string' && /^[a-z_]{1,64}$/.test(code)) return code;
-  return 'provider_error';
 }
 
 /**
@@ -780,14 +838,15 @@ async function negotiateLeafTransport(job: AgentJobV1): Promise<LeafRuntimeProvi
  *  shape): ownerPattern 256B, roles 16 entries x 64B. Unbounded provider
  *  strings never land in AgentRpcRecord.
  *
- * Record-level negotiated caps (outputModes + correlationV2) from providers
- * that surface them. Absent on v1-only providers — no fields added, legacy
- * record shape untouched. Snapshots never carry these (transport+reason only).
+ * Record-level negotiated caps (outputModes + correlationV2 + jsonSchema)
+ * from providers that surface them. Absent on v1-only providers — no fields
+ * added, legacy record shape untouched. Snapshots never carry these
+ * (transport+reason only). Observability only — no gating change.
  */
 const NEGOTIATED_OWNER_PATTERN_MAX_BYTES = 256;
 const NEGOTIATED_ROLES_MAX_ENTRIES = 16;
 const NEGOTIATED_ROLE_MAX_BYTES = 64;
-function negotiatedLeafCaps(provider: LeafRuntimeProvider): Partial<Pick<AgentRpcRecord, 'outputModes' | 'correlationV2'>> {
+function negotiatedLeafCaps(provider: LeafRuntimeProvider): Partial<Pick<AgentRpcRecord, 'outputModes' | 'correlationV2' | 'jsonSchema'>> {
   const caps = provider.getNegotiatedCapabilities?.();
   if (caps === undefined) return {};
   const roles = Array.isArray(caps.correlationV2?.roles)
@@ -809,102 +868,8 @@ function negotiatedLeafCaps(provider: LeafRuntimeProvider): Partial<Pick<AgentRp
           },
         }
       : {}),
+    ...(caps.jsonSchema === 'flat-v1' || caps.jsonSchema === 'structured-v1' ? { jsonSchema: caps.jsonSchema } : {}),
   };
-}
-
-/** Preserve already-recorded negotiated caps across the fallback flip. */
-function carriedLeafCaps(job: AgentJobV1): Partial<Pick<AgentRpcRecord, 'outputModes' | 'correlationV2'>> {
-  return {
-    ...(job.rpc.outputModes !== undefined ? { outputModes: job.rpc.outputModes } : {}),
-    ...(job.rpc.correlationV2 !== undefined ? { correlationV2: job.rpc.correlationV2 } : {}),
-  };
-}
-
-/** Report-leg prompt from already-captured hits: sanitized job query + fenced
- *  top search-snippet excerpts (untrusted), bounded to maxPromptBytes. Pure
- *  (never calls search): executeAgentJob captures hits once and reuses them
- *  for both the core search leg and this prompt, so a leaf job executes one
- *  backend search and the prompt matches the attached sources. */
-/** Per-field byte cap for fenced leaf excerpts (UTF-8, code-point safe). */
-export const LEAF_SNIPPET_MAX_BYTES = 240;
-
-/** Fence one untrusted leaf field: clean controls, fold to single line, defang
- *  fence-shaped markers, then byte-cap. Deterministic, no redaction of visible text. */
-function fenceLeafField(value: string): string {
-  return truncateUtf8Bytes(
-    cleanUntrustedText(value ?? '')
-      .replace(/\r\n|\r|\n/g, ' ')
-      .replace(/<<</g, '< < <')
-      .replace(/>>>/g, '> > >'),
-    LEAF_SNIPPET_MAX_BYTES,
-  );
-}
-
-export function buildLeafPrompt(
-  query: string,
-  hits: Array<{ title: string; url: string; snippet?: string }>,
-): string {
-  const parts = [`Query: ${sanitizeGoal(query)}`, '(untrusted search snippets)'];
-  for (const hit of hits.slice(0, 5)) {
-    const title = fenceLeafField(hit.title ?? '');
-    const snippet = fenceLeafField(hit.snippet ?? '');
-    const excerpt = `${title} | ${snippet}`.trim();
-    if (excerpt !== '' && excerpt !== '|') parts.push(excerpt);
-  }
-  return truncateUtf8Bytes(parts.join('\n'), RUNTIME_RPC_BOUNDS.maxPromptBytes);
-}
-
-/**
- * Leaf report leg with opaque-leg fallback. On fallback the job snapshot
- * reflects the ACTUAL producer: transport flips to 'standalone' with the
- * safe leaf code in the reason (negotiated stays true — negotiation did
- * happen). On success the negotiated 'leaf-runtime' record stands.
- */
-async function leafReportWithFallback(
-  job: AgentJobV1,
-  query: string,
-  prompt: string,
-  provider: LeafRuntimeProvider,
-): Promise<{ text: string; sources: Array<{ url: string; title: string }>; warnings: string[] }> {
-  try {
-    // Shutdown-mid-flight guard: the captured provider ref goes stale when
-    // shutdownLeafRuntime clears the seam after negotiation. Re-check at use
-    // time and abort to the opaque leg instead of driving a dead client.
-    if (getLeafRuntimeProvider() === undefined) throw { code: 'provider_shutdown' };
-    const out = await provider.runLeaf(prompt, { timeoutMs: LEAF_REPORT_TIMEOUT_MS });
-    if (typeof out?.text !== 'string' || out.text.trim() === '') {
-      throw { code: 'provider_error' };
-    }
-    const clean = redactProvenance({ text: out.text });
-    const warnings: string[] = [];
-    let text = clean.text;
-    if (Buffer.byteLength(text, 'utf8') > AGENT_REPORT_MAX_BYTES) {
-      text = truncateUtf8Bytes(text, AGENT_REPORT_MAX_BYTES);
-      warnings.push(`report text capped to the ${AGENT_REPORT_MAX_BYTES}-byte evidence budget`);
-    }
-    return { text, sources: [], warnings };
-  } catch (error) {
-    const code = safeLeafCode(error);
-    job.rpc = {
-      attempted: true,
-      negotiated: true,
-      transport: 'standalone',
-      reason: `leaf leg failed (${code}); report leg fallback`,
-      ...carriedLeafCaps(job),
-    };
-    const leafWarning = `leaf runtime leg failed (${code}); report leg fallback`;
-    try {
-      const fallback = await runAgentReportRoute({ query, env: process.env as Record<string, string | undefined> });
-      return {
-        text: fallback.text,
-        sources: fallback.sources,
-        warnings: [...fallback.warnings, leafWarning],
-      };
-    } catch {
-      // Opaque leg also down: local-evidence result still carries the leaf warning.
-      return { text: '', sources: [], warnings: [leafWarning] };
-    }
-  }
 }
 
 /** Run one job to ready/failed. Concurrent callers share one in-flight
@@ -916,6 +881,8 @@ export async function executeAgentJob(jobId: string, opts?: ExecuteAgentJobOptio
   if (running !== undefined) return running;
   const deadlineMs = validateDeadlineMs(opts?.deadlineMs);
   if (deadlineMs !== undefined) jobDeadlines.set(jobId, deadlineMs);
+  const depth = validateDepth(opts?.depth);
+  if (depth !== undefined) jobDepths.set(jobId, depth);
   const sink = validateEventSink(opts?.eventSink);
   if (sink !== undefined) jobSinks.set(jobId, sink);
   const drive = driveWithTimeout(jobId, deadlineMs ?? jobDeadlines.get(jobId), opts?.signal).finally(() => {
@@ -964,17 +931,12 @@ async function driveAgentJob(jobId: string, deadlineMs: number | undefined, sign
   try {
     const runner = await defaultRunner();
     const leaf = await negotiateLeafTransport(job);
-    // Search per query, single-search invariant preserved: the fail-closed
-    // pre-flight capture runs the root query once (an early backend outage
-    // fails the drive before the core starts, exactly like before); the
-    // core leg goes through coreSearch, which serves the capture ONLY for
-    // the identical root query and delegates every other query live to the
-    // backend — adaptive follow-up rounds search their own queries, never
-    // re-read the root hits (no phantom memo). Single-round jobs therefore
-    // still execute exactly one backend search; multi-round jobs count one
-    // per query. The leaf prompt reuses the first capture, so the prompt
-    // matches the attached sources.
-    // Wrappers only record + delegate: absent sink/journal = byte-identical run.
+    // Wave 5: no preflight — Round 1 owns ALL acquisition. Every
+    // network-acquiring call runs inside the controller loop through these
+    // wrappers (which only record + delegate: absent sink/journal =
+    // byte-identical run). Nothing searches before the core starts, so an
+    // early backend outage surfaces as a round-1 gather warning, never as a
+    // pre-controller drive failure.
     const searchLog: Array<{ query: string; hitCount: number; failed?: boolean }> = [];
     const fetchLog: Array<{ canonicalUrl: string; byteLength: number; failed?: boolean }> = [];
     // Record-order search slots (mirrors wrappedFetch): each call reserves its
@@ -1013,35 +975,22 @@ async function driveAgentJob(jobId: string, deadlineMs: number | undefined, sign
         throw error;
       }
     };
-    const hits = await wrappedSearch(job.query);
-    let servedFirstSearch = false;
-    const coreSearch = async (
-      query: string,
-    ): Promise<Array<{ title: string; url: string; snippet?: string }>> => {
-      if (!servedFirstSearch && query === job.query) {
-        servedFirstSearch = true;
-        return hits;
-      }
-      return wrappedSearch(query);
-    };
-    const report =
-      leaf !== undefined
-        ? async (query: string) => leafReportWithFallback(job, query, buildLeafPrompt(query, hits), leaf)
-        : async (query: string) => runAgentReportRoute({ query, env: process.env as Record<string, string | undefined> });
     // Progress projection: the controller reports stage transitions through
     // this callback; Phase 7 ALSO folds each boundary into the typed journal
     // (deltas + wrapped search/fetch logs supply exact per-leg fields).
-    // onProgress when the seam exists (forward-compat cast: the legacy core
-    // ignores the unknown dep). Counts only — no provider/model identity.
+    // Counts only — no provider/model identity.
     const driveSignal = buildDriveSignal(deadlineMs, signal);
     // Phase 8 (R5): one frozen capabilities snapshot per job, computed once
     // from process.env (deterministic env-hint inference, no network).
     const capabilitiesSnapshot = snapshotForJob(process.env as Record<string, string | undefined>);
-    const result: AgentResultV1 = await runAgentCore(job.query, {
-      search: coreSearch,
+    const coreDeps: AgentCoreDeps = {
+      search: wrappedSearch,
       fetchText: wrappedFetch,
-      report,
       capabilitiesSnapshot,
+      // Task 8 code-owned width profile: explicit job depth selects 'deep';
+      // absent (or 'balanced') keeps the balanced default with deterministic
+      // narrow refinement post-plan in the core.
+      gatherProfile: jobDepths.get(jobId) === 'deep' ? 'deep' : 'balanced',
       // Controller deadlineMs is an absolute clock bound; the job-level
       // deadlineMs is a duration — convert at the fake-clock boundary.
       ...(deadlineMs !== undefined ? { deadlineMs: store.now() + deadlineMs } : {}),
@@ -1050,7 +999,57 @@ async function driveAgentJob(jobId: string, deadlineMs: number | undefined, sign
         mergeProgress(job.jobId, event);
         emitProgressJournal({ jobId: job.jobId, jobQuery: job.query, event, searchLog, fetchLog });
       },
-    } as AgentCoreDeps);
+    };
+    // Task 7 gather executor: web legs ride the wrapped search/fetch legs
+    // (record-order journal logs stay exact); research/github/kg ride
+    // callNativeTool; social/video have no native surface yet and degrade to
+    // web + warning inside the executor. Snapshot flows per-call via ctx.
+    // Not a model dep: the Task 3 kill-switch keeps it (stripAgentModelDeps
+    // only removes model-call deps). Lazy import mirrors defaultRunner (no cycle).
+    const [{ callNativeTool }] = await Promise.all([import('../../native-tools.js')]);
+    const { buildNativeGatherTools, gatherExecutor } = await import('./agent-gather.js');
+    const gatherTools = buildNativeGatherTools({
+      search: wrappedSearch,
+      fetchText: wrappedFetch,
+      callNative: (name, args) => callNativeTool(name, args),
+    });
+    coreDeps.gatherExecutor = (intents, round, ctx) => gatherExecutor(intents, round, { ...ctx, tools: gatherTools });
+    // Task 4 steering seams: a negotiated-ready leaf provider drives real
+    // planner/evaluator/synthesizer/verifier/repair through leaf RPC
+    // (text-JSON mode until structured-v1 negotiates; gating lives in
+    // createLeafModelClient). No report leg remains: the only leaf calls are
+    // the staged steering seams.
+    if (leaf !== undefined) {
+      // Shutdown-mid-flight guard: the
+      // captured provider ref goes stale when shutdownLeafRuntime clears the
+      // seam after negotiation. Steering calls re-check at use time and fail
+      // with provider_shutdown (fixed safe reason) instead of driving a dead
+      // client; the seams degrade to undefined and the deterministic ladder
+      // takes over.
+      const guardedLeaf: LeafRuntimeProvider = {
+        refreshReady: () => leaf.refreshReady(),
+        runLeaf: async (prompt, runOpts) => {
+          if (getLeafRuntimeProvider() !== leaf) throw Object.assign(new Error('Leaf runtime shut down; steering unavailable.'), { code: 'provider_shutdown' });
+          return leaf.runLeaf(prompt, runOpts);
+        },
+        ...(leaf.getNegotiatedCapabilities !== undefined
+          ? { getNegotiatedCapabilities: () => leaf.getNegotiatedCapabilities?.() }
+          : {}),
+      };
+      const seams = createAgentModelSeams(guardedLeaf, { capabilitiesSnapshot });
+      coreDeps.planner = seams.planner;
+      coreDeps.evaluator = seams.evaluator;
+      coreDeps.synthesizer = seams.synthesizer;
+      coreDeps.verifier = seams.verifier;
+      coreDeps.repairer = seams.repairer;
+      coreDeps.utilityModelClient = seams.utilityModelClient;
+    }
+    // Task 3 no-model ladder: exact '0' strips model-call deps before the
+    // controller runs (Task 4 seams pass through this same point).
+    const result: AgentResultV1 = await runAgentCore(
+      job.query,
+      isAgentSteeringDisabled(process.env as Record<string, string | undefined>) ? stripAgentModelDeps(coreDeps) : coreDeps,
+    );
     job.result = result;
     job.status = 'ready';
     // Real synth/verify counts from the deterministic result warnings
@@ -1088,14 +1087,14 @@ async function driveAgentJob(jobId: string, deadlineMs: number | undefined, sign
       job.error = 'agent_job_deadline';
     } else {
       if (job.result === undefined) {
-        // Early throw (search leg) with a negotiated leaf transport: no report
-        // leg ever produced, so the snapshot resets to standalone with a static
+        // Early throw (search leg) with a negotiated leaf transport: no result
+        // was ever produced, so the snapshot resets to standalone with a static
         // reason instead of naming a transport that produced nothing.
         job.rpc = {
           attempted: job.rpc.attempted,
           negotiated: job.rpc.negotiated,
           transport: 'standalone',
-          reason: 'job failed before the report leg produced; transport reset to standalone',
+          reason: 'job failed before any result was produced; transport reset to standalone',
         };
       }
     // Stable generic code only: snapshots are model-visible, so dependency
@@ -1146,8 +1145,9 @@ export interface AgentJobSnapshot {
  * safe reason only — never provider or model identity.
  *
  * NOTE: on running jobs `rpc.transport` names the NEGOTIATED leg, not a
- * produced report — negotiation records 'leaf-runtime' before the report leg
- * runs, and only leafReportWithFallback flips it to the actual producer.
+ * produced result — negotiation records 'leaf-runtime' before the core runs;
+ * the negotiated record stands through the deterministic ladder (leaf seam
+ * failures degrade with fixed safe reasons, never a transport flip).
  * `negotiated` stays out of the snapshot by design (the byte-stable contract
  * carries transport + reason only); read the reason for accuracy, never the
  * transport alone.

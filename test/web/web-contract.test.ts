@@ -340,3 +340,42 @@ test('fetch tool maps to read without query-path crawl inference', async () => {
   assert.equal(mod.resolveWebActionForTool('fetch', {}), 'read');
   assert.equal(mod.resolveWebActionForTool('web_search', {}), 'search');
 });
+
+test('web contract: depth absent means balanced default on agent mode', async () => {
+  const mod = await import('../../src/web/web-contract.js');
+  const { request } = mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent' });
+  assert.equal(request.agentMode, true);
+  assert.equal(request.depth, 'balanced');
+});
+
+test('web contract: depth accepts balanced and deep on agent mode', async () => {
+  const mod = await import('../../src/web/web-contract.js');
+  for (const depth of ['balanced', 'deep'] as const) {
+    const { request } = mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', depth });
+    assert.equal(request.depth, depth);
+  }
+});
+
+test('web contract: depth rejects unknown values without echo', async () => {
+  const mod = await import('../../src/web/web-contract.js');
+  for (const depth of ['ultra', '', 2, null, {}]) {
+    const err = webError(
+      'invalid_request',
+      () => mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', depth }),
+    );
+    assert.equal(err.message, 'depth must be "balanced" or "deep"');
+  }
+});
+
+test('web contract: depth without agent mode rejects fail-closed', async () => {
+  const mod = await import('../../src/web/web-contract.js');
+  // Omitted mode, non-search actions, batch queries: depth never silently ignored.
+  webError('invalid_request', () => mod.validateWebRequest({ action: 'search', query: 'q', depth: 'deep' }));
+  webError('invalid_request', () =>
+    mod.validateWebRequest({ action: 'search', queries: ['a', 'b'], depth: 'balanced' }),
+  );
+  const err = webError('invalid_request', () =>
+    mod.validateWebRequest({ action: 'read', url: 'https://example.com', depth: 'deep' }),
+  );
+  assert.equal(err.message, 'depth is only supported with mode "agent"');
+});

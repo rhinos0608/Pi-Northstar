@@ -129,3 +129,114 @@ test('fallbackPlan truncates overlong goals to the byte cap', async () => {
   assert.ok(Buffer.byteLength(q.question, 'utf8') <= MAX_GOAL_BYTES);
   assert.deepEqual(q.id, questionId(q.question));
 });
+
+test('normalizePlan accepts nested intent per question', async () => {
+  const { questionId } = await import('../../../src/web/agent/agent-state.js');
+  const raw = {
+    questions: [
+      {
+        question: 'What drives savanna zebra migration patterns?',
+        intent: { kind: 'web_search', query: 'savanna zebra migration drivers' },
+      },
+      {
+        question: 'Which papers model corridor shifts yearly?',
+        intent: { kind: 'research_search', query: 'zebra corridor shift models', source: 'openalex', yearFrom: 2010 },
+      },
+    ],
+  };
+  const result = normalizePlan(raw);
+  assert.ok(result.ok);
+  const q0 = result.ok ? result.plan.questions[0] : undefined;
+  const q1 = result.ok ? result.plan.questions[1] : undefined;
+  assert.ok(q0 && q1);
+  assert.deepEqual(q0.intent, { kind: 'web_search', query: 'savanna zebra migration drivers' });
+  assert.deepEqual(q1.intent, {
+    kind: 'research_search',
+    query: 'zebra corridor shift models',
+    source: 'openalex',
+    yearFrom: 2010,
+  });
+  assert.deepEqual(q0.id, questionId('What drives savanna zebra migration patterns?'));
+});
+
+test('normalizePlan drops invalid intent with warning, question still stands', () => {
+  const raw = {
+    questions: [{ question: 'What drives savanna zebra migration patterns?', intent: { kind: 'graph_search', query: 'zebras' } }],
+  };
+  const result = normalizePlan(raw);
+  assert.ok(result.ok);
+  const q = result.ok ? result.plan.questions[0] : undefined;
+  assert.ok(q);
+  assert.equal(q.intent, undefined);
+  assert.ok(result.ok && result.issues.some((issue) => issue.includes('intent dropped')));
+});
+
+test('normalizePlan rejects planner-supplied questionId with warning, recomputes id', async () => {
+  const { questionId } = await import('../../../src/web/agent/agent-state.js');
+  const raw = {
+    questions: [{ id: 'caller-lies', questionId: 'also-lies', question: 'What drives savanna zebra migration patterns?' }],
+  };
+  const result = normalizePlan(raw);
+  assert.ok(result.ok);
+  const q = result.ok ? result.plan.questions[0] : undefined;
+  assert.ok(q);
+  assert.deepEqual(q.id, questionId('What drives savanna zebra migration patterns?'));
+  assert.ok(result.ok && result.issues.some((issue) => issue.includes('questionId ignored')));
+});
+
+test('buildPlannerPrompt asks for per-question intent and forbids questionId', () => {
+  const prompt = buildPlannerPrompt('zebra migration', { maxRounds: 3, maxSearches: 10 });
+  assert.ok(prompt.includes('"intent"'));
+  assert.ok(prompt.includes('Never emit questionId'));
+});
+
+test('buildPlannerPrompt never advertises deferred video/social lanes', () => {
+  // Wave 9/D4: video/social lanes have no executor tool surface, so the
+  // planner prompt must not teach them (the intent union keeps the kinds for
+  // back-compat, but prompts must not advertise dead lanes).
+  const prompt = buildPlannerPrompt('zebra migration', { maxRounds: 3, maxSearches: 10 });
+  assert.ok(!prompt.includes('video_transcript'), 'planner prompt must not grammar video_transcript');
+  assert.ok(!prompt.includes('social_search'), 'planner prompt must not grammar social_search');
+  assert.ok(prompt.includes('kg_lookup'), 'live lanes stay advertised');
+});
+
+test('normalizePlan keeps a web_fetch nested intent through to seeds', () => {
+  const raw = {
+    questions: [
+      {
+        question: 'What does the launch pricing effects paper conclude?',
+        intent: { kind: 'web_fetch', url: 'https://example.com/paper-1' },
+      },
+    ],
+  };
+  const candidates = [{ kind: 'research-source', route: 'research', source: 'arxiv', title: 'Paper 1', url: 'https://example.com/paper-1' }] as const;
+  const result = normalizePlan(raw, [...candidates]);
+  assert.ok(result.ok);
+  const q = result.ok ? result.plan.questions[0] : undefined;
+  assert.ok(q);
+  assert.deepEqual(q.intent, { kind: 'web_fetch', url: 'https://example.com/paper-1' });
+});
+
+test('normalizePlan drops a web_fetch intent without candidate provenance, question still stands', () => {
+  const rawProvenance = {
+    questions: [{ question: 'What does the launch pricing effects paper conclude?', intent: { kind: 'web_fetch', url: 'https://example.com/paper-1' } }],
+  };
+  const noProvenance = normalizePlan(rawProvenance, []);
+  assert.ok(noProvenance.ok);
+  const qp = noProvenance.ok ? noProvenance.plan.questions[0] : undefined;
+  assert.ok(qp);
+  assert.equal(qp.intent, undefined);
+  assert.ok(noProvenance.ok && noProvenance.issues.some((issue) => issue.includes('not a research-source candidate')));
+});
+
+test('normalizePlan drops a host-less web_fetch intent with warning, question still stands', () => {
+  const raw = {
+    questions: [{ question: 'What does the launch pricing effects paper conclude?', intent: { kind: 'web_fetch', url: 'https://?q=1' } }],
+  };
+  const result = normalizePlan(raw);
+  assert.ok(result.ok);
+  const q = result.ok ? result.plan.questions[0] : undefined;
+  assert.ok(q);
+  assert.equal(q.intent, undefined);
+  assert.ok(result.ok && result.issues.some((issue) => issue.includes('intent dropped')));
+});

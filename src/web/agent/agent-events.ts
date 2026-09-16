@@ -25,8 +25,32 @@ export interface JobCreatedEvent { type: 'JobCreated'; jobId: string; query: str
 export interface PlanAcceptedEvent { type: 'PlanAccepted'; jobId: string; questionsTotal: number; questionIds: string[]; scopeNoteCount: number; }
 export interface SearchCompletedEvent { type: 'SearchCompleted'; jobId: string; round: number; query: string; hitCount: number; searchesUsed: number; failed?: boolean; }
 export interface FetchCompletedEvent { type: 'FetchCompleted'; jobId: string; round: number; canonicalUrl: string; byteLength: number; fetchesUsed: number; failed?: boolean; }
-export interface EvidenceAdmittedEvent { type: 'EvidenceAdmitted'; jobId: string; evidenceId: string; round: number; questionIds: string[]; excerptHash: string; fingerprint: string; }
+export interface EvidenceAdmittedEvent {
+  type: 'EvidenceAdmitted';
+  jobId: string;
+  evidenceId: string;
+  round: number;
+  questionIds: string[];
+  excerptHash: string;
+  fingerprint: string;
+  /** Source anchor for URL-less evidence: '' sentinel exactly when identity
+   *  carries the source, else an http(s) URL. Absent = legacy event. */
+  canonicalUrl?: string;
+  /** Structured non-URL identity (KG rows, research abstracts): bounded
+   *  provider/query (+optional nodeId), mirroring agent-state admission
+   *  bounds. Present exactly when canonicalUrl is the '' sentinel. */
+  identity?: { provider: string; query: string; nodeId?: string };
+  /** Typed evidence locator ({nodeId, field} | {start, end} | {page} |
+   *  {line} | {timestamp} | {ref}), mirroring the agent-state locator union. */
+  locator?: { nodeId: string; field: string } | { start: number; end: number } | { page: number } | { line: number } | { timestamp: number } | { ref: string };
+}
 export interface EvaluationAcceptedEvent { type: 'EvaluationAccepted'; jobId: string; round: number; answeredCount: number; nextQueryCount: number; droppedNextQueries: number; }
+/** Count-only candidate telemetry per gather round: accepted vs deduped/dropped.
+ *  Candidates are untrusted navigation hints — no titles, urls, snippets, or
+ *  identities ever enter the journal. No per-route tally: the route union
+ *  carries legacy search/fetch/report-suggested-fetch members, so a tally
+ *  shape would complicate the exact-keys validator for no journal need. */
+export interface CandidatesAccumulatedEvent { type: 'CandidatesAccumulated'; jobId: string; round: number; added: number; dropped: number; }
 export interface RoundClosedEvent { type: 'RoundClosed'; jobId: string; round: number; growthCount: number; conflictsCount: number; stopReason?: string; }
 export interface SynthesisCompletedEvent { type: 'SynthesisCompleted'; jobId: string; claimUnitCount: number; blockCount: number; orphanedCount: number; }
 export interface VerificationCompletedEvent { type: 'VerificationCompleted'; jobId: string; supportedCount: number; refutedCount: number; unsupportedCount: number; repairApplied: number; repairRejected: number; }
@@ -42,6 +66,7 @@ export type AgentResearchEvent =
   | FetchCompletedEvent
   | EvidenceAdmittedEvent
   | EvaluationAcceptedEvent
+  | CandidatesAccumulatedEvent
   | RoundClosedEvent
   | SynthesisCompletedEvent
   | VerificationCompletedEvent
@@ -56,6 +81,7 @@ const EVENT_TYPES: readonly string[] = [
   'FetchCompleted',
   'EvidenceAdmitted',
   'EvaluationAccepted',
+  'CandidatesAccumulated',
   'RoundClosed',
   'SynthesisCompleted',
   'VerificationCompleted',
@@ -68,8 +94,9 @@ const EVENT_KEYS: Record<AgentEventType, readonly string[]> = {
   PlanAccepted: ['type', 'jobId', 'questionsTotal', 'questionIds', 'scopeNoteCount'],
   SearchCompleted: ['type', 'jobId', 'round', 'query', 'hitCount', 'searchesUsed', 'failed'],
   FetchCompleted: ['type', 'jobId', 'round', 'canonicalUrl', 'byteLength', 'fetchesUsed', 'failed'],
-  EvidenceAdmitted: ['type', 'jobId', 'evidenceId', 'round', 'questionIds', 'excerptHash', 'fingerprint'],
+  EvidenceAdmitted: ['type', 'jobId', 'evidenceId', 'round', 'questionIds', 'excerptHash', 'fingerprint', 'canonicalUrl', 'identity', 'locator'],
   EvaluationAccepted: ['type', 'jobId', 'round', 'answeredCount', 'nextQueryCount', 'droppedNextQueries'],
+  CandidatesAccumulated: ['type', 'jobId', 'round', 'added', 'dropped'],
   RoundClosed: ['type', 'jobId', 'round', 'growthCount', 'conflictsCount', 'stopReason'],
   SynthesisCompleted: ['type', 'jobId', 'claimUnitCount', 'blockCount', 'orphanedCount'],
   VerificationCompleted: ['type', 'jobId', 'supportedCount', 'refutedCount', 'unsupportedCount', 'repairApplied', 'repairRejected'],
@@ -80,6 +107,7 @@ const OPTIONAL_KEYS: Record<string, readonly string[]> = {
   RoundClosed: ['stopReason'],
   FetchCompleted: ['failed'],
   SearchCompleted: ['failed'],
+  EvidenceAdmitted: ['canonicalUrl', 'identity', 'locator'],
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -89,6 +117,86 @@ const isNonNegativeInt = (value: unknown): value is number =>
 const byteLength = (value: string): number => Buffer.byteLength(value, 'utf8');
 const isQuestionId = (value: unknown): value is string =>
   typeof value === 'string' && QUESTION_ID_PATTERN.test(value);
+
+/** Bounds for the EvidenceAdmitted source anchor, mirroring agent-state
+ *  admission (provider <=64B, query <=512B event cap, nodeId <=256B). */
+const EVENT_IDENTITY_PROVIDER_MAX_BYTES = 64;
+const EVENT_IDENTITY_NODE_ID_MAX_BYTES = 256;
+const EVENT_KG_FIELD_MAX_BYTES = 128;
+const EVENT_REF_MAX_BYTES = 256;
+
+/** URL-XOR-identity anchor check for EvidenceAdmitted: both absent = legacy
+ *  event (valid); '' canonicalUrl requires a well-formed identity; a
+ *  non-empty canonicalUrl must be http(s) with no identity. Reject, never coerce. */
+function checkEvidenceSource(canonicalUrl: unknown, identity: unknown): string | null {
+  if (canonicalUrl === undefined && identity === undefined) return null;
+  if (typeof canonicalUrl === 'string' && canonicalUrl !== '') {
+    if (!/^https?:\/\//i.test(canonicalUrl)) return 'invalid canonicalUrl';
+    if (byteLength(canonicalUrl) > AGENT_EVENT_URL_MAX_BYTES) return 'canonicalUrl exceeds maximum bytes';
+    if (identity !== undefined) return 'identity must be absent with a URL source';
+    return null;
+  }
+  if (canonicalUrl !== '') return 'invalid canonicalUrl';
+  if (!isRecord(identity)) return 'invalid identity';
+  const keys = Object.keys(identity);
+  if (!keys.every((key) => key === 'provider' || key === 'query' || key === 'nodeId')) return 'invalid identity';
+  const provider = identity['provider'];
+  if (typeof provider !== 'string' || provider.trim() === '' || byteLength(provider) > EVENT_IDENTITY_PROVIDER_MAX_BYTES) {
+    return 'invalid identity';
+  }
+  const query = identity['query'];
+  if (typeof query !== 'string' || query.trim() === '' || byteLength(query) > AGENT_EVENT_QUERY_MAX_BYTES) {
+    return 'invalid identity';
+  }
+  const nodeId = identity['nodeId'];
+  if (nodeId !== undefined && (typeof nodeId !== 'string' || nodeId.trim() === '' || byteLength(nodeId) > EVENT_IDENTITY_NODE_ID_MAX_BYTES)) {
+    return 'invalid identity';
+  }
+  return null;
+}
+
+/** Typed locator check for EvidenceAdmitted, mirroring the agent-state
+ *  locator union (exact keys per variant). Absent = legacy event (valid). */
+function checkEvidenceLocator(locator: unknown): string | null {
+  if (locator === undefined) return null;
+  if (!isRecord(locator)) return 'invalid locator';
+  const keys = Object.keys(locator);
+  const exact = (...wanted: string[]): boolean => keys.length === wanted.length && wanted.every((key) => keys.includes(key));
+  if ('nodeId' in locator || 'field' in locator) {
+    if (!exact('nodeId', 'field')) return 'invalid locator';
+    const nodeId = locator['nodeId'];
+    const field = locator['field'];
+    if (typeof nodeId !== 'string' || nodeId.trim() === '' || byteLength(nodeId) > EVENT_IDENTITY_NODE_ID_MAX_BYTES) return 'invalid locator';
+    if (typeof field !== 'string' || field.trim() === '' || byteLength(field) > EVENT_KG_FIELD_MAX_BYTES) return 'invalid locator';
+    return null;
+  }
+  if ('start' in locator || 'end' in locator) {
+    if (!exact('start', 'end')) return 'invalid locator';
+    const start = locator['start'];
+    const end = locator['end'];
+    if (!isNonNegativeInt(start) || !isNonNegativeInt(end) || (end as number) <= (start as number)) return 'invalid locator';
+    return null;
+  }
+  if ('page' in locator) {
+    if (!exact('page') || !isNonNegativeInt(locator['page'])) return 'invalid locator';
+    return null;
+  }
+  if ('line' in locator) {
+    if (!exact('line') || !isNonNegativeInt(locator['line'])) return 'invalid locator';
+    return null;
+  }
+  if ('timestamp' in locator) {
+    const ts = locator['timestamp'];
+    if (!exact('timestamp') || typeof ts !== 'number' || !Number.isFinite(ts) || ts < 0) return 'invalid locator';
+    return null;
+  }
+  if ('ref' in locator) {
+    const ref = locator['ref'];
+    if (!exact('ref') || typeof ref !== 'string' || ref.trim() === '' || byteLength(ref) > EVENT_REF_MAX_BYTES) return 'invalid locator';
+    return null;
+  }
+  return 'invalid locator';
+}
 
 /** Validate a single event: exact-keys + field types + caps + id formats. Reject, never coerce. */
 export function validateAgentResearchEvent(value: unknown): { ok: true; event: AgentResearchEvent } | { ok: false; reason: string } {
@@ -171,10 +279,21 @@ export function validateAgentResearchEvent(value: unknown): { ok: true; event: A
         const entry = value[field];
         if (typeof entry !== 'string' || !HEX_PATTERN.test(entry)) return { ok: false, reason: `invalid ${field}` };
       }
+      const anchor = checkEvidenceSource(value['canonicalUrl'], value['identity']);
+      if (anchor !== null) return { ok: false, reason: anchor };
+      const locatorReason = checkEvidenceLocator(value['locator']);
+      if (locatorReason !== null) return { ok: false, reason: locatorReason };
       break;
     }
     case 'EvaluationAccepted': {
       for (const field of ['round', 'answeredCount', 'nextQueryCount', 'droppedNextQueries'] as const) {
+        const miss = needCount(field);
+        if (miss) return { ok: false, reason: miss };
+      }
+      break;
+    }
+    case 'CandidatesAccumulated': {
+      for (const field of ['round', 'added', 'dropped'] as const) {
         const miss = needCount(field);
         if (miss) return { ok: false, reason: miss };
       }
@@ -311,6 +430,9 @@ export function projectAgentState(
         rounds = Math.max(rounds, event.round);
         answered = event.answeredCount;
         break;
+      // Counts only, no state mutation: candidate accounting never moves
+      // rounds/counters/evidence — round monotonicity lives in roundOf().
+      case 'CandidatesAccumulated': break;
       case 'RoundClosed':
         rounds = Math.max(rounds, event.round);
         break;
@@ -330,6 +452,7 @@ const roundOf = (event: AgentResearchEvent): number | null => {
     case 'FetchCompleted':
     case 'EvidenceAdmitted':
     case 'EvaluationAccepted':
+    case 'CandidatesAccumulated':
     case 'RoundClosed':
       return event.round;
     default:

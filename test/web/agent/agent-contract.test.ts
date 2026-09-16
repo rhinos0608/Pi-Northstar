@@ -13,6 +13,9 @@ import {
   AGENT_RUN_DEADLINE_MS,
   AGENT_WARNING_MAX_BYTES,
   canonicalJson,
+  formatStructuredSourceUrl,
+  isStructuredSourceUrl,
+  parseStructuredSourceUrl,
   validateAgentResult,
 } from '../../../src/web/agent/agent-contract.js';
 
@@ -154,6 +157,43 @@ test('duplicate source ids reject instead of merging silently', () => {
   }));
   assert.equal(duped.ok, false);
   assert.ok(duped.issues.some((issue) => /duplicate/.test(issue)));
+});
+
+test('structured source identity validates as a claim anchor; unknown formats reject', () => {
+  const sourced = (url: unknown) => validateAgentResult(validResult({
+    sources: [{ id: 'src-0', url, title: 'KG', sourceKind: 'extracted' }],
+  }));
+  for (const good of ['wikidata:Q-quartz-9/releaseNotes', 'diffbot:abc123/name', 'a:b/c']) {
+    assert.equal(sourced(good).ok, true, good as string);
+  }
+  for (const bad of ['', 'just-a-word', 'wikidata:', 'wikidata:/field', ':node/field', 'wikidata:node', 'wikidata:node/', '9lives:Q1/has nine lives', 'prov:node/fi eld', 'a'.repeat(65) + ':n/f', 'p:' + 'n'.repeat(257) + '/f', 'p:n/' + 'f'.repeat(129)]) {
+    const rejected = sourced(bad);
+    assert.equal(rejected.ok, false, JSON.stringify(bad));
+    assert.ok(rejected.issues.some((issue) => /structured source identity/.test(issue)), JSON.stringify(rejected.issues));
+  }
+});
+
+test('structured identity helpers are deterministic and reject-not-clamp', () => {
+  assert.equal(formatStructuredSourceUrl('wikidata', 'Q-quartz-9', 'releaseNotes'), 'wikidata:Q-quartz-9/releaseNotes');
+  assert.equal(formatStructuredSourceUrl('', 'Q1', 'name'), undefined);
+  assert.equal(formatStructuredSourceUrl('wikidata', '', 'name'), undefined);
+  assert.equal(formatStructuredSourceUrl('wikidata', 'Q1', ''), undefined);
+  assert.equal(formatStructuredSourceUrl('has space', 'Q1', 'name'), undefined);
+  assert.equal(isStructuredSourceUrl('wikidata:Q-quartz-9/releaseNotes'), true);
+  assert.equal(isStructuredSourceUrl('https://example.com/a'), false);
+  assert.equal(isStructuredSourceUrl(42), false);
+  assert.deepEqual(parseStructuredSourceUrl('wikidata:Q-quartz-9/releaseNotes'), { provider: 'wikidata', nodeId: 'Q-quartz-9', field: 'releaseNotes' });
+  assert.equal(parseStructuredSourceUrl('not-an-identity'), undefined);
+});
+
+test('KG locator nodeId/field must appear together and stay bounded', () => {
+  const derived = (locator: unknown) => validateAgentResult(validResult({
+    sources: [{ id: 'src-0', url: 'wikidata:Q-quartz-9/releaseNotes', title: 'KG', sourceKind: 'derived', locator, warnings: ['derived from admitted evidence'] }],
+  }));
+  assert.equal(derived({ nodeId: 'Q-quartz-9', field: 'releaseNotes' }).ok, true);
+  for (const bad of [{ nodeId: 'Q1' }, { field: 'name' }, { nodeId: '', field: 'name' }, { nodeId: 'Q1', field: '' }, { nodeId: 'x'.repeat(257), field: 'name' }, { nodeId: 'Q1', field: 'x'.repeat(129) }]) {
+    assert.equal(derived(bad).ok, false, JSON.stringify(bad));
+  }
 });
 
 test('derived sources require locator + warnings; extracted keeps them optional', () => {
