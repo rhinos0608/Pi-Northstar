@@ -179,8 +179,9 @@ async function inspectChannel(channel: ChannelDefinition, options: ReachToolOpti
         return { ...channel, status: 'off', active_backend: null, message: `No youtube backend supports action "${requestedAction}"` };
       }
       // Keyless: the keyless oEmbed endpoint provides limited `details` only.
-      // yt-dlp is never probed or reported because automatic calls never route
-      // to it (no-scraping policy).
+      // yt-dlp is frames-only for fetch-time YouTube keyframes (anonymous,
+      // fixed argv, PI_VISION_FETCH_VIDEO_FRAMES=1 plus a vision tier): never
+      // probed or reported here, never used for search/details/hot/transcript.
       if (canonicalAction && canonicalAction !== 'details') {
         return { ...channel, status: 'off', active_backend: null, message: `Keyless youtube cannot serve action "${requestedAction}"; only details via oEmbed. Set YOUTUBE_API_KEY for search, details, and hot via the official Data API.` };
       }

@@ -84,10 +84,21 @@ export function isOpenAICompatibleVisionConfigured(env: VisionEnv = process.env)
   return resolveOpenAICompatibleVisionConfig(env) !== null;
 }
 
+/** Hard bound on a text-only synthesis prompt accepted by this transport. */
+export const VISION_TEXT_MAX_PROMPT_CHARS = 50_000;
+
 /** One vision describe call: image bytes plus prompt plus exact model ID. */
 export interface VisionDescribeRequest {
   imageBytes: Uint8Array;
   mimeType: string;
+  prompt: string;
+  modelId: string;
+  maxOutputTokens?: number;
+  timeoutMs?: number;
+}
+
+/** One text-only synthesis call: prompt plus exact model ID (M8c additive). */
+export interface VisionDescribeTextRequest {
   prompt: string;
   modelId: string;
   maxOutputTokens?: number;
@@ -161,10 +172,73 @@ export function createOpenAICompatibleVisionTransport(config: OpenAICompatibleVi
         ? { max_tokens: request.maxOutputTokens }
         : {}),
     });
+    return postChatCompletion(config, body, fetchImpl, request.timeoutMs);
+  }
+
+  async function describeText(
+    request: VisionDescribeTextRequest,
+    fetchFn?: VisionFetchFn,
+  ): Promise<VisionDescribeResult> {
+    // M8c additive: same model-ID allowlist and same reject-not-clamp prompt
+    // bounds as describe; the only difference is a text-only message part
+    // (no image). `describe` image validation is untouched.
+    if (!request.modelId || !config.modelIds.includes(request.modelId)) {
+      return { ok: false, error: 'unsupported_model' };
+    }
+    if (!request.prompt || request.prompt.trim().length === 0) {
+      return { ok: false, error: 'invalid_input' };
+    }
+    if (request.prompt.length > VISION_TEXT_MAX_PROMPT_CHARS) {
+      return { ok: false, error: 'prompt_too_large' };
+    }
+    if (
+      request.maxOutputTokens !== undefined &&
+      (!Number.isInteger(request.maxOutputTokens) || request.maxOutputTokens <= 0)
+    ) {
+      return { ok: false, error: 'invalid_input' };
+    }
+    if (
+      request.timeoutMs !== undefined &&
+      (!Number.isInteger(request.timeoutMs) || request.timeoutMs <= 0)
+    ) {
+      return { ok: false, error: 'invalid_input' };
+    }
+    const fetchImpl: VisionFetchFn =
+      fetchFn ??
+      (async (url, init) => {
+        const response = await fetch(url, {
+          method: init.method,
+          headers: init.headers,
+          body: init.body,
+          signal: init.signal,
+        });
+        return { status: response.status, text: () => response.text() };
+      });
+    const body = JSON.stringify({
+      model: request.modelId,
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: request.prompt }],
+        },
+      ],
+      ...(typeof request.maxOutputTokens === 'number'
+        ? { max_tokens: request.maxOutputTokens }
+        : {}),
+    });
+    return postChatCompletion(config, body, fetchImpl, request.timeoutMs);
+  }
+
+  async function postChatCompletion(
+    transportConfig: OpenAICompatibleVisionConfig,
+    body: string,
+    fetchImpl: VisionFetchFn,
+    timeoutMs: number | undefined,
+  ): Promise<VisionDescribeResult> {
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
-      request.timeoutMs ?? VISION_REQUEST_TIMEOUT_MS,
+      timeoutMs ?? VISION_REQUEST_TIMEOUT_MS,
     );
     // Never hold the event loop open for a hung upstream: unref the abort
     // timer (guarded so non-Node runtimes without unref still work).
@@ -172,11 +246,11 @@ export function createOpenAICompatibleVisionTransport(config: OpenAICompatibleVi
       (timeout as unknown as { unref: () => void }).unref();
     }
     try {
-      const response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
+      const response = await fetchImpl(`${transportConfig.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
+          ...(transportConfig.apiKey ? { authorization: `Bearer ${transportConfig.apiKey}` } : {}),
         },
         body,
         signal: controller.signal,
@@ -233,7 +307,7 @@ export function createOpenAICompatibleVisionTransport(config: OpenAICompatibleVi
     }
   }
 
-  return { config, describe };
+  return { config, describe, describeText };
 }
 
 export type OpenAICompatibleVisionTransport = ReturnType<

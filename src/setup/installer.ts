@@ -83,6 +83,16 @@ const installers: InstallerDefinition[] = [
     expectedVersion: EXPECTED_YT_DLP_VERSION,
   },
   {
+    // ffmpeg floats like gh (no pinned version): presence is all we assert.
+    // Fetch-time YouTube keyframe extraction only; never a search surface.
+    id: 'ffmpeg',
+    label: 'ffmpeg',
+    channels: ['youtube'],
+    binaries: ['ffmpeg'],
+    core: true,
+    commands: [{ command: 'brew', args: ['install', 'ffmpeg'], platforms: ['darwin'] }],
+  },
+  {
     id: 'opencli',
     label: 'OpenCLI',
     channels: ['twitter', 'reddit', 'xiaohongshu', 'facebook', 'instagram', 'bilibili'],

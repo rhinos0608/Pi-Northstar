@@ -1,7 +1,9 @@
 // Video pipeline (Plan D Task D4): internal metadata + transcript first
 // (via src/media/* shapes, injected), then ≤12 timestamped keyframes through
-// vision. No ffmpeg: when no keyframe source exists the pipeline returns
-// metadata + transcript only with warnings and adds no binary dependency.
+// vision. Keyframes come via the fetch-time yt-dlp/ffmpeg seam
+// (src/media-vision/frame-extract.ts) when the operator opts in with
+// PI_VISION_FETCH_VIDEO_FRAMES=1; with no keyframe source the pipeline
+// returns metadata + transcript only with warnings.
 
 import {
   untrustedWarnings,
@@ -35,8 +37,8 @@ export interface VideoVisionSeams {
   readTranscript(): Promise<VideoTranscriptSegment[]>;
   /**
    * Timestamped keyframes (≤12 honored; extras ignored with a warning).
-   * Absent/empty = no keyframe source (no-ffmpeg path): metadata +
-   * transcript only, no new binary dep.
+   * Absent/empty = no keyframe source (frames seam not opted in): metadata
+   * + transcript only.
    */
   readKeyframes?: (() => Promise<VideoKeyframe[]>) | undefined;
   describeKeyframe?: ((frame: VideoKeyframe) => Promise<{ text: string; warnings?: string[] | undefined }>) | undefined;

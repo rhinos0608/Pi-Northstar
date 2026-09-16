@@ -282,6 +282,20 @@ test('cookieImportProviders only lists operational cookie-consuming providers', 
   assert.deepEqual([...providers].sort(), ['bilibili', 'reddit', 'youtube']);
 });
 
+test('yt-dlp registry entry is frames-only anonymous with no search surface (D7)', () => {
+  const frames = backendCapability('youtube', 'yt-dlp');
+  assert.ok(frames);
+  assert.deepEqual([...frames.actions], []);
+  assert.match(String(frames.note), /frames-only/i);
+  assert.match(String(frames.note), /anonymous/i);
+  assert.match(String(frames.note), /--no-config/);
+  assert.match(String(frames.note), /PI_VISION_FETCH_VIDEO_FRAMES/);
+  assert.ok(!String(frames.note).match(/never route/i), 'note must no longer claim routing is forbidden');
+  for (const action of ['search', 'details', 'hot', 'transcript']) {
+    assert.ok(!frames.actions.includes(action), `yt-dlp must not advertise ${action}`);
+  }
+});
+
 test('youtube transcript is an unofficial keyless backend; data-api never claims transcript', () => {
   const transcript = backendCapability('youtube', 'youtube-transcript');
   assert.ok(transcript);

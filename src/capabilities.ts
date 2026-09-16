@@ -4,7 +4,7 @@
 // derive their public vocabulary from here; no parallel channel/platform lists.
 //
 // Canonical-only contract: social channels advertise canonical Stage 2 actions
-// (src/social-contract.ts SOCIAL_CANONICAL_ACTIONS) with no legacy aliases.
+// (src/social/social-contract.ts SOCIAL_CANONICAL_ACTIONS) with no legacy aliases.
 // Unknown action names are rejected with unsupported_action before dispatch.
 // Instagram has no post-detail action until a verified read-only adapter
 // exists; OpenCLI download is intentionally disabled.
@@ -476,7 +476,7 @@ export const CHANNEL_CAPABILITIES: readonly ChannelCapability[] = [
         quality: 'degraded',
         actions: [],
         probe: { command: 'yt-dlp', args: ['--version'] },
-        note: 'Legacy probe only; automatic calls never route here (no-scraping policy).',
+        note: 'Frames-only external backend for fetch-time YouTube keyframes: anonymous (no account credentials, no cookie flags), fixed argv with --no-config, requires PI_VISION_FETCH_VIDEO_FRAMES=1 plus a configured vision tier; never used for search/details/hot/transcript.',
       },
     ],
     provider: {
