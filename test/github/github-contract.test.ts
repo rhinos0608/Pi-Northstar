@@ -461,3 +461,14 @@ test('github-request-contract owns request validation; facade re-exports identic
   assert.throws(() => resolveGithubLimitDirect(51, 'limit', 50, 20), /limit must be an integer in \[1, 50\]: 51/);
   assert.throws(() => validateGithubRequestDirect({ action: 'list_dir' }), /Unsupported github action: list_dir/);
 });
+
+test('M5 regression: issues/pulls with number remain valid requests (no contract change)', () => {
+  const issue = validateGithubRequest({ action: 'issues', owner: 'o', repo: 'r', number: 1 });
+  assert.equal(issue.request.action, 'issues');
+  assert.equal(issue.request.number, 1);
+  const pull = validateGithubRequest({ action: 'pulls', owner: 'o', repo: 'r', number: 2 });
+  assert.equal(pull.request.action, 'pulls');
+  assert.equal(pull.request.number, 2);
+  // Comment threads ride the entity body: no new request field exists.
+  assert.throws(() => validateGithubRequest({ action: 'issues', owner: 'o', repo: 'r', number: 0 }), /number must be a positive integer/);
+});

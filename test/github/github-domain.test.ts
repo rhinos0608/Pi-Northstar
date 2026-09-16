@@ -136,6 +136,8 @@ test('issues list and get normalize', async () => {
   assert.deepEqual(listEntities[0]?.labels, ['bug']);
 
   const single = await withFetch(async (input) => {
+    // D2: single-issue fetches append one bounded top-level comments call.
+    if (String(input).includes('/comments')) return jsonResponse([]);
     assert.match(String(input), /\/issues\/12$/);
     return jsonResponse(issue);
   }, () => callGithubTool({ action: 'issues', owner: 'o', repo: 'r', number: 12 }, { env: {} }));
@@ -152,6 +154,8 @@ test('pulls list, get, and files normalize', async () => {
   assert.equal(((list.details as Record<string, unknown>).entities as Array<Record<string, unknown>>)[0]?.kind, 'pull');
 
   const single = await withFetch(async (input) => {
+    // D2: single-pull fetches append one bounded top-level comments call.
+    if (String(input).includes('/comments')) return jsonResponse([]);
     assert.match(String(input), /\/pulls\/3$/);
     return jsonResponse(pull);
   }, () => callGithubTool({ action: 'pulls', owner: 'o', repo: 'r', number: 3 }, { env: {} }));
@@ -685,4 +689,50 @@ test('trending parses repo slugs', async () => {
   const entities = (result.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
   assert.equal(entities[0]?.kind, 'repo');
   assert.equal(entities[0]?.full_name, 'octo/kit');
+});
+
+test('D2: single issue appends capped top-level comments to the entity body', async () => {
+  const issue = {
+    id: 9, number: 12, title: 'bug', state: 'open',
+    user: { login: 'octo' }, html_url: 'https://github.com/o/r/issues/12',
+    body: 'details', labels: [], comments: 60,
+  };
+  const calls: string[] = [];
+  const result = await withFetch(async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes('/comments')) {
+      assert.match(url, /per_page=50/);
+      return jsonResponse([
+        { id: 1, user: { login: 'a' }, body: 'first' },
+        { id: 2, user: { login: 'b' }, body: 'second' },
+      ]);
+    }
+    return jsonResponse(issue);
+  }, () => callGithubTool({ action: 'issues', owner: 'o', repo: 'r', number: 12 }, { env: {} }));
+  assert.equal(calls.length, 2, 'exactly one bounded comments call');
+  const entities = (result.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
+  const body = String(entities[0]?.body ?? '');
+  assert.match(body, /Top comments \(showing 2 of 60\)/);
+  assert.match(body, /@a: first/);
+  assert.match(body, /comment list capped at 50/);
+  const warnings = (result.details as { warnings: string[] }).warnings;
+  assert.ok(warnings.some((w) => w.includes('top comments capped at 50')), JSON.stringify(warnings));
+});
+
+test('D2: comments failure degrades to a fixed warning while entity text stands', async () => {
+  const issue = {
+    id: 9, number: 12, title: 'bug', state: 'open',
+    user: { login: 'octo' }, html_url: 'https://github.com/o/r/issues/12', body: 'details',
+  };
+  const result = await withFetch(async (input) => {
+    if (String(input).includes('/comments')) return jsonResponse({ oops: true }, 500);
+    return jsonResponse(issue);
+  }, () => callGithubTool({ action: 'issues', owner: 'o', repo: 'r', number: 12 }, { env: {} }));
+  const entities = (result.details as Record<string, unknown>).entities as Array<Record<string, unknown>>;
+  assert.equal(entities.length, 1);
+  assert.equal(entities[0]?.body, 'details');
+  const warnings = (result.details as { warnings: string[] }).warnings;
+  assert.ok(warnings.some((w) => w.startsWith('top comments unavailable (')));
+  assert.ok(!warnings.join(' ').includes('oops'), 'no upstream echo in warnings');
 });

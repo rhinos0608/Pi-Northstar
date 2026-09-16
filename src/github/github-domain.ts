@@ -860,12 +860,12 @@ async function fetchKeyedList(input: KeyedFetchInput): Promise<{ rows: unknown[]
   return { rows: keyedRows(data, key, message), link };
 }
 
-function singleEntityResult(request: GithubRequest, entities: GithubEntityV1[], supported = true): { page: GithubPageV1; degraded: boolean } {
+function singleEntityResult(request: GithubRequest, entities: GithubEntityV1[], supported = true, warnings: string[] = []): { page: GithubPageV1; degraded: boolean } {
   const page = checkPage({
     entities,
     pagination: { supported, limit: request.limit, returned: entities.length, hasMore: false },
-    partial: false,
-    warnings: [],
+    partial: warnings.length > 0,
+    warnings,
   });
   return { page, degraded: false };
 }
@@ -905,6 +905,118 @@ function isPullFilesRequest(args: Record<string, unknown>, action: string): bool
   return action === 'pulls' && args.files === true;
 }
 
+/**
+ * Top-level comment threads for single issue/pull fetches (D2 v1). One
+ * bounded REST call per fetch: per_page=50, first page only, no cursor
+ * follow-up. The issue-comments endpoint serves pull conversation comments
+ * too; review-inline comments, checks, changed-files, and commits rendering
+ * stay deferred. Errors are fixed safe strings (never URL/body echo); a
+ * failed comments call degrades to a warning while the entity text stands.
+ */
+export const GITHUB_ISSUE_COMMENTS_MAX = 50;
+/** Per-comment excerpt bound inside the appended section. */
+export const GITHUB_ISSUE_COMMENT_CHARS = 700;
+
+interface TopIssueComment {
+  author: string;
+  body: string;
+}
+
+async function fetchTopIssueComments(
+  owner: string,
+  repo: string,
+  number: number,
+  env: Record<string, string | undefined>,
+  signal: AbortSignal | undefined,
+): Promise<TopIssueComment[]> {
+  const url = new URL(`${repoUrl(owner, repo)}/issues/${number}/comments`);
+  url.searchParams.set('per_page', String(GITHUB_ISSUE_COMMENTS_MAX));
+  const { rows } = await fetchList(url.href, env, signal, 'GitHub comments response was not a list');
+  return rows.flatMap((item): TopIssueComment[] => {
+    if (!isRecord(item)) return [];
+    const body = stringField(item, 'body');
+    if (body === undefined || body.trim().length === 0) return [];
+    return [{ author: loginOf(item.user) ?? 'unknown', body }];
+  }).slice(0, GITHUB_ISSUE_COMMENTS_MAX);
+}
+
+/** UTF-8 byte-bound slice that never splits a code point. */
+function sliceUtf8Bytes(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+/**
+ * Append the capped top-level comment section to an issue/pull entity body.
+ * The entity contract gains no field: rendering, snippets, and details flow
+ * through the existing body text. The section fits the remaining entity byte
+ * budget (truncate with marker, omit with warning when the body is at cap).
+ */
+function appendTopCommentsSection(
+  body: string | undefined,
+  comments: TopIssueComment[],
+  total: number | undefined,
+): { body: string | undefined; capped: boolean } {
+  if (comments.length === 0) return { body, capped: false };
+  const shown = total ?? comments.length;
+  const lines = comments.map((comment) => `- @${comment.author}: ${[...comment.body].slice(0, GITHUB_ISSUE_COMMENT_CHARS).join('')}`);
+  let section = `\n\nTop comments (showing ${comments.length} of ${shown}):\n${lines.join('\n')}`;
+  let capped = shown > comments.length;
+  if (capped) section += `\n[comment list capped at ${GITHUB_ISSUE_COMMENTS_MAX}]`;
+  const base = body ?? '';
+  const remaining = GITHUB_ENTITY_CONTENT_MAX - Buffer.byteLength(base, 'utf8');
+  if (remaining <= 0) return { body, capped: true };
+  if (Buffer.byteLength(section, 'utf8') > remaining) {
+    const truncatedMarker = ' [comments truncated at content cap]';
+    const markerBytes = Buffer.byteLength(truncatedMarker, 'utf8');
+    const budget = remaining - markerBytes;
+    section = budget <= 0
+      ? sliceUtf8Bytes(truncatedMarker, remaining)
+      : `${sliceUtf8Bytes(section, budget)}${truncatedMarker}`;
+    capped = true;
+  }
+  return { body: `${base}${section}`, capped };
+}
+
+function commentsFailureWarning(error: unknown): string {
+  const code = error instanceof SocialError ? error.code : 'upstream_error';
+  return `top comments unavailable (${code})`;
+}
+
+/**
+ * Fetch top-level comments for a single issue/pull and append them to the
+ * entity body. Never throws: comments failure degrades to a warning while
+ * the entity text stands. Abort propagates (caller intent, not degradation).
+ */
+async function attachTopIssueComments(
+  entity: GithubEntityV1,
+  owner: string,
+  repo: string,
+  number: number,
+  row: Record<string, unknown>,
+  env: Record<string, string | undefined>,
+  signal: AbortSignal | undefined,
+): Promise<{ warnings: string[] }> {
+  if (entity.kind !== 'issue' && entity.kind !== 'pull') return { warnings: [] };
+  let comments: TopIssueComment[];
+  try {
+    comments = await fetchTopIssueComments(owner, repo, number, env, signal);
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    if (signal?.aborted) throw error;
+    return { warnings: [commentsFailureWarning(error)] };
+  }
+  const total = numberField(row, 'comments');
+  const appended = appendTopCommentsSection(entity.body, comments, total);
+  if (appended.body !== undefined) entity.body = appended.body;
+  const warnings: string[] = [];
+  if (appended.capped) warnings.push(`top comments capped at ${GITHUB_ISSUE_COMMENTS_MAX}`);
+  return { warnings };
+}
+
 async function handleIssues(request: GithubRequest, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
   const owner = request.owner!;
   const repo = request.repo!;
@@ -913,7 +1025,9 @@ async function handleIssues(request: GithubRequest, env: Record<string, string |
     if (isPullRequestRow(data)) {
       throw githubError('invalid_request', `number ${request.number} is a pull request, use pulls action`);
     }
-    return singleEntityResult(request, [normalizeIssue(data, owner, repo)]);
+    const entity = normalizeIssue(data, owner, repo);
+    const comments = await attachTopIssueComments(entity, owner, repo, request.number, data, env, signal);
+    return singleEntityResult(request, [entity], true, comments.warnings);
   }
   const pageNum = pageNumber(request);
   const url = new URL(`${repoUrl(owner, repo)}/issues`);
@@ -959,7 +1073,9 @@ async function handlePulls(request: GithubRequest, args: Record<string, unknown>
   }
   if (request.number !== undefined) {
     const data = await fetchRecord(`${repoUrl(owner, repo)}/pulls/${request.number}`, env, signal, 'GitHub pull response was not an object');
-    return singleEntityResult(request, [normalizePull(data, owner, repo)]);
+    const entity = normalizePull(data, owner, repo);
+    const comments = await attachTopIssueComments(entity, owner, repo, request.number, data, env, signal);
+    return singleEntityResult(request, [entity], true, comments.warnings);
   }
   const pageNum = pageNumber(request);
   const url = new URL(`${repoUrl(owner, repo)}/pulls`);
