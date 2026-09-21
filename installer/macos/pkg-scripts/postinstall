@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fail closed on any dscl error
+trap 'echo "Error: postinstall failed on line $LINENO" >&2; exit 1' ERR
+
+POOL_USERS=("_northstar_pool_1" "_northstar_pool_2" "_northstar_pool_3" "_northstar_pool_4")
+BASE_UID=451
+POOL_GROUP="_northstar_pool"
+POOL_GID=450
+
+# Dedicated hidden pool group (not staff): isolates workers from default group 20
+if dscl . -read "/Groups/$POOL_GROUP" >/dev/null 2>&1; then
+  existing_gid=$(dscl . -read "/Groups/$POOL_GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}' || true)
+  if [ "${existing_gid:-}" = "$POOL_GID" ]; then
+    echo "Pool group $POOL_GROUP already exists with expected GID $POOL_GID, reusing"
+  else
+    echo "Error: pool group $POOL_GROUP exists with unexpected GID '${existing_gid:-missing}' (expected $POOL_GID)" >&2
+    exit 1
+  fi
+else
+  echo "Creating pool group: $POOL_GROUP (GID: $POOL_GID)"
+  dscl . -create "/Groups/$POOL_GROUP"
+  dscl . -create "/Groups/$POOL_GROUP" RealName "Northstar Worker Pool"
+  dscl . -create "/Groups/$POOL_GROUP" PrimaryGroupID "$POOL_GID"
+  dscl . -create "/Groups/$POOL_GROUP" IsHidden 1
+fi
+
+for idx in "${!POOL_USERS[@]}"; do
+  username="${POOL_USERS[$idx]}"
+  uid=$((BASE_UID + idx))
+
+  # Skip existing accounts idempotently
+  if dscl . -read "/Users/$username" >/dev/null 2>&1; then
+    echo "Account $username already exists, enforcing pool group"
+    dscl . -create "/Users/$username" PrimaryGroupID "$POOL_GID"
+  else
+    echo "Creating isolated pool account: $username (UID: $uid)"
+    dscl . -create "/Users/$username"
+    dscl . -create "/Users/$username" UserShell /usr/bin/false
+    dscl . -create "/Users/$username" RealName "Northstar Worker Pool $idx"
+    dscl . -create "/Users/$username" UniqueID "$uid"
+    dscl . -create "/Users/$username" PrimaryGroupID "$POOL_GID"
+    dscl . -create "/Users/$username" NFSHomeDirectory /var/empty
+    dscl . -create "/Users/$username" IsHidden 1
+  fi
+done
+
+# Ensure accounts are hidden from login window
+LOGINWINDOW_PLIST="/Library/Preferences/com.apple.loginwindow"
+for username in "${POOL_USERS[@]}"; do
+  # Read existing HiddenUsersList or append
+  if ! defaults read "$LOGINWINDOW_PLIST" HiddenUsersList 2>/dev/null | grep -q "$username"; then
+    echo "Hiding $username from loginwindow"
+    defaults write "$LOGINWINDOW_PLIST" HiddenUsersList -array-add "$username" || true
+  fi
+done
+
+# Ensure log directory exists
+mkdir -p /var/log/northstar
+chmod 0755 /var/log/northstar
+
+# Load launchd daemon
+PLIST_SRC="/Library/LaunchDaemons/com.pi.northstar.broker.plist"
+if [ -f "$PLIST_SRC" ]; then
+  echo "Configuring launchd daemon $PLIST_SRC"
+  chown root:wheel "$PLIST_SRC"
+  chmod 0644 "$PLIST_SRC"
+
+  # Unload if currently loaded
+  launchctl bootout system/com.pi.northstar.broker 2>/dev/null || launchctl unload "$PLIST_SRC" 2>/dev/null || true
+
+  # Load and start
+  launchctl bootstrap system "$PLIST_SRC" 2>/dev/null || launchctl load -w "$PLIST_SRC"
+fi
+
+echo "Northstar postinstall completed successfully."
+exit 0

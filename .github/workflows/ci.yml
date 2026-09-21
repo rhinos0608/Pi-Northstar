@@ -14,13 +14,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run build
       - run: node --import tsx --test --test-timeout=30000 "test/**/*.test.ts"
         # Pin bash on all three OS: the quoted glob must reach node's own
         # glob expansion unexpanded (pwsh/cmd would split or expand it).
@@ -35,8 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
           cache: pip
@@ -74,10 +75,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
       - run: npm pack --json
       - name: Install tarball into empty directory and invoke packaged CLI
         run: |
@@ -87,7 +90,7 @@ jobs:
           cd /tmp/pack-smoke
           rm -rf node_modules package.json package-lock.json
           npm init -y >/dev/null
-          npm install --no-audit --no-fund "$TARBALL"
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL"
           ./node_modules/.bin/pi-northstar status
           ./node_modules/.bin/pi-northstar config
         shell: bash

@@ -116,115 +116,41 @@ test('runCommand rejects unknown commands', async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(result.error, {
     code: 'unknown_command',
-    message: 'Usage: pi-northstar <status|config|call TOOL JSON_ARGS>',
+    message: 'Usage: northstar <github|research|social|media|kg|graph|fetch|search|domains|capabilities|status|config|version>',
   });
 });
 
-test('runCommand validates call args', async () => {
-  const result = await runCommand(['call', 'web_search', '[]'], {});
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error?.code, 'invalid_args');
-});
-
-test('runCommand routes call through native tools', async () => {
-  const result = await runCommand(['call', 'browse', '{"action":"read","url":"file:///etc/passwd"}'], {});
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error?.code, 'tool_error');
-  assert.match(result.error?.message ?? '', /Disallowed URL scheme/);
-});
-
-test('runCommand supports public browse tool alias', async () => {
-  const result = await runCommand(['call', 'browse', '{"url":"file:///etc/passwd"}'], {});
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error?.code, 'tool_error');
-  assert.match(result.error?.message ?? '', /Disallowed URL scheme/);
-});
-
-test('runCommand supports reach_status family', async () => {
-  const result = await runCommand(['call', 'reach_status', '{"family":"media"}'], {});
-
-  assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /native-rss-atom/);
-});
-
-test('runCommand supports reach_setup plan', async () => {
-  const result = await runCommand(['call', 'reach_setup', '{"action":"plan"}'], {});
-
-  assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /OpenCLI/);
-  assert.match(JSON.stringify(result.data), /twitter/);
-});
-
-test('runCommand returns descriptor for setup install', async () => {
-  const result = await runCommand(['call', 'reach_setup', '{"action":"install_all"}'], { PI_SEARCH_ALLOW_INSTALL: '0' });
-
-  assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /descriptor/);
-  assert.match(JSON.stringify(result.data), /Installation disabled/);
-});
-
-test('runCommand browser cookie import honors automation opt-out', async () => {
-  const result = await runCommand(['call', 'reach_setup', '{"action":"import_cookies"}'], { PI_SEARCH_BROWSER_AUTOMATION: '0' });
-
-  assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /disabled/);
-});
-
-test('runCommand import_cookies provider honors browser automation opt-out', async () => {
+test('public call rejects even when the former debug gate is enabled', async () => {
   const result = await runCommand(
-    ['call', 'reach_setup', '{"action":"import_cookies","provider":"facebook"}'],
-    { PI_SEARCH_BROWSER_AUTOMATION: '0' },
+    ['call', 'github', '{}'],
+    { PI_NORTHSTAR_ALLOW_DEBUG_CALL: '1' },
   );
 
-  assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /disabled/);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'unsupported_command');
 });
 
-test('runCommand login provider honors browser automation opt-out', async () => {
-  const result = await runCommand(
-    ['call', 'reach_setup', '{"action":"login","provider":"facebook","port":9222}'],
-    { PI_SEARCH_BROWSER_AUTOMATION: '0' },
-  );
 
-  assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /Browser automation disabled/);
-});
 
-test('runCommand reach_setup status reports live env presence', async () => {
-  const result = await runCommand(['call', 'reach_setup', '{"action":"status"}'], { GITHUB_TOKEN: 'ghp_test_val', EXA_API_KEY: 'exa_test_val' });
 
-  assert.equal(result.ok, true);
-  const text = JSON.stringify(result.data);
 
-  // liveProviders section present
-  assert.match(text, /liveProviders/);
 
-  // github shows configured with key name
-  assert.match(text, /GITHUB_TOKEN/);
 
-  // No values leaked
-  assert.doesNotMatch(text, /ghp_test_val/);
-  assert.doesNotMatch(text, /exa_test_val/);
 
-  // authDir present
-  assert.match(text, /\.pi-northstar/);
-});
 
-test('runCommand reach_status includes auth metadata per channel', async () => {
-  const result = await runCommand(['call', 'reach_status', '{"family":"media"}'], { GITHUB_TOKEN: 'dummy' });
 
-  assert.equal(result.ok, true);
-  const text = JSON.stringify(result.data);
 
-  // auth field present on channel objects
-  assert.match(text, /"auth"/);
 
-  // rss channel should have configured=false (zero-config, no env keys)
-  // but auth field present with loginFlow, cookieDomains, risk
-});
+
+
+
+
+
+
+
+
+
+
 
 test('cliToolError passes every SocialError code through with context', () => {
   const codes: SocialErrorCode[] = [
@@ -264,8 +190,44 @@ test('cliToolError omits absent platform/backend and keeps plain Error as tool_e
   assert.doesNotMatch(payload, /http/);
 });
 
-test('runCommand surfaces SocialError codes instead of collapsing to tool_error', async () => {
-  const result = await runCommand(['call', 'github', '{"action":"bogus"}'], {});
+test('CLI help output lists broker serve and jobs status', async () => {
+  const result = await runCommand(['--help'], {});
+  assert.equal(result.ok, true);
+  const commands = (result.data as { commands: string[] }).commands;
+  assert.ok(
+    commands.some((cmd) => cmd.includes('northstar broker serve')),
+    'help commands must list broker serve',
+  );
+  assert.ok(
+    commands.some((cmd) => cmd.includes('northstar jobs status')),
+    'help commands must list jobs status',
+  );
+
+  const brokerHelp = await runCommand(['broker', '--help'], {});
+  assert.equal(brokerHelp.ok, true);
+  assert.equal((brokerHelp.data as { commandId: string }).commandId, 'broker.serve');
+
+  const jobsHelp = await runCommand(['jobs', '--help'], {});
+  assert.equal(jobsHelp.ok, true);
+  assert.equal((jobsHelp.data as { commandId: string }).commandId, 'jobs.status');
+});
+
+test('dispatch routes jobs status with bad args to validation failure without spawning', async () => {
+  const missingArgs = await runCommand(['jobs', 'status'], {});
+  assert.equal(missingArgs.ok, false);
+  assert.equal(missingArgs.error?.code, 'invalid_usage');
+
+  const invalidReq = await runCommand(['jobs', 'status', '--project-id', 'p1', '--request-id', 'bad$char', '--json'], {});
+  assert.equal(invalidReq.ok, false);
+  const parsed = JSON.parse(invalidReq.data as string) as { outcome: string; error?: { code: string } };
+  assert.equal(parsed.outcome, 'failed');
+  assert.equal(parsed.error?.code, 'invalid_input');
+});
+
+test('broker serve with invalid projectId fails without touching the host', async () => {
+  const result = await runCommand(['broker', 'serve', '--project-id', '../escape', '--json'], {});
   assert.equal(result.ok, false);
-  assert.equal(result.error?.code, 'unsupported_action');
+  const parsed = JSON.parse(result.data as string) as { outcome: string; error?: { code: string } };
+  assert.equal(parsed.outcome, 'failed');
+  assert.equal(parsed.error?.code, 'invalid_input');
 });

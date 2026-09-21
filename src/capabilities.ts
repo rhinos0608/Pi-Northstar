@@ -14,16 +14,8 @@ import { SOCIAL_CANONICAL_ACTIONS as STAGE2_CANONICAL_ACTIONS } from './social/s
 
 export type ReachFamily = 'social' | 'media' | 'web' | 'dev' | 'research' | 'browser';
 
-export type PublicToolName =
-  | 'web_search'
-  | 'fetch'
-  | 'github'
-  | 'social'
-  | 'kg'
-  | 'graph'
-  | 'browser'
-  | 'desktop'
-  | 'agent_poll';
+export const PUBLIC_TOOL_NAMES = ['web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent_poll'] as const;
+export type PublicToolName = typeof PUBLIC_TOOL_NAMES[number];
 
 /** Registry marker for internal-acquisition channels with no public tool surface. */
 export type InternalAcquisitionName = 'internal-acquisition';
@@ -31,6 +23,28 @@ export type InternalAcquisitionName = 'internal-acquisition';
 /** Public surface budget: at most nine model-facing tools. Future domains
  *  require profiles or retrieval/describe redesign, not silent growth. */
 export const MAX_PUBLIC_TOOLS = 9 as const;
+
+/** Operator-owned native-tool allowlist. Blank/unset means no public native tools. */
+export const PUBLIC_TOOL_ALLOWLIST_ENV_VAR = 'PI_SEARCH_NATIVE_TOOLS' as const;
+
+/** Parse exact comma-separated canonical tool names; reject legacy/internal/unknown names. */
+export function parsePublicToolAllowlist(env: Record<string, string | undefined> = process.env): readonly PublicToolName[] {
+  const raw = env[PUBLIC_TOOL_ALLOWLIST_ENV_VAR];
+  if (raw === undefined || raw.trim() === '') return [];
+  if (raw !== raw.trim() || !/^[a-z_]+(?:,[a-z_]+)*$/.test(raw)) {
+    throw new Error(`${PUBLIC_TOOL_ALLOWLIST_ENV_VAR} must be a comma-separated list of canonical tool names`);
+  }
+  const names = raw.split(',') as PublicToolName[];
+  const canonical = new Set<string>(PUBLIC_TOOL_NAMES);
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (!canonical.has(name)) throw new Error(`${PUBLIC_TOOL_ALLOWLIST_ENV_VAR} contains unknown tool '${name}'`);
+    if (seen.has(name)) throw new Error(`${PUBLIC_TOOL_ALLOWLIST_ENV_VAR} contains duplicate tool '${name}'`);
+    seen.add(name);
+  }
+  assertPublicToolBudget(names);
+  return names;
+}
 
 /** Fail-closed budget gate: throws when registration exceeds MAX_PUBLIC_TOOLS. */
 export function assertPublicToolBudget(toolNames: readonly string[]): void {

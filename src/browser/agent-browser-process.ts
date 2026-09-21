@@ -6,6 +6,17 @@ import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { platform } from 'node:os';
 import { resolveCliCommand, spawnCliCommand, windowsPathValue } from '../process/cli-command.js';
+import { assertDriverTrusted, loadBundledManifest, type ArtifactManifest } from '../desktop/driver-manifest.js';
+
+let cachedAgentBrowserManifest: ArtifactManifest | undefined;
+let agentBrowserManifestLoaded = false;
+function getBundledAgentBrowserManifest(): ArtifactManifest | undefined {
+  if (agentBrowserManifestLoaded) return cachedAgentBrowserManifest;
+  cachedAgentBrowserManifest = loadBundledManifest();
+  agentBrowserManifestLoaded = true;
+  return cachedAgentBrowserManifest;
+}
+
 
 // ── Types ──
 
@@ -262,7 +273,16 @@ export function spawnAgentBrowser(
   args: readonly string[],
   options: SpawnOptions & { platform?: NodeJS.Platform } = {},
 ): ChildProcessByStdio<Writable, Readable, Readable> {
+  // Gate B Slice 10: verify driver binary against artifact manifest before spawn.
+  // Verify-if-enrolled: missing manifest or unenrolled entry skips gate silently; enrolled mismatch throws before spawn.
   const targetPlatform = options.platform ?? process.platform;
+  const manifest = getBundledAgentBrowserManifest();
+  if (manifest) {
+    const platformArch = `${targetPlatform}-${process.arch}`;
+    assertDriverTrusted(manifest, 'agent-browser', platformArch, executablePath);
+  }
+
+
   if (targetPlatform === 'win32' && /\.(?:js|cjs|mjs)$/i.test(executablePath)) {
     return spawnCliCommand(process.execPath, [executablePath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],

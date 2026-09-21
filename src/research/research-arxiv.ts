@@ -28,7 +28,7 @@ export const ARXIV_ENDPOINT = 'https://export.arxiv.org/api/query';
 
 const MAX_OFFSET = 99_000; // arXiv API caps start+max_results at 100_000.
 
-function cleanXml(text: string | undefined): string {
+export function cleanXml(text: string | undefined): string {
   return (text ?? '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&lt;/g, '<')
@@ -39,7 +39,7 @@ function cleanXml(text: string | undefined): string {
     .trim();
 }
 
-interface ArxivEntry {
+export interface ArxivEntry {
   title: string;
   id: string;
   summary: string;
@@ -47,7 +47,7 @@ interface ArxivEntry {
   published: string | undefined;
 }
 
-function parseEntries(xml: string): { entries: ArxivEntry[]; total: number | undefined; dropped: number } {
+export function parseEntries(xml: string): { entries: ArxivEntry[]; total: number | undefined; dropped: number } {
   const entries: ArxivEntry[] = [];
   let dropped = 0;
   const totalRaw = /opensearch:totalResults[^>]*>(\d+)</.exec(xml)?.[1];

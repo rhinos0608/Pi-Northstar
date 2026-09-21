@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { commandHandler, commandSurface } from '../../src/commands/command-registry.js';
+
+test('registry exposes github.file and rejects unknown commands', () => {
+  assert.ok(commandSurface().includes('github.file'));
+  assert.ok(commandSurface().includes('social.search'));
+  assert.ok(commandSurface().includes('social.read'));
+  assert.ok(commandSurface().includes('media.details'));
+  assert.ok(commandSurface().includes('media.transcript'));
+  assert.ok(commandSurface().includes('media.feed'));
+  assert.ok(commandSurface().includes('kg.search'));
+  assert.ok(commandSurface().includes('kg.enhance'));
+  assert.ok(commandSurface().includes('graph.query'));
+  assert.ok(commandSurface().includes('graph.probe'));
+  assert.ok(commandSurface().includes('fetch.read'));
+  assert.ok(commandSurface().includes('search.web'));
+  assert.equal(commandHandler('social.search').commandId, 'social.search');
+  assert.equal(commandHandler('social.read').commandId, 'social.read');
+  assert.equal(commandHandler('media.details').commandId, 'media.details');
+  assert.equal(commandHandler('media.transcript').commandId, 'media.transcript');
+  assert.equal(commandHandler('media.feed').commandId, 'media.feed');
+  assert.equal(commandHandler('kg.search').commandId, 'kg.search');
+  assert.equal(commandHandler('kg.enhance').commandId, 'kg.enhance');
+  assert.equal(commandHandler('graph.query').commandId, 'graph.query');
+  assert.equal(commandHandler('graph.probe').commandId, 'graph.probe');
+  assert.equal(commandHandler('fetch.read').commandId, 'fetch.read');
+  assert.equal(commandHandler('search.web').commandId, 'search.web');
+  assert.equal(commandHandler('github.file').commandId, 'github.file');
+  assert.throws(() => commandHandler('github.unknown'), /unknown command/);
+});

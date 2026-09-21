@@ -360,3 +360,20 @@ test('plan ordering prefers complete full-quality cursor-capable plans', () => {
   assert.equal(ordered[1]?.backend, 'youtube-data-api');
   assert.equal(ordered[ordered.length - 1]?.backend, 'youtube-oembed');
 });
+
+// ── Phase 4 Slice 1: reject-before-dispatch hardening ──
+
+test('validateMediaRequest rejects unknown fields instead of silently dropping them', () => {
+  mediaError('invalid_request', () =>
+    validateMediaRequest({ channel: 'youtube', action: 'search', query: 'cats', cursor: 'abc' } as unknown as never),
+  );
+  mediaError('invalid_request', () =>
+    validateMediaRequest({ channel: 'youtube', action: 'search', query: 'cats', backend: 'b' } as unknown as never),
+  );
+});
+
+test('validateMediaRequest rejects non-object input with invalid_request', () => {
+  for (const bad of [null, undefined, 'x', 42, []] as unknown as never[]) {
+    mediaError('invalid_request', () => validateMediaRequest(bad as never));
+  }
+});

@@ -787,3 +787,54 @@ test('facade re-exports the full 66-export surface without drift', () => {
     assert.ok(name in facade, `facade missing runtime export ${name}`);
   }
 });
+
+// ── Phase 4 Slice 1: reject-before-dispatch hardening ──
+
+test('validateSocialRequest rejects unknown fields instead of silently dropping them', () => {
+  socialError('invalid_request', () =>
+    validateSocialRequest({ platform: 'twitter', action: 'search', query: 'x', cursor: 'abc' } as unknown as never),
+  );
+  socialError('invalid_request', () =>
+    validateSocialRequest({ platform: 'twitter', action: 'search', query: 'x', backend: 'b' } as unknown as never),
+  );
+});
+
+test('validateSocialRequest rejects non-object input with invalid_request', () => {
+  for (const bad of [null, undefined, 'x', 42, []] as unknown as never[]) {
+    socialError('invalid_request', () => validateSocialRequest(bad as never));
+  }
+});
+
+test('rejection echoes are capped and never carry unbounded input', () => {
+  const longPlatform = `gab-${'y'.repeat(100)}`;
+  const platformError = socialError('invalid_request', () =>
+    validateSocialRequest({ platform: longPlatform, action: 'search', query: 'x' }),
+  );
+  assert.ok(!platformError.message.includes(longPlatform));
+  assert.ok(platformError.message.includes(longPlatform.slice(0, 32)));
+
+  const longAction = `nope-${'x'.repeat(100)}`;
+  const actionError = socialError('unsupported_action', () => resolveSocialAction('twitter', longAction));
+  assert.ok(!actionError.message.includes(longAction));
+  assert.ok(actionError.message.includes(longAction.slice(0, 32)));
+
+  const longSort = `bogus-${'z'.repeat(100)}`;
+  const sortError = socialError('invalid_request', () =>
+    validateSocialRequest({ platform: 'reddit', action: 'search', query: 'rust', sort: longSort }),
+  );
+  assert.ok(!sortError.message.includes(longSort));
+
+  const longPath = `/${'a'.repeat(500)}`;
+  const pathError = socialError('invalid_request', () =>
+    extractSelectorsFromUrl('twitter', `https://twitter.com${longPath}`),
+  );
+  assert.ok(!pathError.message.includes('a'.repeat(500)));
+});
+
+test('write boundary rejects unknown top-level fields without echo', async () => {
+  const { validateSocialWriteRequest } = await import('../../src/social/social-write-contract.js');
+  const error = socialError('invalid_request', () =>
+    validateSocialWriteRequest({ platform: 'twitter', action: 'like', postId: 'p1', cursor: 'abc' } as unknown as never),
+  );
+  assert.ok(!error.message.includes('abc'));
+});

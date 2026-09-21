@@ -51,6 +51,33 @@ test('callNativeTool rejects unsupported tools', async () => {
   );
 });
 
+test('native github.file guards content while preserving handler details', async () => {
+  const original = globalThis.fetch;
+  const source = 'github native file output '.repeat(100);
+  globalThis.fetch = (async (input) => {
+    assert.match(String(input), /^https:\/\/api\.github\.com\/repos\/octo\/kit\/contents\/(README|SECOND)\.md$/);
+    return new Response(JSON.stringify({
+      path: 'README.md',
+      content: Buffer.from(source).toString('base64'),
+      encoding: 'base64',
+      size: source.length,
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const result = await callNativeTool('github', { action: 'file', owner: 'octo', repo: 'kit', paths: ['README.md', 'SECOND.md'] }, {
+      env: { PI_SEARCH_MAX_TOOL_OUTPUT_CHARS: '1000' },
+    });
+    const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+    assert.match(text, /\[context guard: output truncated,/);
+    const details = result.details as { northstarCommand?: { commandId?: string }; entities?: Array<{ content?: string }> };
+    assert.equal(details.northstarCommand?.commandId, 'github.file');
+    assert.equal(details.entities?.length, 2);
+    assert.equal(details.entities?.[0]?.content, source);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('native browse rejects localhost and private URLs — SSRF defense-in-depth', async () => {
   const { validatePublicHttpUrl } = await import('../src/core/http.js');
   assert.throws(() => validatePublicHttpUrl('http://localhost:3000'), /Blocked hostname/);
@@ -73,7 +100,7 @@ test('native browse rejects IPv6 link-local, ULAs, and mapped loopback', async (
   assert.throws(() => validatePublicHttpUrl('http://0.1.2.3/'), /Private\/reserved/);
 });
 
-test('social and video wrappers reject non-http URL schemes', async () => {
+test('social and media wrappers reject non-http URL schemes', async () => {
   const { validatePublicHttpUrl } = await import('../src/core/http.js');
   assert.equal(validatePublicHttpUrl('https://twitter.com/tweet/1'), 'https://twitter.com/tweet/1');
   assert.throws(() => validatePublicHttpUrl('file:///tmp/tweet'), /scheme/);
@@ -116,9 +143,9 @@ test('social external wrappers reject non-http URL schemes', async () => {
   );
 });
 
-test('video external wrappers reject non-http URL schemes', async () => {
+test('media external wrappers reject non-http URL schemes', async () => {
   await assert.rejects(
-    () => callNativeTool('video', { platform: 'youtube', action: 'details', url: 'file:///tmp/video' }),
+    () => callNativeTool('media', { platform: 'youtube', action: 'details', url: 'file:///tmp/video' }),
     /Disallowed URL scheme/,
   );
 });
@@ -528,7 +555,7 @@ test('youtube: Data API search used when YOUTUBE_API_KEY set', async () => {
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
-    const result = await callNativeTool('video', { platform: 'youtube', action: 'search', query: 'test', limit: 3 }, {
+    const result = await callNativeTool('media', { platform: 'youtube', action: 'search', query: 'test', limit: 3 }, {
       env: { YOUTUBE_API_KEY: 'yt-key-1' },
     });
     const text = JSON.stringify(result.details);
@@ -550,7 +577,7 @@ test('youtube: Data API details normalized for single video', async () => {
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
-    const result = await callNativeTool('video', { platform: 'youtube', action: 'details', id: 'vid9' }, {
+    const result = await callNativeTool('media', { platform: 'youtube', action: 'details', id: 'vid9' }, {
       env: { YOUTUBE_API_KEY: 'k' },
     });
     const text = JSON.stringify(result.details);
@@ -571,7 +598,7 @@ test('youtube: hot maps to official mostPopular chart when key set', async () =>
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
-    const result = await callNativeTool('video', { platform: 'youtube', action: 'hot', limit: 5 }, {
+    const result = await callNativeTool('media', { platform: 'youtube', action: 'hot', limit: 5 }, {
       env: { YOUTUBE_API_KEY: 'k' },
     });
     assert.match(JSON.stringify(result.details), /Popular Now/);
@@ -590,7 +617,7 @@ test('youtube: oEmbed used as keyless details fallback when no key', async () =>
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
-    const result = await callNativeTool('video', { platform: 'youtube', action: 'details', url: 'https://www.youtube.com/watch?v=oemb1' }, { env: {} });
+    const result = await callNativeTool('media', { platform: 'youtube', action: 'details', url: 'https://www.youtube.com/watch?v=oemb1' }, { env: {} });
     const text = JSON.stringify(result.details);
     assert.match(text, /youtube-oembed/);
     assert.match(text, /OEmbed Video/);
@@ -605,7 +632,7 @@ test('youtube: API key never appears in errors or output', async () => {
   let observed = '';
   try {
     await withFetch(async () => new Response('Bad Request', { status: 400 }), () =>
-      callNativeTool('video', { platform: 'youtube', action: 'search', query: 'test' }, { env: { YOUTUBE_API_KEY: key } }),
+      callNativeTool('media', { platform: 'youtube', action: 'search', query: 'test' }, { env: { YOUTUBE_API_KEY: key } }),
     );
   } catch (err) {
     observed = String(err);
@@ -635,7 +662,7 @@ test('youtube: transcript uses the unofficial watch-page path, never yt-dlp or t
         return new Response('<transcript><text start="0" dur="2">clip line</text></transcript>', { status: 200 });
       }
       throw new Error(`unexpected fetch ${input}`);
-    }, () => callNativeTool('video', { platform: 'youtube', action: 'transcript', url: 'https://www.youtube.com/watch?v=x' }, { env: { PATH: dir, YOUTUBE_API_KEY: 'k' } }));
+    }, () => callNativeTool('media', { platform: 'youtube', action: 'transcript', url: 'https://www.youtube.com/watch?v=x' }, { env: { PATH: dir, YOUTUBE_API_KEY: 'k' } }));
     const details = result.details as { backend?: string; items?: Array<{ kind?: string; videoId?: string; segments?: Array<{ text?: string }> }> };
     assert.equal(details.backend, 'youtube-transcript');
     assert.equal(details.items?.[0]?.kind, 'video_transcript');
@@ -651,7 +678,7 @@ test('youtube: search without key errors clearly, no yt-dlp invocation', async (
   const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-yt-nokey-'));
   try {
     await assert.rejects(
-      callNativeTool('video', { platform: 'youtube', action: 'search', query: 'test' }, { env: { PATH: dir } }),
+      callNativeTool('media', { platform: 'youtube', action: 'search', query: 'test' }, { env: { PATH: dir } }),
       (err: unknown) => err instanceof Error && /YOUTUBE_API_KEY/.test(err.message) && !/yt-dlp/.test(err.message),
     );
   } finally {
@@ -680,7 +707,7 @@ test('youtube details: canonical youtu.be short URL video ID used for Data API',
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
-    const result = await callNativeTool('video', { platform: 'youtube', action: 'details', url: 'https://youtu.be/abc123defgh' }, {
+    const result = await callNativeTool('media', { platform: 'youtube', action: 'details', url: 'https://youtu.be/abc123defgh' }, {
       env: { YOUTUBE_API_KEY: 'k' },
     });
     assert.match(JSON.stringify(result.details), /Short Link Video/);
@@ -732,7 +759,7 @@ test('youtube details: keyed Data API failure falls back to keyless oEmbed, key 
       return jsonResponse(JSON.stringify({ title: 'OEmbed title', author_name: 'Auth', thumbnail_url: 'https://i.ytimg.com/x.jpg' }));
     }
     throw new Error(`unexpected fetch ${url}`);
-  }, () => callNativeTool('video', { platform: 'youtube', action: 'details', url: 'https://www.youtube.com/watch?v=abc123' }, {
+  }, () => callNativeTool('media', { platform: 'youtube', action: 'details', url: 'https://www.youtube.com/watch?v=abc123' }, {
     env: { YOUTUBE_API_KEY: 'supersecretkey' },
   }));
   const text = JSON.stringify(result.details);
@@ -752,7 +779,7 @@ test('youtube details: keyed Data API empty result falls back to keyless oEmbed'
       return jsonResponse(JSON.stringify({ title: 'Empty fallback', author_name: 'A' }));
     }
     throw new Error(`unexpected fetch ${url}`);
-  }, () => callNativeTool('video', { platform: 'youtube', action: 'details', url: 'https://www.youtube.com/watch?v=empty1' }, {
+  }, () => callNativeTool('media', { platform: 'youtube', action: 'details', url: 'https://www.youtube.com/watch?v=empty1' }, {
     env: { YOUTUBE_API_KEY: 'k' },
   }));
   assert.match(JSON.stringify(result.details), /youtube-oembed/);
@@ -865,7 +892,7 @@ test('youtube Data API: redirect is rejected, never followed cross-host, key sta
         return new Response('', { status: 302, headers: { location: 'https://evil.example/search' } });
       }
       throw new Error(`unexpected fetch ${url}`);
-    }, () => callNativeTool('video', { platform: 'youtube', action: 'search', query: 'test' }, {
+    }, () => callNativeTool('media', { platform: 'youtube', action: 'search', query: 'test' }, {
       env: { YOUTUBE_API_KEY: secretKey },
     })),
     (err: unknown) => {
@@ -886,7 +913,7 @@ test('youtube details: video ID is only extracted from canonical YouTube hosts',
       withFetch(async () => {
         apiCalled = true;
         return jsonResponse('{}');
-      }, () => callNativeTool('video', { platform: 'youtube', action: 'details', url }, {
+      }, () => callNativeTool('media', { platform: 'youtube', action: 'details', url }, {
         env: { YOUTUBE_API_KEY: 'key' },
       })),
       /youtube details require id or url/,
@@ -942,7 +969,7 @@ test('youtube details: keyed API 401/403 fails closed', async () => {
         if (url.startsWith('https://www.youtube.com/oembed')) { oEmbedCalled = true; return new Response('noembed', { status: 404 }); }
         if (url.startsWith('https://www.googleapis.com/youtube/v3/videos')) return new Response('denied', { status });
         throw new Error(`unexpected fetch ${url}`);
-      }, () => callNativeTool('video', { platform: 'youtube', action: 'details', id: 'vidX' }, {
+      }, () => callNativeTool('media', { platform: 'youtube', action: 'details', id: 'vidX' }, {
         env: { YOUTUBE_API_KEY: 'k' },
       })),
       new RegExp(`HTTP ${status}`),
@@ -961,7 +988,7 @@ test('youtube details: keyless oEmbed rejects arbitrary and lookalike URLs befor
           return jsonResponse('{}');
         }
         throw new Error(`unexpected fetch ${String(input)}`);
-      }, () => callNativeTool('video', { platform: 'youtube', action: 'details', url }, { env: {} })),
+      }, () => callNativeTool('media', { platform: 'youtube', action: 'details', url }, { env: {} })),
       /canonical youtube\.com/,
     );
     assert.equal(oEmbedCalled, false, `no oEmbed call for non-canonical URL: ${url}`);

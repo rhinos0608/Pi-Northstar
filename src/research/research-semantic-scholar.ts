@@ -31,10 +31,10 @@ export const SEMANTIC_SCHOLAR_SOURCE = 'semantic_scholar';
 export const SEMANTIC_SCHOLAR_BACKEND = 'semantic-scholar-api';
 export const SEMANTIC_SCHOLAR_ENDPOINT = 'https://api.semanticscholar.org/graph/v1/paper/search';
 
-const FIELDS = 'paperId,title,abstract,year,venue,authors,externalIds,citationCount';
+export const FIELDS = 'paperId,title,abstract,year,venue,authors,externalIds,citationCount';
 const MAX_OFFSET = 9999; // S2 relevance search caps offset+limit at 10,000.
 
-function mapRow(row: Record<string, unknown>): unknown {
+export function mapSemanticScholarRow(row: Record<string, unknown>): unknown {
   const externalIds = researchRecord(row.externalIds);
   const doi = researchString(externalIds?.DOI);
   const paperId = researchString(row.paperId);
@@ -58,6 +58,8 @@ function mapRow(row: Record<string, unknown>): unknown {
     citations: typeof row.citationCount === 'number' ? row.citationCount : undefined,
   };
 }
+
+const mapRow = mapSemanticScholarRow;
 
 function invalidResponseEnvelope(
   request: Parameters<typeof buildAdapterEnvelope>[0]['request'],

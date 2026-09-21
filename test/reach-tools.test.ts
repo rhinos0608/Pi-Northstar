@@ -450,12 +450,12 @@ test('reach_status: OAuth backend id is reddit-oauth and cannot claim feed/saved
   }
 });
 
-test('video: unlisted registry candidates are never spawned (fail closed)', async () => {
+test('media: unlisted registry candidates are never spawned (fail closed)', async () => {
   const dir = await withExecutableDir();
   try {
     await writeShim(dir, 'bili', '#!/bin/sh\necho \'{"items":[]}\'\n');
     await assert.rejects(
-      () => callNativeTool('video', { platform: 'bilibili', action: 'transcript', id: 'x' }, { env: { PATH: dir } }),
+      () => callNativeTool('media', { platform: 'bilibili', action: 'transcript', id: 'x' }, { env: { PATH: dir } }),
       (err: unknown) => err instanceof Error && /No usable bilibili backend/.test(err.message),
     );
   } finally {
@@ -463,12 +463,12 @@ test('video: unlisted registry candidates are never spawned (fail closed)', asyn
   }
 });
 
-test('video: legacy bilibili video spelling is unsupported_action', async () => {
+test('media: legacy bilibili video spelling is unsupported_action', async () => {
   const dir = await withExecutableDir();
   try {
     await writeShim(dir, 'bili', '#!/bin/sh\necho \'{"items":[]}\'\n');
     await assert.rejects(
-      () => callNativeTool('video', { platform: 'bilibili', action: 'video', id: 'x' }, { env: { PATH: dir } }),
+      () => callNativeTool('media', { platform: 'bilibili', action: 'video', id: 'x' }, { env: { PATH: dir } }),
       (err: unknown) => err instanceof Error && err.name === 'SocialError' && /Unsupported bilibili action: video/.test(err.message),
     );
   } finally {
@@ -590,11 +590,11 @@ test('probe env carries no credentials for any command (cookie/token hygiene)', 
 
 test('youtube search/hot without key fail closed (never scrape)', async () => {
   await assert.rejects(
-    () => callNativeTool('video', { platform: 'youtube', action: 'search', query: 'cats' }, { env: { PATH: '/nonexistent' } }),
+    () => callNativeTool('media', { platform: 'youtube', action: 'search', query: 'cats' }, { env: { PATH: '/nonexistent' } }),
     /YOUTUBE_API_KEY/,
   );
   await assert.rejects(
-    () => callNativeTool('video', { platform: 'youtube', action: 'hot' }, { env: { PATH: '/nonexistent' } }),
+    () => callNativeTool('media', { platform: 'youtube', action: 'hot' }, { env: { PATH: '/nonexistent' } }),
     /YOUTUBE_API_KEY/,
   );
 });
@@ -602,7 +602,7 @@ test('youtube search/hot without key fail closed (never scrape)', async () => {
 test('media legacy subtitle spelling is unsupported_action with no echo', async () => {
   for (const platform of ['youtube', 'bilibili']) {
     await assert.rejects(
-      () => callNativeTool('video', { platform, action: 'subtitle', query: 'super-secret-query-value' }, { env: { PATH: '/nonexistent' } }),
+      () => callNativeTool('media', { platform, action: 'subtitle', query: 'super-secret-query-value' }, { env: { PATH: '/nonexistent' } }),
       (err: unknown) => {
         assert.ok(err instanceof Error);
         assert.match(err.message, new RegExp(`Unsupported ${platform} action: subtitle`));
@@ -616,7 +616,7 @@ test('media legacy subtitle spelling is unsupported_action with no echo', async 
 test('media unsupported action echo is capped at 32 chars', async () => {
   const longAction = `subtitle-${'x'.repeat(100)}`;
   await assert.rejects(
-    () => callNativeTool('video', { platform: 'youtube', action: longAction, query: 'q' }, { env: { PATH: '/nonexistent' } }),
+    () => callNativeTool('media', { platform: 'youtube', action: longAction, query: 'q' }, { env: { PATH: '/nonexistent' } }),
     (err: unknown) => {
       assert.ok(err instanceof Error);
       assert.ok(!err.message.includes(longAction), 'message must not echo the unbounded action value');
@@ -626,11 +626,11 @@ test('media unsupported action echo is capped at 32 chars', async () => {
   );
 });
 
-test('video: bilibili search normalizes payloads with no raw stdout passthrough', async () => {
+test('media: bilibili search normalizes payloads with no raw stdout passthrough', async () => {
   const dir = await withExecutableDir();
   try {
     await writeShim(dir, 'bili', '#!/bin/sh\necho \'{"items":[{"bvid":"BV1xx411c7mD","title":"Bili Video","author":"uploader","play":123}]}\'\n');
-    const result = await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir } }));
+    const result = await withShimmedPath(dir, () => callNativeTool('media', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir } }));
     const details = result.details as Record<string, unknown>;
     assert.equal(details.backend, 'bili-cli');
     assert.ok(!('stdout' in details) && !('stderr' in details), 'success details must not carry raw CLI output');
@@ -641,7 +641,7 @@ test('video: bilibili search normalizes payloads with no raw stdout passthrough'
   }
 });
 
-test('video: bilibili child env is sanitized (no OPENCLI_*, no secrets)', { skip: requiresPosixEnvDump }, async () => {
+test('media: bilibili child env is sanitized (no OPENCLI_*, no secrets)', { skip: requiresPosixEnvDump }, async () => {
   const dir = await withExecutableDir();
   try {
     await writeShim(dir, 'bili', `#!/bin/sh\n/usr/bin/env | /usr/bin/sort > ${join(dir, 'bili.env')}\necho '{"items":[]}'\n`);
@@ -649,7 +649,7 @@ test('video: bilibili child env is sanitized (no OPENCLI_*, no secrets)', { skip
       PATH: dir, OPENCLI_HOST: 'cli.example', OPENCLI_PORT: '9222', OPENCLI_TOKEN: 'opencli-secret',
       REDDIT_COOKIE: 'cookie-secret', GITHUB_TOKEN: 'github-secret', YOUTUBE_API_KEY: 'yt-secret',
     };
-    await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env }));
+    await withShimmedPath(dir, () => callNativeTool('media', { platform: 'bilibili', action: 'search', query: 'test' }, { env }));
     const captured = await readFile(join(dir, 'bili.env'), 'utf8');
     assert.doesNotMatch(captured, /OPENCLI_TOKEN/);
     assert.doesNotMatch(captured, /OPENCLI_HOST/);
@@ -664,7 +664,7 @@ test('video: bilibili child env is sanitized (no OPENCLI_*, no secrets)', { skip
   }
 });
 
-test('video: stored bilibili cookies derive BILIBILI_* vars for the bili child', async () => {
+test('media: stored bilibili cookies derive BILIBILI_* vars for the bili child', async () => {
   const dir = await withExecutableDir();
   try {
     await writeCookieState('bilibili', [
@@ -674,7 +674,7 @@ test('video: stored bilibili cookies derive BILIBILI_* vars for the bili child',
     await writeShim(dir, 'bili', `#!/bin/sh\n/usr/bin/env | /usr/bin/sort > ${join(dir, 'bili.env')}\necho '{"items":[]}'\n`);
     // Hermetic on Windows: resolveCliCommand reads process.env.PATH (not the
     // child env), so the shim dir must be on the real PATH during the call.
-    await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } }));
+    await withShimmedPath(dir, () => callNativeTool('media', { platform: 'bilibili', action: 'search', query: 'test' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } }));
     const captured = await readFile(join(dir, 'bili.env'), 'utf8');
     assert.match(captured, /BILIBILI_SESSDATA=sess-secret-value/);
     assert.match(captured, /BILIBILI_CSRF=csrf-value/);
@@ -684,7 +684,7 @@ test('video: stored bilibili cookies derive BILIBILI_* vars for the bili child',
   }
 });
 
-test('video: bilibili transcript runs opencli with OPENCLI_* and no secrets', async () => {
+test('media: bilibili transcript runs opencli with OPENCLI_* and no secrets', async () => {
   const dir = await withExecutableDir();
   try {
     await writeShim(dir, 'bili', FAIL_SHIM);
@@ -697,7 +697,7 @@ test('video: bilibili transcript runs opencli with OPENCLI_* and no secrets', as
     // child env), so the shim dir must be on the real PATH during the call.
     // Secret-leakage assertions below are unchanged and still meaningful: the
     // .cmd twin dumps the real child env via `set`.
-    const result = await withShimmedPath(dir, () => callNativeTool('video', { platform: 'bilibili', action: 'transcript', id: 'BV1xx411c7mD' }, { env }));
+    const result = await withShimmedPath(dir, () => callNativeTool('media', { platform: 'bilibili', action: 'transcript', id: 'BV1xx411c7mD' }, { env }));
     assert.equal((result.details as { backend?: string }).backend, 'OpenCLI');
     const items = (result.details as { items?: Array<{ kind?: string; segments?: unknown[] }> }).items;
     assert.equal(items?.[0]?.kind, 'video_transcript');
@@ -730,7 +730,7 @@ test('youtube transcript: watch page captions to allowlisted timedtext, normaliz
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
-    const result = await callNativeTool('video', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: {} });
+    const result = await callNativeTool('media', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: {} });
     const details = result.details as { backend?: string; items?: Array<{ kind?: string; videoId?: string; segments?: Array<{ text?: string }> }> };
     assert.equal(details.backend, 'youtube-transcript');
     assert.equal(details.items?.[0]?.kind, 'video_transcript');
@@ -752,7 +752,7 @@ test('youtube transcript: non-allowlisted caption host rejected before fetch', a
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
     await assert.rejects(
-      () => callNativeTool('video', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: {} }),
+      () => callNativeTool('media', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: {} }),
       /not allowlisted/,
     );
   });
@@ -779,7 +779,7 @@ test('youtube transcript: stored cookie sent to watch page only, never echoed', 
       }
       throw new Error(`unexpected fetch ${url}`);
     }, async () => {
-      const result = await callNativeTool('video', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: { PI_SEARCH_STATE_DIR: dir } });
+      const result = await callNativeTool('media', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: { PI_SEARCH_STATE_DIR: dir } });
       assert.equal((result.details as { backend?: string }).backend, 'youtube-transcript');
       assert.doesNotMatch(JSON.stringify(result), /youtube-cookie-secret/);
     });
@@ -802,7 +802,7 @@ test('youtube transcript: segment output bounded', async () => {
     }
     throw new Error(`unexpected fetch ${url}`);
   }, async () => {
-    const result = await callNativeTool('video', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: {} });
+    const result = await callNativeTool('media', { platform: 'youtube', action: 'transcript', id: 'abc123' }, { env: {} });
     const items = (result.details as { items?: Array<{ segments?: unknown[] }> }).items;
     assert.equal(items?.[0]?.segments?.length, 3000);
     assert.match(JSON.stringify(result.details), /truncated/);

@@ -481,7 +481,7 @@ test('rdt child env keeps the python allowlist and never inherits secrets or OPE
   for (const secret of ['REDDIT_COOKIE', 'GITHUB_TOKEN', 'OTHER_SECRET', 'OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN']) {
     assert.ok(!(secret in env), `${secret} must not reach the rdt child env`);
   }
-  assert.equal(env['PATH'], '/usr/bin:/bin:/home/u/.local/bin');
+  assert.equal(env['PATH'], ['/usr/bin:/bin', join('/home/u', '.local', 'bin')].join(delimiter));
 });
 
 test('opencli spawn receives OPENCLI_* without secret leakage', async () => {

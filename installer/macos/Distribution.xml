@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>Northstar Broker</title>
+  <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64" />
+  <choices-outline>
+    <line choice="default">
+      <line choice="com.pi.northstar.broker" />
+    </line>
+  </choices-outline>
+  <choice id="default" />
+  <choice id="com.pi.northstar.broker" visible="false">
+    <pkg-ref id="com.pi.northstar.broker" />
+  </choice>
+  <pkg-ref id="com.pi.northstar.broker" version="0.1.0" onConclusion="none">northstar-broker-component.pkg</pkg-ref>
+</installer-gui-script>

@@ -236,11 +236,11 @@ function validateAuxField(
     if (!(allowed as readonly string[]).includes(value)) {
       throw new SocialError(
         'invalid_request',
-        `${platform} ${action} invalid ${field} "${value}", expected one of: ${(allowed as readonly string[]).join(', ')}`,
+        `${platform} ${action} invalid ${field} "${String(value).slice(0, 32)}", expected one of: ${(allowed as readonly string[]).join(', ')}`,
       );
     }
   } else if (allowed === 'date' && !SOCIAL_DATE_RE.test(value)) {
-    throw new SocialError('invalid_request', `${field} must match YYYY-MM-DD, got "${value}"`);
+    throw new SocialError('invalid_request', `${field} must match YYYY-MM-DD, got "${String(value).slice(0, 32)}"`);
   }
   return value;
 }
@@ -312,13 +312,28 @@ function cleanSelector(value: unknown): string | undefined {
  * from a verified platform URL when provided, and bound the limit. Throws
  * SocialError before any backend dispatch.
  */
+const SOCIAL_REQUEST_INPUT_FIELDS: ReadonlySet<string> = new Set([
+  'platform', 'action', 'query', 'postId', 'commentId', 'user', 'community',
+  'topic', 'url', 'feedVariant', 'sort', 'timeRange', 'includeReplies', 'limit',
+]);
+
 export function validateSocialRequest(input: SocialRequestInput): { request: SocialRequest; warnings: string[] } {
   const warnings: string[] = [];
 
-  if (!isSocialPlatform(input.platform)) {
-    throw new SocialError('invalid_request', `Unsupported platform: ${String(input.platform)}`);
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new SocialError('invalid_request', 'request must be an object');
   }
-  const platform: SocialPlatform = input.platform;
+  for (const key of Object.keys(input)) {
+    if (!SOCIAL_REQUEST_INPUT_FIELDS.has(key)) {
+      throw new SocialError('invalid_request', `unknown request field: ${key.slice(0, 32)}`);
+    }
+  }
+
+  const rawInput = input as SocialRequestInput;
+  if (!isSocialPlatform(rawInput.platform)) {
+    throw new SocialError('invalid_request', `Unsupported platform: ${String(rawInput.platform).slice(0, 32)}`);
+  }
+  const platform: SocialPlatform = rawInput.platform;
   const action = resolveSocialAction(platform, input.action);
 
   // Selectors: explicit values win; URL extraction fills missing fields.
@@ -427,7 +442,7 @@ function parseCanonicalUrl(platform: SocialPlatform, url: string): URL {
   try {
     parsed = new URL(url);
   } catch {
-    throw new SocialError('invalid_request', `url is not a valid URL: ${url}`, { platform });
+    throw new SocialError('invalid_request', `url is not a valid URL: ${url.slice(0, 128)}`, { platform });
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new SocialError('invalid_request', `url scheme must be http or https, got ${parsed.protocol}`, { platform });
@@ -559,7 +574,7 @@ export function extractSelectorsFromUrl(
       break;
     }
   }
-  throw new SocialError('invalid_request', `unrecognized ${platform} URL shape: ${path}`, { platform });
+  throw new SocialError('invalid_request', `unrecognized ${platform} URL shape: ${path.slice(0, 128)}`, { platform });
 }
 
 // ── Pagination cursors ──

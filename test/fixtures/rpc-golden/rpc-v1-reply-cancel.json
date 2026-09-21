@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "requestId": "golden-cancel-1",
+  "method": "cancelAndSettle",
+  "success": true,
+  "data": {
+    "settledRunIds": ["runtime_goldenabcdef01"],
+    "timedOutRunIds": [],
+    "unknownRunIds": []
+  }
+}

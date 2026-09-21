@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Northstar Broker"
+    Manufacturer="Northstar"
+    Version="$(var.CargoVersion)"
+    UpgradeCode="B6B78F04-39AC-4A59-86BC-9541EC5D4E30"
+    Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Northstar Broker is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="NorthstarFolder" Name="Northstar">
+        <Component Id="NorthstarBrokerBinary" Guid="C19F26B7-40DC-4C2E-893C-8A99DF295D31" Bitness="always64">
+          <File Id="NorthstarBrokerExe" Source="$(var.BinaryPath)" KeyPath="yes" />
+          <ServiceInstall
+            Id="NorthstarBrokerServiceInstall"
+            Name="NorthstarBroker"
+            DisplayName="Northstar Broker Service"
+            Description="Native authority boundary and broker service for Northstar"
+            Type="ownProcess"
+            Start="auto"
+            ErrorControl="normal"
+            Account="LocalSystem" />
+          <ServiceControl
+            Id="NorthstarBrokerServiceControl"
+            Name="NorthstarBroker"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Northstar Broker" Level="1">
+      <ComponentRef Id="NorthstarBrokerBinary" />
+    </Feature>
+  </Package>
+</Wix>

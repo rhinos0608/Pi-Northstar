@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "kind": "queryResponse",
+  "sequence": 3,
+  "receipt": {
+    "jobId": "runtime_goldenabcdef01",
+    "clientId": "golden-client",
+    "requestId": "rpc-golden-req-1",
+    "submittedAt": 1700000001000
+  }
+}

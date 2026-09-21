@@ -39,7 +39,7 @@ const MAX_RETSTART = 9999; // PubMed/PMC serve only the first 10,000 records.
 
 const TOOL_NAME = 'pi-northstar';
 
-function authParams(env: Record<string, string | undefined>): URLSearchParams {
+export function authParams(env: Record<string, string | undefined>): URLSearchParams {
   const params = new URLSearchParams();
   const apiKey = envApiKey(env, 'NCBI_API_KEY');
   if (apiKey) params.set('api_key', apiKey);
@@ -60,7 +60,7 @@ function buildTerm(
   return clauses.join(' AND ');
 }
 
-function doiFromArticleIds(articleIds: readonly unknown[]): string | undefined {
+export function doiFromArticleIds(articleIds: readonly unknown[]): string | undefined {
   for (const entry of articleIds) {
     const record = researchRecord(entry);
     if (record?.idtype === 'doi') {
@@ -71,7 +71,7 @@ function doiFromArticleIds(articleIds: readonly unknown[]): string | undefined {
   return undefined;
 }
 
-function mapDocSum(uid: string, doc: Record<string, unknown>): unknown {
+export function mapDocSum(uid: string, doc: Record<string, unknown>): unknown {
   const articleIds = Array.isArray(doc.articleids) ? doc.articleids : [];
   const pubdate = researchString(doc.pubdate);
   const yearMatch = pubdate !== undefined ? /^(\d{4})/.exec(pubdate) : undefined;

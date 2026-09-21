@@ -21,8 +21,21 @@ import { validateHttpUrl } from './core/http.js';
 import { sanitizeInlineDataUris } from './core/data-uri-sanitize.js';
 import { parseWebAccessAuthProfiles, resolveAuthProfileForUrl, type WebAccessAuthProfile } from './web/access/web-access-auth-contract.js';
 import { resolvePublicHostname } from './network-policy.js';
-import { buildNorthstarResult, parseEntity } from './result-contract.js';
+import {
+  buildNorthstarResult,
+  computeStatus,
+  parseEntity,
+  validateNorthstarResult,
+  type NorthstarEntityV1,
+  type NorthstarErrorV1,
+  type NorthstarErrorCode,
+  type NorthstarResultV1,
+  type NorthstarSourceOutcome,
+  type NorthstarSourceStatusV1,
+  type ResultStatus,
+} from './result-contract.js';
 import { validateWebRequest, WEB_ENTITY_CONTENT_MAX } from './web/web-contract.js';
+import { sanitizeDiagnosticMessage, scrubDiagnosticSecrets } from './core/diagnostic-sanitizer.js';
 import {
   boundPageText,
   fetchReadablePage,
@@ -42,7 +55,7 @@ export function getNativeFetchStore(): ReturnType<typeof createWebAccessContentS
 }
 
 export function snippetOf(body: string): string {
-  return body.slice(0, 500);
+  return truncateUtf8Bytes(body, 500);
 }
 
 /**
@@ -286,7 +299,7 @@ async function tryMediaUrlFetch(url: string, options: NativeFetchOptions): Promi
     }
   }
   try {
-    return await callReachTool('video', { url }, options);
+    return await callReachTool('media', { url }, options);
   } catch {
     return undefined;
   }
@@ -669,6 +682,170 @@ function sanitizeFetchResultText(result: BackendCallResult): BackendCallResult {
   return changed ? { ...result, content: sanitized } : result;
 }
 
+function isFetchUrlAbort(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+/**
+ * Code-owned per-URL error mapping for the urls branch. Caller abort is never
+ * mapped here (callers rethrow before reaching this). Classification uses raw
+ * text; emitted message is scrubbed by sanitizeDiagnosticMessage (never raw
+ * bodies, stacks, secrets, credentials, or header values).
+ * Codes are existing NorthstarErrorCode values only.
+ */
+function mapFetchUrlError(error: unknown): { code: NorthstarErrorCode; message: string; retryable: boolean } {
+  const raw = error instanceof Error ? error.message : String(error);
+  const codeProp =
+    typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : '';
+
+  // Classify code using original raw text before scrubbing
+  let code: NorthstarErrorCode = 'backend_http_error';
+  let retryable = true;
+
+  if (/rate[-_ ]?limit|\b429\b/i.test(raw) || codeProp === 'rate_limited') {
+    code = 'rate_limited';
+    retryable = true;
+  } else if (/timed?\s?out|etimedout|\btimeout\b/i.test(raw) || codeProp === 'timeout') {
+    code = 'timeout';
+    retryable = true;
+  } else if (/private\/reserved|blocked hostname|\bssrf\b/i.test(raw) || codeProp === 'ssrf_denied' || codeProp === 'ESSRF') {
+    code = 'invalid_input';
+    retryable = false;
+  } else if (/auth|unauthorized|forbidden|\b401\b|\b403\b/i.test(raw) || codeProp === 'authentication_required' || codeProp === 'auth') {
+    // Auth classified before generic invalid/required mapping so "authentication required" classifies as auth, not invalid_input
+    code = 'backend_http_error';
+    retryable = false;
+  } else if (/\binvalid\b|\bunsupported\b|\brequired\b|must be/i.test(raw) || codeProp === 'invalid_input' || codeProp === 'invalid_request') {
+    code = 'invalid_input';
+    retryable = false;
+  } else if (/network|connection|econnreset|eai_again|enotfound|fetch failed|upstream|\b502\b|\b503\b|\b504\b/i.test(raw)) {
+    code = 'backend_unavailable';
+    retryable = true;
+  }
+
+  // Scrub secret values and bound output for emission
+  const message = sanitizeDiagnosticMessage(raw, 500) || 'Fetch failed';
+
+  return { code, message, retryable };
+}
+
+export function fetchUrlSuccessOutcome(url: string, body: string): NorthstarSourceOutcome {
+  const parsed = parseEntity(
+    { id: url, url, title: url, snippet: truncateUtf8Bytes(body, WEB_ENTITY_CONTENT_MAX), source: 'web' },
+    { source: 'web', kind: 'article' },
+  );
+  if (parsed.ok) return { source: 'web', backend: 'native-fetch', entities: [parsed.entity] };
+  return { source: 'web', backend: 'native-fetch', invalid: 1 };
+}
+
+interface SingleUrlExtractedData {
+  entities: NorthstarEntityV1[];
+  sources: NorthstarSourceStatusV1[];
+  errors: NorthstarErrorV1[];
+  notes: string[];
+  entryStatus: ResultStatus;
+  isDegraded: boolean;
+  canCache: boolean;
+  cleanBody: string;
+}
+
+/**
+ * Preserve canonical components for a single URL specialist result without multiplicity collapse.
+ * Validates envelope before trusting; falls back safely to web/article.
+ * Sanitizes and UTF-8 bounds every error message and note copied from canonical envelopes.
+ * For error status, bounds diagnostic body to 500 bytes.
+ * For partial status, scrubs secrets across the full body and entity snippets without truncating.
+ */
+function extractSingleUrlCanonical(
+  url: string,
+  rawBody: string,
+  result: BackendCallResult,
+): SingleUrlExtractedData {
+  const details = (result.details && typeof result.details === 'object' && !Array.isArray(result.details))
+    ? (result.details as Record<string, unknown>)
+    : undefined;
+
+  const rawEnvelope = details?.northstar;
+  const validation = rawEnvelope ? validateNorthstarResult(rawEnvelope) : { ok: false, issues: [] };
+
+  if (validation.ok && validation.result) {
+    const validEnvelope: NorthstarResultV1 = validation.result;
+    const sanitizedErrors: NorthstarErrorV1[] = validEnvelope.errors.map((err) => ({
+      ...err,
+      message: sanitizeDiagnosticMessage(err.message, 500) || 'Error',
+    }));
+    const sanitizedNotes: string[] = validEnvelope.notes.map((note) =>
+      sanitizeDiagnosticMessage(note, 500) || note
+    );
+
+    // Truthful entry status: use canonical status
+    const entryStatus: ResultStatus = validEnvelope.status;
+
+    // Cache policy: only ok/degraded/empty are cacheable; partial and error must not enter retrieve cache
+    const canCache = entryStatus === 'ok' || entryStatus === 'degraded' || entryStatus === 'empty';
+
+    // Diagnostic body and entity snippet scrubbing:
+    // For error status: 500-byte diagnostic bounded message.
+    // For partial status: unbounded secret scrub across the full body and entity snippets.
+    // For ok/degraded/empty: leave raw body intact.
+    let cleanBody = rawBody;
+    let entities = validEnvelope.data.kind === 'entities' ? [...validEnvelope.data.entities] : [];
+    if (entryStatus === 'error') {
+      cleanBody = sanitizeDiagnosticMessage(rawBody, 500);
+    } else if (entryStatus === 'partial') {
+      cleanBody = scrubDiagnosticSecrets(rawBody);
+      entities = entities.map((ent) => {
+        if (ent.snippet === undefined) return ent;
+        return {
+          ...ent,
+          snippet: scrubDiagnosticSecrets(ent.snippet),
+        };
+      });
+    }
+
+    const isDegraded = validEnvelope.status === 'degraded' || validEnvelope.sources.some((s) => s.status === 'degraded') || details?.degraded === true;
+
+    return {
+      entities,
+      sources: [...validEnvelope.sources],
+      errors: sanitizedErrors,
+      notes: sanitizedNotes,
+      entryStatus,
+      isDegraded,
+      canCache,
+      cleanBody,
+    };
+  }
+
+  // Fallback for missing or malformed canonical envelope:
+  const fallback = fetchUrlSuccessOutcome(url, rawBody);
+  const fallbackDegraded = details?.degraded === true;
+  const entities: NorthstarEntityV1[] = fallback.entities ? [...fallback.entities] : [];
+  const count = entities.length;
+  const entryStatus: ResultStatus = fallbackDegraded ? 'degraded' : (count > 0 ? 'ok' : 'empty');
+
+  const sources: NorthstarSourceStatusV1[] = [{
+    source: 'web',
+    backend: 'native-fetch',
+    status: entryStatus,
+    count,
+  }];
+
+  return {
+    entities,
+    sources,
+    errors: [],
+    notes: [],
+    entryStatus,
+    isDegraded: fallbackDegraded,
+    canCache: true,
+    cleanBody: rawBody,
+  };
+}
+
 async function dispatchFetchInner(args: Record<string, unknown>, options: NativeFetchOptions): Promise<BackendCallResult> {
   // No hidden controls: provider selection is operator-only
   // (PI_SEARCH_WEB_BACKENDS) and format does not exist as fetch input.
@@ -727,6 +904,16 @@ async function dispatchFetchInner(args: Record<string, unknown>, options: Native
     const withQuery = typeof args.query === 'string' && args.query.trim().length > 0;
     const out: string[] = [];
     const cached: Array<{ title: string; url: string; snippet: string; content: string }> = [];
+    const entries: Array<{ url: string; status: ResultStatus; error?: { code: NorthstarErrorCode; message: string; retryable: boolean } }> = [];
+
+    // Aggregated canonical components (lossless preservation in encounter order)
+    const aggregateEntities: NorthstarEntityV1[] = [];
+    const seenEntityIds = new Set<string>();
+    const aggregateSources: NorthstarSourceStatusV1[] = [];
+    const aggregateErrors: NorthstarErrorV1[] = [];
+    const aggregateNotes: string[] = [];
+    let hasAnyDegraded = false;
+
     // M7: auth-off entries never reach the retrieve cache (T5). A config
     // parse error falls back to cacheable: the fetch itself surfaces it.
     const arrayAuthCacheable = (entryUrl: string): boolean => {
@@ -736,6 +923,41 @@ async function dispatchFetchInner(args: Record<string, unknown>, options: Native
         return true;
       }
     };
+
+    function mergeExtracted(extracted: SingleUrlExtractedData, singleUrl: string): void {
+      entries.push({
+        url: singleUrl,
+        status: extracted.entryStatus,
+        ...(extracted.errors[0]
+          ? { error: { code: extracted.errors[0].code, message: extracted.errors[0].message, retryable: extracted.errors[0].retryable } }
+          : {}),
+      });
+
+      if (extracted.isDegraded) hasAnyDegraded = true;
+
+      // Entity dedupe by unique entity id (source + kind + id)
+      for (const ent of extracted.entities) {
+        const entKey = `${ent.source}:${ent.kind}:${ent.id}`;
+        if (!seenEntityIds.has(entKey)) {
+          seenEntityIds.add(entKey);
+          aggregateEntities.push(ent);
+        }
+      }
+
+      // Append all sources and errors in encounter order without collapsing multiplicity
+      aggregateSources.push(...extracted.sources);
+      aggregateErrors.push(...extracted.errors);
+      aggregateNotes.push(...extracted.notes);
+
+      // Rendered body: cleanBody reflects scrubbed diagnostic for error/partial
+      out.push(withQuery ? `## ${singleUrl}\n${extracted.cleanBody}` : extracted.cleanBody);
+
+      // Cache policy: only ok/degraded/empty are cacheable; partial and error must not enter retrieve cache
+      if (extracted.canCache && arrayAuthCacheable(singleUrl)) {
+        cached.push({ title: singleUrl, url: singleUrl, snippet: snippetOf(extracted.cleanBody), content: extracted.cleanBody });
+      }
+    }
+
     for (const url of args.urls as unknown[]) {
       const single = String(url);
       try {
@@ -754,41 +976,80 @@ async function dispatchFetchInner(args: Record<string, unknown>, options: Native
           if (entryIsAuth) {
             const authResult = await agenticBrowseInner({ url: single, ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}) }, options);
             const authBody = resultToSingleText(authResult);
-            out.push(`## ${single}\n${authBody}`);
-            if (arrayAuthCacheable(single)) {
-              cached.push({ title: single, url: single, snippet: snippetOf(authBody), content: authBody });
-            }
+            const extracted = extractSingleUrlCanonical(single, authBody, authResult);
+            mergeExtracted(extracted, single);
           } else {
-          const chunked = await semanticCrawl({
-            source: { type: 'url', url: single },
-            query: args.query,
-            ...(typeof args.topK === 'number' ? { topK: args.topK } : {}),
-            ...(typeof args.maxPages === 'number' ? { maxPages: args.maxPages } : {}),
-            ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}),
-          }, options);
-          // M1: sanitize at source — clean text is cached and returned.
-          const body = sanitizeInlineDataUris(resultToSingleText(chunked), 'fetch.query.content').text;
-          out.push(`## ${single}\n${body}`);
-          if (arrayAuthCacheable(single)) {
-            cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
-          }
+            const chunked = await semanticCrawl({
+              source: { type: 'url', url: single },
+              query: args.query,
+              ...(typeof args.topK === 'number' ? { topK: args.topK } : {}),
+              ...(typeof args.maxPages === 'number' ? { maxPages: args.maxPages } : {}),
+              ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}),
+            }, options);
+            // M1: sanitize at source — clean text is cached and returned.
+            const body = sanitizeInlineDataUris(resultToSingleText(chunked), 'fetch.query.content').text;
+            const extracted = extractSingleUrlCanonical(single, body, chunked);
+            mergeExtracted(extracted, single);
           }
         } else {
           const specialized = await dispatchSpecializedUrl(single, options);
           const singleResult = specialized ?? await agenticBrowseInner({ url: single, ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}) }, options);
           const body = sanitizeInlineDataUris(resultToSingleText(singleResult), 'fetch.read.content').text;
-          out.push(body);
-          if (arrayAuthCacheable(single)) {
-            cached.push({ title: single, url: single, snippet: snippetOf(body), content: body });
-          }
+          const extracted = extractSingleUrlCanonical(single, body, singleResult);
+          mergeExtracted(extracted, single);
         }
       } catch (error) {
-        out.push(`## ${single}\nError: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`);
+        // Caller abort propagates as cancellation; never an isolated error entry.
+        if (isFetchUrlAbort(error, options.signal)) throw error;
+        const mapped = mapFetchUrlError(error);
+        out.push(`## ${single}\nError: ${mapped.message}`);
+        entries.push({ url: single, status: 'error', error: mapped });
+        aggregateErrors.push({ ...mapped, source: 'web', backend: 'native-fetch' });
+        aggregateSources.push({
+          source: 'web',
+          backend: 'native-fetch',
+          status: 'error',
+          count: 0,
+        });
       }
     }
+
     const arrayQuery = withQuery && typeof args.query === 'string' ? args.query.trim() : 'fetch';
+
+    // Compute aggregate status following canonical computeStatus precedence
+    const overallStatus: ResultStatus = computeStatus({
+      entityCount: aggregateEntities.length,
+      errorCount: aggregateErrors.length,
+      invalidCount: 0,
+      degraded: hasAnyDegraded,
+    });
+
+    const envelope: NorthstarResultV1 = {
+      schema: 'pi-northstar.result',
+      version: 1,
+      status: overallStatus,
+      request: { tool: 'fetch', channel: 'web', action: 'read' },
+      data: { kind: 'entities', entities: aggregateEntities },
+      pagination: { supported: false, limit: entries.length, returned: aggregateEntities.length, hasMore: false },
+      sources: aggregateSources,
+      errors: aggregateErrors,
+      notes: aggregateNotes,
+    };
+
+    // Validate envelope before attachment
+    const check = validateNorthstarResult(envelope);
+    const validEnvelope = check.ok ? envelope : buildNorthstarResult({
+      request: { tool: 'fetch', channel: 'web', action: 'read' },
+      outcomes: [{ source: 'web', backend: 'native-fetch', ...(hasAnyDegraded ? { degraded: true } : {}) }],
+      pagination: { supported: false, limit: entries.length, hasMore: false },
+    });
+
     return withFetchResponseId(
-      textResult(out.join('\n\n'), { urls: args.urls }),
+      northstarTextResult(
+        out.join('\n\n'),
+        { urls: args.urls, entries, ...(hasAnyDegraded ? { degraded: true } : {}) },
+        validEnvelope,
+      ),
       cacheFetchEntries(arrayQuery, cached),
     );
   }
@@ -857,4 +1118,3 @@ async function dispatchFetchInner(args: Record<string, unknown>, options: Native
   }
   return agenticBrowseInner(args, options);
 }
-

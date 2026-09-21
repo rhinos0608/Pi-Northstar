@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildBrowseArgs, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs } from '../src/index.js';
 import Value from 'typebox/value';
-import { CHANNEL_CAPABILITIES, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
+import { CHANNEL_CAPABILITIES, REACH_FAMILIES, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
+
+// Schema tests exercise explicitly enabled native tools; zero-default behavior is covered in contract.test.ts.
+process.env.PI_SEARCH_NATIVE_TOOLS = 'web_search,fetch,github,social,kg,graph,browser,desktop,agent_poll';
 
 function registryActionEnum(family: string): string[] {
   return [...new Set(
@@ -164,7 +167,7 @@ test('buildSearchRoute plain query routes to web_search backend', () => {
   assert.equal(route.tool, 'web_search');
   assert.equal(route.args.query, 'pi agent');
   assert.equal(route.args.limit, 8);
-  assert.equal(route.args.resultFormat, 'collated');
+  assert.equal('resultFormat' in route.args, false, 'canonical route must not forward route-only resultFormat');
   assert.equal(route.timeout, 120_000);
 });
 
@@ -611,7 +614,9 @@ test('before_agent_start appends policy once per call and says framing cannot au
 async function captureBrowserTool(): Promise<{ name: string; parameters: Record<string, unknown> } | undefined> {
   let captured: { name: string; parameters: Record<string, unknown> } | undefined;
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  const previousNativeTools = process.env.PI_SEARCH_NATIVE_TOOLS;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
+  process.env.PI_SEARCH_NATIVE_TOOLS = 'browser';
   const pi = {
     on: () => {},
     registerTool: (def: { name: string; parameters: unknown }) => {
@@ -626,6 +631,8 @@ async function captureBrowserTool(): Promise<{ name: string; parameters: Record<
   } finally {
     if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+    if (previousNativeTools === undefined) delete process.env.PI_SEARCH_NATIVE_TOOLS;
+    else process.env.PI_SEARCH_NATIVE_TOOLS = previousNativeTools;
   }
   return captured;
 }
@@ -700,6 +707,34 @@ test('browser schema job steps exposes kind subfield', async () => {
 
 // ── /reach-status <family> <action> command parsing (registry-validated) ──
 
+test('reach-status help and completions derive family registry', async () => {
+  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
+  process.env.PI_SEARCH_BOOTSTRAP = 'off';
+  type ReachStatusCommand = {
+    description?: string;
+    getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }>;
+  };
+  let reachStatus: ReachStatusCommand | undefined;
+  const pi = {
+    on: () => {},
+    registerTool: () => {},
+    registerCommand: (name: string, command: ReachStatusCommand) => {
+      if (name === 'reach-status') reachStatus = command;
+    },
+  };
+  try {
+    const mod = await import('../src/index.js');
+    (mod.default as (pi: unknown) => void)(pi);
+  } finally {
+    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
+  }
+
+  assert.ok(reachStatus, 'reach-status command must be registered');
+  assert.equal(reachStatus!.description, `Inspect search extension channel/backend health. Usage: /reach-status [${REACH_FAMILIES.join('|')}] [action]`);
+  assert.deepEqual(reachStatus!.getArgumentCompletions?.(''), REACH_FAMILIES.map((family) => ({ value: family, label: family })));
+});
+
 test('reachStatusCommandArgs preserves zero/one-argument behavior', () => {
   assert.deepEqual(reachStatusCommandArgs(''), {});
   assert.deepEqual(reachStatusCommandArgs('   '), {});
@@ -754,7 +789,9 @@ async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Pro
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   const previousDiffbotToken = process.env.DIFFBOT_TOKEN;
   const previousSparqlEndpoint = process.env.GRAPH_SPARQL_ENDPOINT;
+  const previousNativeTools = process.env.PI_SEARCH_NATIVE_TOOLS;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
+  process.env.PI_SEARCH_NATIVE_TOOLS = 'web_search,fetch,github,social,kg,graph,browser,desktop,agent_poll';
   process.env.DIFFBOT_TOKEN = diffbotToken;
   process.env.GRAPH_SPARQL_ENDPOINT = 'https://sparql.example.org/sparql';
   const pi = {
@@ -774,6 +811,8 @@ async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Pro
     else process.env.DIFFBOT_TOKEN = previousDiffbotToken;
     if (previousSparqlEndpoint === undefined) delete process.env.GRAPH_SPARQL_ENDPOINT;
     else process.env.GRAPH_SPARQL_ENDPOINT = previousSparqlEndpoint;
+    if (previousNativeTools === undefined) delete process.env.PI_SEARCH_NATIVE_TOOLS;
+    else process.env.PI_SEARCH_NATIVE_TOOLS = previousNativeTools;
   }
   return defs;
 }

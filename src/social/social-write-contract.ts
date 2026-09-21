@@ -43,6 +43,17 @@ const MAX_SELECTOR_LENGTH = 1024;
 const MAX_TEXT_LENGTH = 5000;
 const ECHO_LIMIT = 32;
 
+export const SOCIAL_WRITE_REQUEST_INPUT_FIELDS: ReadonlySet<string> = new Set([
+  'platform',
+  'action',
+  'postId',
+  'commentId',
+  'user',
+  'community',
+  'topic',
+  'payload',
+]);
+
 export interface SocialWritePayloadInput {
   text?: unknown;
 }
@@ -121,6 +132,11 @@ export function validateSocialWriteRequest(input: SocialWriteRequestInput): {
 } {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {
     throw new SocialError('invalid_request', 'request must be an object');
+  }
+  for (const key of Object.keys(input)) {
+    if (!SOCIAL_WRITE_REQUEST_INPUT_FIELDS.has(key)) {
+      throw new SocialError('invalid_request', `unknown request field: ${cappedEcho(key)}`);
+    }
   }
   if (!SOCIAL_PLATFORMS.includes(input.platform as SocialPlatform)) {
     throw new SocialError('invalid_request', `Unsupported platform: ${cappedEcho(String(input.platform))}`);

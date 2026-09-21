@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "kind": "welcome",
+  "epoch": "golden-epoch-1",
+  "clientId": "golden-client",
+  "sessionId": "golden-session-1",
+  "token": "golden.token.sig",
+  "expiresAt": 9999999999999,
+  "capabilities": ["runtime:negotiate", "runtime:start", "runtime:status", "runtime:result", "runtime:cancel"],
+  "projectId": "golden-project"
+}

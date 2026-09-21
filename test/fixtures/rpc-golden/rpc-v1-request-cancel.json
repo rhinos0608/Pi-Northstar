@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "requestId": "golden-cancel-1",
+  "method": "cancelAndSettle",
+  "params": {
+    "runIds": ["runtime_goldenabcdef01"],
+    "settlementWindowMs": 1000
+  }
+}

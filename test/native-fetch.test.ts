@@ -58,18 +58,93 @@ test('native-fetch: fetch read populates retrieve cache with responseId', async 
   assert.ok(JSON.stringify(out).includes('NativeFetch body words'));
 });
 
-test('native-fetch: url-array isolates per-URL failure, caches prior results', async () => {
+test('native-fetch: url-array mixed maps northstar partial + ordered entries, caches prior success', async () => {
   const fetched = await callNativeTool(
     'fetch',
-    { urls: ['https://example.com/nf-ok', 'http://127.0.0.1:9/nf-nope'] },
-    seamOptions(),
+    { urls: ['https://example.com/nf-ok', 'https://example.com/nf-bad'] },
+    {
+      env: {},
+      lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+      fetchPageText: async (url: string) => {
+        if (url.includes('/nf-bad')) throw new Error('boom upstream failure');
+        return PAGE_HTML;
+      },
+    } as unknown as Parameters<typeof callNativeTool>[2],
   );
+  const details = (fetched as { details?: Record<string, unknown> }).details ?? {};
+  assert.equal((details.northstar as { status?: string })?.status, 'partial');
+  assert.deepEqual(
+    (details.entries as Array<{ url: string; status: string }>).map((e) => [e.url, e.status]),
+    [['https://example.com/nf-ok', 'ok'], ['https://example.com/nf-bad', 'error']],
+  );
+  const failure = (details.entries as Array<{ error?: Record<string, unknown> }>)[1]?.error;
+  assert.equal(failure?.code, 'backend_unavailable');
+  assert.equal(failure?.retryable, true);
+  assert.match(String(failure?.message ?? ''), /boom upstream failure/);
+  assert.ok(String(failure?.message ?? '').length <= 500);
+  assert.deepEqual(Object.keys(failure ?? {}).sort(), ['code', 'message', 'retryable']);
+  assert.ok(!JSON.stringify(details).includes('"stack"'), 'no raw stack in output metadata');
   const text = JSON.stringify(fetched);
   assert.match(text, /NativeFetch body words/);
-  assert.match(text, /127\.0\.0\.1/);
+  assert.match(text, /boom upstream failure/);
+  assert.ok(text.indexOf('NativeFetch body words') < text.indexOf('Error: boom upstream failure'), 'rendered content order preserved');
   const responseId = responseIdOf(fetched);
   const out = await callNativeTool('fetch', { action: 'retrieve', responseId }, { env: {} });
   assert.ok(JSON.stringify(out).includes('https://example.com/nf-ok'));
+});
+
+test('native-fetch: url-array all-failed maps northstar error, all-success maps ok', async () => {
+  const allFailed = await callNativeTool(
+    'fetch',
+    { urls: ['https://example.com/nf-bad-a', 'https://example.com/nf-bad-b'] },
+    {
+      env: {},
+      lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+      fetchPageText: async () => { throw new Error('boom upstream failure'); },
+    } as unknown as Parameters<typeof callNativeTool>[2],
+  );
+  const failedDetails = (allFailed as { details?: Record<string, unknown> }).details ?? {};
+  assert.equal((failedDetails.northstar as { status?: string })?.status, 'error');
+  assert.deepEqual(
+    (failedDetails.entries as Array<{ status: string }>).map((e) => e.status),
+    ['error', 'error'],
+  );
+  const allOk = await callNativeTool(
+    'fetch',
+    { urls: ['https://example.com/nf-ok-a', 'https://example.com/nf-ok-b'] },
+    seamOptions(),
+  );
+  const okDetails = (allOk as { details?: Record<string, unknown> }).details ?? {};
+  assert.equal((okDetails.northstar as { status?: string })?.status, 'ok');
+  assert.deepEqual(
+    (okDetails.entries as Array<{ status: string }>).map((e) => e.status),
+    ['ok', 'ok'],
+  );
+});
+
+test('native-fetch: url-array abort during a URL stays cancelled, never an isolated error', async () => {
+  const controller = new AbortController();
+  await assert.rejects(
+    () =>
+      callNativeTool(
+        'fetch',
+        { urls: ['https://example.com/nf-abort-a', 'https://example.com/nf-abort-b'] },
+        {
+          env: {},
+          lookup: async () => [{ address: '93.184.216.34', family: 4 as const }],
+          fetchPageText: async () => {
+            controller.abort();
+            throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+          },
+          signal: controller.signal,
+        } as unknown as Parameters<typeof callNativeTool>[2],
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, 'AbortError');
+      return true;
+    },
+  );
 });
 
 test('native-fetch: rejects hidden provider/format controls', async () => {
@@ -151,9 +226,11 @@ test('native-fetch: singular whitespace query keeps plain read path', async () =
   assert.match(JSON.stringify(out), /NativeFetch body words/);
 });
 
-test('native-fetch: singular query crawl failure falls back to plain read', async () => {
-  const out = await callNativeTool('fetch', { url: 'https://example.com/nf-fb', query: 'pricing', topK: 99999 }, seamOptions());
-  assert.match(JSON.stringify(out), /NativeFetch body words/);
+test('native-fetch: out-of-range topK rejects instead of falling back (reject, never clamp)', async () => {
+  await assert.rejects(
+    () => callNativeTool('fetch', { url: 'https://example.com/nf-fb', query: 'pricing', topK: 99999 }, seamOptions()),
+    /topK must be an integer 1\.\.20/,
+  );
 });
 
 test('native-fetch: pdf SSRF redirect to private target fails closed to reader fallback', async () => {

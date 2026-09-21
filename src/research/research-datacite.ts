@@ -50,7 +50,7 @@ function buildQuery(
   return clauses.join(' AND ');
 }
 
-function mapRow(row: Record<string, unknown>): unknown {
+export function mapDataciteRow(row: Record<string, unknown>): unknown {
   const attributes = researchRecord(row.attributes);
   if (!attributes) return {}; // missing attributes → invalid row at the boundary
   const doi = researchString(attributes.doi);
@@ -63,15 +63,22 @@ function mapRow(row: Record<string, unknown>): unknown {
       return name ? { name } : null;
     })
     .filter((entry): entry is { name: string } => entry !== null);
+  const descriptions = Array.isArray(attributes.descriptions) ? attributes.descriptions : [];
+  const abstractDesc = descriptions.find((d) => researchRecord(d)?.descriptionType === 'Abstract') ?? descriptions[0];
+  const abstract = researchString(researchRecord(abstractDesc)?.description);
   return {
     id: doi,
     doi,
     url: doi ? `https://doi.org/${doi}` : researchString(attributes.url),
     title: researchString(firstTitle?.title) ?? '',
+    snippet: abstract,
+    abstract,
     authors: authors.length > 0 ? authors : undefined,
     year: attributes.publicationYear,
   };
 }
+
+const mapRow = mapDataciteRow;
 
 /**
  * Extract only the page[cursor] token from the provider's links.next URL.

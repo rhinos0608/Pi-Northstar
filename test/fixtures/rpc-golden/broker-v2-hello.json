@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "kind": "hello",
+  "clientId": "golden-client",
+  "projectId": "golden-project",
+  "requestedCapabilities": ["runtime:negotiate", "runtime:start", "runtime:status", "runtime:result", "runtime:cancel"]
+}

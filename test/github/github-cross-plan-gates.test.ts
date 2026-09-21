@@ -69,14 +69,11 @@ test('ledger reserves within budget and rejects beyond 512MiB as upstream_error'
 
 // ── Domain routing (Plan E3, W-E1 seam mocked by availability) ──
 
-test('routing agrees with the W-E1 seam name and prefers clone-first for repo/tree', () => {
+test('routing keeps repo REST-first and prefers clone-first for tree', () => {
   assert.equal(GITHUB_CLONE_BACKEND, 'github-clone');
-  assert.equal(GITHUB_BACKEND_PREFERENCE.repo[0], GITHUB_CLONE_BACKEND);
+  assert.equal(GITHUB_BACKEND_PREFERENCE.repo[0], 'github-api');
   assert.equal(GITHUB_BACKEND_PREFERENCE.tree[0], GITHUB_CLONE_BACKEND);
-  assert.deepEqual(resolveGithubBackendChain('repo', ['github-api', GITHUB_CLONE_BACKEND]), [
-    GITHUB_CLONE_BACKEND,
-    'github-api',
-  ]);
+  assert.deepEqual(resolveGithubBackendChain('repo', ['github-api', GITHUB_CLONE_BACKEND]), ['github-api', GITHUB_CLONE_BACKEND]);
   assert.deepEqual(resolveGithubBackendChain('tree', ['github-api', GITHUB_CLONE_BACKEND]), [
     GITHUB_CLONE_BACKEND,
     'github-api',
@@ -96,7 +93,7 @@ test('registered clone executor is available; default chain stays REST-first', (
   // W-E1 landed: the executor is registered, so the seam reports available
   // and repo/tree resolve clone-first when the clone backend is offered.
   assert.equal(isGithubCloneBackendAvailable(), true);
-  assert.deepEqual(resolveGithubBackendChain('repo', ['github-clone', 'github-api']), ['github-clone', 'github-api']);
+  assert.deepEqual(resolveGithubBackendChain('repo', ['github-clone', 'github-api']), ['github-api', 'github-clone']);
   assert.deepEqual(resolveGithubBackendChain('tree', ['github-clone', 'github-api']), ['github-clone', 'github-api']);
   assert.deepEqual(resolveGithubBackendChain('repo'), ['github-api']);
   assert.deepEqual(resolveGithubBackendChain('tree'), ['github-api']);

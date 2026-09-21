@@ -346,3 +346,8 @@ async function searchAllSources(
 }
 
 const contextOfDefault: ResearchAdapterContext = {};
+
+export { fetchResearchPaper, resolvePaperIdentity } from './research-paper.js';
+export { fetchResearchCitations } from './research-citations.js';
+export type { ResearchPaperRequest, ResolvedPaperIdentity } from './research-paper.js';
+export type { ResearchCitationsRequest } from './research-citations.js';
