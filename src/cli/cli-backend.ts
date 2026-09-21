@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BackendCallOptions, BackendCallResult, SearchBackend } from '../backend.js';
@@ -25,7 +26,23 @@ interface CliEnvelope {
   };
 }
 
-const TSX_LOADER_URL = import.meta.resolve('tsx');
+const GITHUB_COMMANDS: Readonly<Record<string, string>> = { file: 'github.file', repo: 'github.repo', search: 'github.search', search_repos: 'github.search_repos', issues: 'github.issues', pulls: 'github.pulls', releases: 'github.releases', commits: 'github.commits', tree: 'github.tree', trending: 'github.trending', workflows: 'github.workflows', runs: 'github.runs' };
+const RESEARCH_COMMANDS: Readonly<Record<string, string>> = { academic: 'research.search', search: 'research.search', paper: 'research.paper', citations: 'research.citations' };
+const SOCIAL_READ_ACTIONS = new Set(['get_post', 'get_thread', 'get_comments', 'get_profile', 'get_community', 'get_feed', 'get_followers', 'get_user_posts', 'get_trending', 'get_community_posts']);
+const MEDIA_COMMANDS: Readonly<Record<string, string>> = { details: 'media.details', transcript: 'media.transcript', feed: 'media.feed', search: 'media.search', hot: 'media.hot' };
+export function mapCliToolToCommandId(name: string, args: Record<string, unknown>): string {
+  const action = typeof args.action === 'string' ? args.action : undefined;
+  const commandId = name === 'web_search' ? 'search.web' : name === 'fetch' ? 'fetch.read' : name === 'github' && action ? GITHUB_COMMANDS[action] : name === 'research' && action ? RESEARCH_COMMANDS[action] : name === 'social' && (action === undefined || action === 'search') ? 'social.search' : name === 'social' && action !== undefined && SOCIAL_READ_ACTIONS.has(action) ? 'social.read' : (name === 'video' || name === 'media') && action ? MEDIA_COMMANDS[action] : name === 'feeds' ? 'media.feed' : name === 'kg' && action === 'search' && args.cursor !== undefined && args.providers === undefined ? 'kg.search' : name === 'graph' && (action === 'query' || action === 'probe') ? `graph.${action}` : undefined;
+  if (commandId === undefined) throw new Error(`CLI backend does not support tool '${name}' with requested action`);
+  return commandId;
+}
+export function resolveTsxLoader(): string {
+  try {
+    return import.meta.resolve('tsx');
+  } catch {
+    throw new Error('source CLI fallback requires dev dependency tsx');
+  }
+}
 export const MAX_CLI_OUTPUT_CHARS = 1_000_000;
 const SIGKILL_AFTER_MS = 5_000;
 
@@ -65,7 +82,7 @@ export class CliSearchBackend implements SearchBackend {
   private readonly corpus: WebAccessContentStore = createWebAccessContentStore();
   constructor(
     private readonly env: Record<string, string | undefined>,
-    private readonly cliPath = join(dirname(fileURLToPath(import.meta.url)), 'cli.ts'),
+    private readonly cliPath = join(dirname(fileURLToPath(import.meta.url)), fileURLToPath(import.meta.url).endsWith('.js') ? 'worker.js' : 'worker.ts'),
   ) {}
 
   async callTool(name: string, args: Record<string, unknown>, options: BackendCallOptions = {}): Promise<BackendCallResult> {
@@ -76,7 +93,8 @@ export class CliSearchBackend implements SearchBackend {
       const served = tryServeCliCorpusAction(this.corpus, args);
       if (served !== undefined) return served;
     }
-    const envelope = await this.run(['call', name, JSON.stringify(args)], options.signal, options.timeout, name);
+    const commandId = mapCliToolToCommandId(name, args);
+    const envelope = await this.run(name, commandId, args, options.signal, options.timeout);
     if (!envelope.ok) throw new Error(envelope.error?.message ?? 'CLI backend failed');
     if (!envelope.data) throw new Error('CLI backend returned no data.');
     return populateCliCorpus(this.corpus, name, envelope.data);
@@ -84,7 +102,7 @@ export class CliSearchBackend implements SearchBackend {
 
   async close(): Promise<void> {}
 
-  private run(args: string[], signal?: AbortSignal, timeout?: number, toolName?: string): Promise<CliEnvelope> {
+  private run(toolName: string, commandId: string, args: Record<string, unknown>, signal?: AbortSignal, timeout?: number): Promise<CliEnvelope> {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
         reject(cliAbortError());
@@ -103,10 +121,27 @@ export class CliSearchBackend implements SearchBackend {
       ) {
         childEnv.PI_SEARCH_CHROME_BRIDGE_TOKEN = bridgeToken;
       }
-      const child = spawn(process.execPath, ['--import', TSX_LOADER_URL, this.cliPath, ...args], {
+      const workerSource = this.cliPath.endsWith('cli.ts') ? this.cliPath.replace(/cli\.ts$/, 'worker.ts') : this.cliPath.endsWith('cli.js') ? this.cliPath.replace(/cli\.js$/, 'worker.js') : this.cliPath;
+      if (!existsSync(workerSource)) {
+        reject(new Error(`Worker entrypoint not found: ${workerSource}`));
+        return;
+      }
+      let nodeArgs: string[];
+      try {
+        nodeArgs = workerSource.endsWith('.ts')
+          ? ['--import', resolveTsxLoader(), workerSource]
+          : [workerSource];
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const child = spawn(process.execPath, nodeArgs, {
         env: childEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
+      child.stdin.on('error', () => {});
+      child.stdin.write(JSON.stringify({ commandId, args }));
+      child.stdin.end();
       const stdoutAcc = createCliStdoutAccumulator();
       let stderr = '';
       let timedOut = false;
@@ -401,9 +436,11 @@ const RESEARCH_CREDENTIALS = [
   'STACKEXCHANGE_KEY',
 ];
 
-/** Social/dev/media presence keys for reach_* children. These tools report
- *  provider auth status across families (reach_setup status), so the child
- *  needs the same presence keys the parent checks in reach-tools. */
+/** Provider presence keys for the canonical social/media-family CLI children
+ *  (social, video, feeds, media). Each scoped child checks provider auth across
+ *  families, so all four share the same presence keys. Status-only helpers such
+ *  as reach_status/reach_setup are not CLI children on this path and resolve to
+ *  base config only via the unknown-tool default below. */
 const REACH_CREDENTIALS = [
   'GITHUB_TOKEN',
   'GH_TOKEN',
@@ -434,8 +471,6 @@ const CLI_TOOL_CREDENTIALS: Record<string, readonly string[]> = {
   // child is the related target: forward env-only operator config so
   // process-env GRAPH_SPARQL_* survives the default CLI boundary.
   graph: ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN', 'DIFFBOT_TOKEN'],
-  reach_status: REACH_CREDENTIALS,
-  reach_setup: REACH_CREDENTIALS,
   social: REACH_CREDENTIALS,
   video: REACH_CREDENTIALS,
   feeds: REACH_CREDENTIALS,

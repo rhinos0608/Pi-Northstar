@@ -1,9 +1,67 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { test } from 'node:test';
-import { appendCliStdout, buildCliEnvironment, createCliStdoutAccumulator } from '../../src/cli/cli-backend.js';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { appendCliStdout, buildCliEnvironment, createCliStdoutAccumulator, mapCliToolToCommandId } from '../../src/cli/cli-backend.js';
 import { buildPythonChildEnvironment } from '../../src/process/python-child-env.js';
 
 const SENTINEL = 'SENTINEL_DIFFBOT_TOKEN_abc123xyz';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+function runCompiledWorker(request: unknown): Promise<{ code: number | null; output: Record<string, unknown> }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(root, 'dist/cli/worker.js')], {
+      cwd: root,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      try {
+        resolve({ code, output: JSON.parse(stdout) as Record<string, unknown> });
+      } catch (error) {
+        reject(new Error(`worker output invalid: ${String(error)}; stderr=${stderr}`));
+      }
+    });
+    child.stdin.end(JSON.stringify(request));
+  });
+}
+
+test('parent maps supported tools to canonical command ids and rejects unsupported calls', () => {
+  assert.equal(mapCliToolToCommandId('web_search', { query: 'q' }), 'search.web');
+  assert.equal(mapCliToolToCommandId('fetch', { url: 'https://example.com' }), 'fetch.read');
+  assert.throws(() => mapCliToolToCommandId('github', { action: 'unknown' }), /does not support/);
+});
+
+test('compiled worker accepts closed canonical request and preserves handler result', async () => {
+  const result = await runCompiledWorker({ commandId: 'fetch.read', args: {} });
+  assert.equal(result.code, 0);
+  assert.equal(result.output.ok, true);
+  assert.equal((result.output.data as Record<string, unknown>).code, 'invalid_input');
+});
+
+test('compiled worker rejects unexpected request keys', async () => {
+  const result = await runCompiledWorker({ commandId: 'fetch.read', args: {}, extra: true });
+  assert.equal(result.code, 1);
+  assert.equal((result.output.error as Record<string, unknown>).code, 'invalid_worker_request');
+});
+
+test('compiled worker rejects the retired raw-tool protocol', async () => {
+  const result = await runCompiledWorker({ command: 'call', tool: 'github', args: { action: 'nope' } });
+  assert.equal(result.code, 1);
+  assert.deepEqual(result.output, {
+    ok: false,
+    error: { code: 'invalid_worker_request', message: 'Invalid worker request.' },
+  });
+});
 
 const DIFFBOT_KEYS = [
   'DIFFBOT_TOKEN',
