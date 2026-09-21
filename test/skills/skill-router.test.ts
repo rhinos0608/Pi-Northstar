@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 import test from "node:test";
 import { runCommand } from "../../src/cli/cli.js";
@@ -57,23 +57,23 @@ test("CLI discovery and domain help independently reflect command registry entri
   );
 });
 
-test("root router declares every registry skill and no undeclared migrated command", () => {
+test("root router stays compact while domain skills own migrated command grammar", () => {
   const rootSkill = readFileSync(join(root, "SKILL.md"), "utf8");
-  for (const skill of DOMAIN_SKILLS) {
-    assert.match(rootSkill, new RegExp(skill.commandId.replace(".", "\\.")));
+
+  for (const path of skillFileInventory()) {
     assert.match(
       rootSkill,
-      new RegExp(skill.cliCommand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-    );
-    assert.match(
-      rootSkill,
-      new RegExp(skill.skillPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     );
   }
-  assert.match(
-    rootSkill,
-    /Only `github\.file`, `github\.repo`, `github\.tree`, `github\.trending`, `github\.search`, `github\.search_repos`, `github\.issues`, `github\.pulls`, `github\.releases`, `github\.commits`, `github\.workflows`, `github\.runs`, `research\.search`, `research\.paper`, `research\.citations`, `social\.search`, `social\.read`, `media\.details`, `media\.transcript`, `media\.feed`, `kg\.search`, `kg\.enhance`, `graph\.query`, `graph\.probe`, `fetch\.read`, and `search\.web` are migrated/,
-  );
+
+  for (const skill of DOMAIN_SKILLS) {
+    const domainSkillText = readFileSync(join(root, skill.skillPath), "utf8");
+    assert.match(
+      domainSkillText,
+      new RegExp(skill.cliCommand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+  }
 });
 
 test("registry skill inventory and optional Pi inventory are bounded", () => {
@@ -128,7 +128,7 @@ test("registry skill inventory and optional Pi inventory are bounded", () => {
 });
 
 test("packed artifact contains every registered domain skill", () => {
-  const output = execFileSync("npm", ["pack", "--dry-run", "--json"], {
+  const output = execSync("npm pack --dry-run --json", {
     cwd: root,
     encoding: "utf8",
   });
