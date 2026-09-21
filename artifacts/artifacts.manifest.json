@@ -1,0 +1,6 @@
+{
+  "manifestVersion": "1.0.0",
+  "generatedAt": "2026-03-30T00:00:00.000Z",
+  "_note": "Hashes are enrolled at packaging/signing time (Slice 12); empty artifacts means every driver lookup fails closed until enrolled.",
+  "artifacts": {}
+}

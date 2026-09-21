@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fail closed on any dscl error
+trap 'echo "Error: postinstall failed on line $LINENO" >&2; exit 1' ERR
+
+POOL_USERS=("_northstar_pool_1" "_northstar_pool_2" "_northstar_pool_3" "_northstar_pool_4")
+BASE_UID=451
+
+for idx in "${!POOL_USERS[@]}"; do
+  username="${POOL_USERS[$idx]}"
+  uid=$((BASE_UID + idx))
+
+  # Skip existing accounts idempotently
+  if dscl . -read "/Users/$username" >/dev/null 2>&1; then
+    echo "Account $username already exists, skipping creation"
+  else
+    echo "Creating isolated pool account: $username (UID: $uid)"
+    dscl . -create "/Users/$username"
+    dscl . -create "/Users/$username" UserShell /usr/bin/false
+    dscl . -create "/Users/$username" RealName "Northstar Worker Pool $idx"
+    dscl . -create "/Users/$username" UniqueID "$uid"
+    dscl . -create "/Users/$username" PrimaryGroupID 20
+    dscl . -create "/Users/$username" NFSHomeDirectory /var/empty
+    dscl . -create "/Users/$username" IsHidden 1
+  fi
+done
+
+# Ensure accounts are hidden from login window
+LOGINWINDOW_PLIST="/Library/Preferences/com.apple.loginwindow"
+for username in "${POOL_USERS[@]}"; do
+  # Read existing HiddenUsersList or append
+  if ! defaults read "$LOGINWINDOW_PLIST" HiddenUsersList 2>/dev/null | grep -q "$username"; then
+    echo "Hiding $username from loginwindow"
+    defaults write "$LOGINWINDOW_PLIST" HiddenUsersList -array-add "$username" || true
+  fi
+done
+
+# Ensure log directory exists
+mkdir -p /var/log/northstar
+chmod 0755 /var/log/northstar
+
+# Load launchd daemon
+PLIST_SRC="/Library/LaunchDaemons/com.pi.northstar.broker.plist"
+if [ -f "$PLIST_SRC" ]; then
+  echo "Configuring launchd daemon $PLIST_SRC"
+  chown root:wheel "$PLIST_SRC"
+  chmod 0644 "$PLIST_SRC"
+
+  # Unload if currently loaded
+  launchctl bootout system/com.pi.northstar.broker 2>/dev/null || launchctl unload "$PLIST_SRC" 2>/dev/null || true
+
+  # Load and start
+  launchctl bootstrap system "$PLIST_SRC" 2>/dev/null || launchctl load -w "$PLIST_SRC"
+fi
+
+echo "Northstar postinstall completed successfully."
+exit 0

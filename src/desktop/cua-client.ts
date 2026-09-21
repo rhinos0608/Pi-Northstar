@@ -1,7 +1,12 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { StdioClientTransport, type StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { UPSTREAM_TOOLS, type UpstreamTool } from './desktop-contract.js';
+import { assertDriverTrusted, loadBundledManifest } from './driver-manifest.js';
+import { resolveCliCommand, windowsPathValue } from '../process/cli-command.js';
+
 export const CUA_DRIVER_VERSION='0.7.1';
 export const CUA_DRIVER_COMMAND='cua-driver';
 const BASE_ENV=['PATH','HOME','USERPROFILE','TMPDIR','TEMP','TMP','LANG','LC_ALL'];
@@ -23,5 +28,50 @@ export class CuaClient implements CuaTransport {
  private async open():Promise<void>{ const verify=this.deps.verifyDriver??verifyCuaDriverVersion; await verify(this.params.command); const transport=(this.deps.createTransport??((params)=>new StdioClientTransport(params)))(this.params); try{ const client=this.deps.createClient?.()??new Client({name:'pi-northstar-cua-desktop',version:'0.1.0'}); transport.stderr?.on('data',()=>undefined); await client.connect(transport); const listed=await client.listTools(); const names=new Set(listed.tools.map(tool=>tool.name)); for(const required of ['health_report','list_apps','list_windows','get_window_state']) if(!names.has(required)) throw new Error(`DRIVER_UNAVAILABLE: missing required tool ${required}`); if(this.closed){ try{await transport.close();}catch{/* already closing; drop the late transport */} throw new Error('Cua client is closed.'); } this.transport=transport;this.client=client; }catch(error){ try{await transport.close();}catch{/* preserve original open error; close is best-effort child reaping */} throw error; } }
 }
 type cuaServerParametersLike=StdioServerParameters;
-function verifyCuaDriverVersion(command:string):Promise<void>{ return new Promise((resolve,reject)=>{ execFile(command,['--version'],{timeout:10000,env:{PATH:process.env.PATH??''}},(error,stdout)=>{ if(error){reject(new Error(`DRIVER_UNAVAILABLE: version check failed: ${error.message}`)); return;} const output=String(stdout).trim(); const expected=CUA_DRIVER_VERSION; const valid=output===expected||output===`cua-driver ${expected}`; if(!valid){reject(new Error(`DRIVER_UNAVAILABLE: expected exact Cua Driver ${expected}`)); return;} resolve(); }); }); }
-function isDispatchLoss(error:unknown):boolean { return error instanceof Error && /closed|disconnect|transport|abort|timeout/i.test(error.message); }
+export function resolveCuaDriverExecutable(
+  command = CUA_DRIVER_COMMAND,
+  env: Record<string, string | undefined> = process.env,
+  platform: NodeJS.Platform = process.platform
+): string | undefined {
+  if (command.includes('/') || command.includes('\\')) {
+    return existsSync(command) ? command : undefined;
+  }
+  const pathValue = platform === 'win32' ? windowsPathValue(env) : (env.PATH ?? '');
+  if (platform === 'win32') {
+    const resolved = resolveCliCommand(command, { platform, pathValue });
+    if (resolved !== command && existsSync(resolved)) return resolved;
+    return undefined;
+  }
+  for (const dir of pathValue.split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function verifyCuaDriverVersion(command: string): Promise<void> {
+  // Gate B Slice 10: verify driver binary against artifact manifest before spawn.
+  // Missing manifest or unenrolled entry skips gate silently; enrolled mismatch throws.
+  // Resolve executable via sanitized PATH logic.
+  const resolvedPath = resolveCuaDriverExecutable(command);
+  if (resolvedPath) {
+    const manifest = loadBundledManifest();
+    if (manifest) {
+      const platform = `${process.platform}-${process.arch}`;
+      assertDriverTrusted(manifest, 'cua-driver', platform, resolvedPath);
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    execFile(command, ['--version'], { timeout: 10000, env: { PATH: process.env.PATH ?? '' } }, (error, stdout) => {
+      if (error) { reject(new Error(`DRIVER_UNAVAILABLE: version check failed: ${error.message}`)); return; }
+      const output = String(stdout).trim();
+      const expected = CUA_DRIVER_VERSION;
+      const valid = output === expected || output === `cua-driver ${expected}`;
+      if (!valid) { reject(new Error(`DRIVER_UNAVAILABLE: expected exact Cua Driver ${expected}`)); return; }
+      resolve();
+    });
+  });
+}
+function isDispatchLoss(error: unknown): boolean { return error instanceof Error && /closed|disconnect|transport|abort|timeout/i.test(error.message); }

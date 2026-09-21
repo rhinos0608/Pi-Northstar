@@ -1,0 +1,15 @@
+[Unit]
+Description=Northstar Broker Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/northstar-broker
+DynamicUser=yes
+StateDirectory=northstar
+NoNewPrivileges=yes
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
