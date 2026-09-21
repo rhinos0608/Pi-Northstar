@@ -299,7 +299,7 @@ async function tryMediaUrlFetch(url: string, options: NativeFetchOptions): Promi
     }
   }
   try {
-    return await callReachTool('video', { url }, options);
+    return await callReachTool('media', { url }, options);
   } catch {
     return undefined;
   }

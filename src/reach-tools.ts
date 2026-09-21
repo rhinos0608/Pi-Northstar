@@ -14,7 +14,7 @@ import { guardResult, jsonTextResult } from './core/tool-output.js';
 import { executeMedia } from './media/media.js';
 import { executeSocial } from './social/social.js';
 
-export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds' | 'media';
+export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'feeds' | 'media';
 
 interface ReachToolOptions {
   signal?: AbortSignal;
@@ -80,8 +80,6 @@ async function dispatchReachTool(
       return callSetupTool(args, options);
     case 'social':
       return social(args, options);
-    case 'video':
-      return executeMedia('video', args, options);
     case 'feeds':
       return executeMedia('feeds', args, options);
     case 'media':

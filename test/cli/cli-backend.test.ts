@@ -38,6 +38,8 @@ function runCompiledWorker(request: unknown): Promise<{ code: number | null; out
 test('parent maps supported tools to canonical command ids and rejects unsupported calls', () => {
   assert.equal(mapCliToolToCommandId('web_search', { query: 'q' }), 'search.web');
   assert.equal(mapCliToolToCommandId('fetch', { url: 'https://example.com' }), 'fetch.read');
+  assert.equal(mapCliToolToCommandId('media', { action: 'details', id: 'abc' }), 'media.details');
+  assert.throws(() => mapCliToolToCommandId('video', { action: 'details', id: 'abc' }), /does not support/);
   assert.throws(() => mapCliToolToCommandId('github', { action: 'unknown' }), /does not support/);
 });
 

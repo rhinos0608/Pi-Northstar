@@ -2,7 +2,7 @@
 //
 // Built on runVideoPipeline (pipeline-video.ts): metadata from yt-dlp
 // duration/title (bounded) only under the exact-'1' frames opt-in, transcript
-// from the existing transcript path only (callReachTool('video'), no new
+// from the existing transcript path only (callReachTool('media'), no new
 // transcript backend), keyframes from extractYoutubeKeyframes only when
 // PI_VISION_FETCH_VIDEO_FRAMES === '1', keyframe description through the existing image describe seams selected by
 // eligibility order with eligibleTiersAfterFailure on tier failure (never
@@ -106,7 +106,7 @@ export async function runFetchVideoAnalysis(
     }
     try {
       const result = await callReachTool(
-        'video',
+        'media',
         { url },
         { ...(signal !== undefined ? { signal } : {}), env: env as Record<string, string | undefined> },
       );

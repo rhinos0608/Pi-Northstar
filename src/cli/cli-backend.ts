@@ -32,7 +32,7 @@ const SOCIAL_READ_ACTIONS = new Set(['get_post', 'get_thread', 'get_comments', '
 const MEDIA_COMMANDS: Readonly<Record<string, string>> = { details: 'media.details', transcript: 'media.transcript', feed: 'media.feed', search: 'media.search', hot: 'media.hot' };
 export function mapCliToolToCommandId(name: string, args: Record<string, unknown>): string {
   const action = typeof args.action === 'string' ? args.action : undefined;
-  const commandId = name === 'web_search' ? 'search.web' : name === 'fetch' ? 'fetch.read' : name === 'github' && action ? GITHUB_COMMANDS[action] : name === 'research' && action ? RESEARCH_COMMANDS[action] : name === 'social' && (action === undefined || action === 'search') ? 'social.search' : name === 'social' && action !== undefined && SOCIAL_READ_ACTIONS.has(action) ? 'social.read' : (name === 'video' || name === 'media') && action ? MEDIA_COMMANDS[action] : name === 'feeds' ? 'media.feed' : name === 'kg' && action === 'search' && args.cursor !== undefined && args.providers === undefined ? 'kg.search' : name === 'graph' && (action === 'query' || action === 'probe') ? `graph.${action}` : undefined;
+  const commandId = name === 'web_search' ? 'search.web' : name === 'fetch' ? 'fetch.read' : name === 'github' && action ? GITHUB_COMMANDS[action] : name === 'research' && action ? RESEARCH_COMMANDS[action] : name === 'social' && (action === undefined || action === 'search') ? 'social.search' : name === 'social' && action !== undefined && SOCIAL_READ_ACTIONS.has(action) ? 'social.read' : name === 'media' && action ? MEDIA_COMMANDS[action] : name === 'feeds' ? 'media.feed' : name === 'kg' && action === 'search' && args.cursor !== undefined && args.providers === undefined ? 'kg.search' : name === 'graph' && (action === 'query' || action === 'probe') ? `graph.${action}` : undefined;
   if (commandId === undefined) throw new Error(`CLI backend does not support tool '${name}' with requested action`);
   return commandId;
 }
@@ -437,8 +437,8 @@ const RESEARCH_CREDENTIALS = [
 ];
 
 /** Provider presence keys for the canonical social/media-family CLI children
- *  (social, video, feeds, media). Each scoped child checks provider auth across
- *  families, so all four share the same presence keys. Status-only helpers such
+ *  (social, feeds, media). Each scoped child checks provider auth across
+ *  families, so all three share the same presence keys. Status-only helpers such
  *  as reach_status/reach_setup are not CLI children on this path and resolve to
  *  base config only via the unknown-tool default below. */
 const REACH_CREDENTIALS = [
@@ -472,7 +472,6 @@ const CLI_TOOL_CREDENTIALS: Record<string, readonly string[]> = {
   // process-env GRAPH_SPARQL_* survives the default CLI boundary.
   graph: ['GRAPH_SPARQL_ENDPOINT', 'GRAPH_SPARQL_TOKEN', 'DIFFBOT_TOKEN'],
   social: REACH_CREDENTIALS,
-  video: REACH_CREDENTIALS,
   feeds: REACH_CREDENTIALS,
   media: REACH_CREDENTIALS,
 };

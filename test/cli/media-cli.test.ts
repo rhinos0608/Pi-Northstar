@@ -337,8 +337,8 @@ test("native media bypass closes through the registry: out-of-range limits never
 });
 
 test("native media legacy spellings stay out of the migrated registry path", async () => {
-  // Unmigrated 'video' keeps the legacy reach dispatch: it rejects without a
-  // registry commandResult, never through media.details.
+  // Legacy 'video' action spelling rejects before the registry dispatch: it
+  // carries no commandResult, never through media.details.
   await assert.rejects(
     callNativeTool(
       "media",

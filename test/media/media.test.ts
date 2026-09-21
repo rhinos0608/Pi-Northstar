@@ -90,7 +90,7 @@ test("feeds tool defaults to the rss channel without a platform", async () => {
   );
 });
 
-test("video tool infers youtube from a canonical watch URL", async () => {
+test("media tool infers youtube from a canonical watch URL", async () => {
   await withFetch(
     async (input) => {
       const url = String(input);
@@ -103,7 +103,7 @@ test("video tool infers youtube from a canonical watch URL", async () => {
     },
     async () => {
       const result = await callNativeTool(
-        "video",
+        "media",
         { url: "https://www.youtube.com/watch?v=inf1", action: "details" },
         { env: {} },
       );
@@ -114,10 +114,10 @@ test("video tool infers youtube from a canonical watch URL", async () => {
   );
 });
 
-test("video tool without platform or url rejects invalid_request", async () => {
+test("media tool without platform or url rejects invalid_request", async () => {
   await assert.rejects(
     () =>
-      callNativeTool("video", { action: "search", query: "cats" }, { env: {} }),
+      callNativeTool("media", { action: "search", query: "cats" }, { env: {} }),
     /platform is required/,
   );
 });
@@ -157,7 +157,7 @@ test("youtube search cursor round-trips pageToken with backend pinning", async (
     },
     async () => {
       const first = await callNativeTool(
-        "video",
+        "media",
         { platform: "youtube", action: "search", query: "cats" },
         { env: { YOUTUBE_API_KEY: "k" } },
       );
@@ -179,7 +179,7 @@ test("youtube search cursor round-trips pageToken with backend pinning", async (
     },
     async () => {
       const second = await callNativeTool(
-        "video",
+        "media",
         {
           platform: "youtube",
           action: "search",
@@ -213,7 +213,7 @@ test("youtube search cursor with changed selectors rejects cursor_invalid", asyn
     },
     async () => {
       const first = await callNativeTool(
-        "video",
+        "media",
         { platform: "youtube", action: "search", query: "cats" },
         { env: { YOUTUBE_API_KEY: "k" } },
       );
@@ -224,7 +224,7 @@ test("youtube search cursor with changed selectors rejects cursor_invalid", asyn
   await assert.rejects(
     () =>
       callNativeTool(
-        "video",
+        "media",
         {
           platform: "youtube",
           action: "search",
@@ -242,7 +242,7 @@ test("bilibili and rss report unsupported pagination (cursor rejected)", async (
   await assert.rejects(
     () =>
       callNativeTool(
-        "video",
+        "media",
         { platform: "bilibili", action: "hot", cursor: "bogus" },
         { env: { PATH: "/nonexistent" } },
       ),
@@ -279,7 +279,7 @@ test("youtube search empty items are valid-empty and stop without extra attempts
     },
     async () => {
       const result = await callNativeTool(
-        "video",
+        "media",
         { platform: "youtube", action: "search", query: "nothing" },
         { env: { YOUTUBE_API_KEY: "k" } },
       );
@@ -311,7 +311,7 @@ test("youtube entity ids are namespaced and northstar envelope validates", async
     },
     async () => {
       const result = await callNativeTool(
-        "video",
+        "media",
         { platform: "youtube", action: "details", id: "v9" },
         { env: { YOUTUBE_API_KEY: "k" } },
       );
@@ -376,7 +376,7 @@ test("youtube transcript malformed non-XML timedtext surfaces a youtube-transcri
       await assert.rejects(
         () =>
           callNativeTool(
-            "video",
+            "media",
             { platform: "youtube", action: "transcript", id: "abc123" },
             { env: {} },
           ),
@@ -393,7 +393,7 @@ test("youtube transcript malformed non-XML timedtext surfaces a youtube-transcri
 test("media limit rejects above channel cap without dispatch", async () => {
   await assert.rejects(() =>
     callNativeTool(
-      "video",
+      "media",
       { platform: "youtube", action: "search", query: "cats", limit: 500 },
       { env: { YOUTUBE_API_KEY: "k" } },
     ),

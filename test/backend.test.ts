@@ -183,7 +183,7 @@ test('CliSearchBackend: wall-clock timeout is a timeout failure, not AbortError'
   }
 });
 
-test('buildCliEnvironment credential-scope matrix: status helpers get base only; social/video/feeds/media share presence keys', () => {
+test('buildCliEnvironment credential-scope matrix: status helpers get base only; social/feeds/media share presence keys', () => {
   const parent = {
     PATH: '/usr/bin',
     REDDIT_COOKIE: 'probe-reddit-cookie',
@@ -201,7 +201,7 @@ test('buildCliEnvironment credential-scope matrix: status helpers get base only;
     assert.equal(env.PI_SEARCH_CHROME_BRIDGE_TOKEN, undefined);
     assert.equal(env.STRIPE_API_KEY, undefined);
   }
-  for (const tool of ['social', 'video', 'feeds', 'media']) {
+  for (const tool of ['social', 'feeds', 'media']) {
     const env = buildCliEnvironment(parent, tool);
     assert.equal(env.REDDIT_COOKIE, 'probe-reddit-cookie');
     assert.equal(env.GITHUB_TOKEN, 'probe-github-token');

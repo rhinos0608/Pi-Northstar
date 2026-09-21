@@ -102,7 +102,7 @@ function commandIdFor(name: string, args: Record<string, unknown>): string | und
     if (action === 'search' || action === undefined) return 'social.search';
     return action !== undefined && SOCIAL_READ_ACTIONS.has(action) ? 'social.read' : undefined;
   }
-  if ((name === 'video' || name === 'media') && action) return MEDIA_COMMANDS[action];
+  if (name === 'media' && action) return MEDIA_COMMANDS[action];
   if (name === 'feeds') return 'media.feed';
   // Native KG retains richer multi-provider semantics; CLI handler is narrower.
   if (name === 'kg' && action === 'search' && args.cursor !== undefined && args.providers === undefined) return 'kg.search';
