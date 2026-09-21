@@ -1,7 +1,8 @@
-// Leaf-runtime RPC v1 wire contract (Pi-Atlas copy, self-contained).
+// Leaf-runtime RPC v1 consumer contract (Pi-Atlas mirror, self-contained).
 //
-// Ground truth lives in pi-subagents src/api/runtime-rpc.ts; the constants
-// below are copied verbatim so Pi-Atlas never imports the other repo.
+// Producer ground truth lives in pi-subagents src/api/runtime-rpc.ts.
+// This file mirrors the client-relevant wire vocabulary/bounds without
+// importing the sibling repo; producer-only state/bounds may remain there.
 // Unknown versions/methods/fields fail closed (reject, never clamp).
 
 /** Protocol version. Unknown versions fail closed. */
@@ -20,7 +21,7 @@ export function runtimeRpcReplyEvent(requestId: string): string {
   return `${RUNTIME_RPC_REPLY_EVENT_PREFIX}${requestId}`;
 }
 
-/** Server-side bounds, copied exactly from the ground-truth contract. */
+/** Client-relevant wire bounds mirrored from the producer contract. */
 export const RUNTIME_RPC_BOUNDS = {
   maxParallelRuns: 4,
   maxResultBytes: 262_144,
@@ -160,7 +161,7 @@ export interface RuntimeStartV1 {
   prompt: string;
   maxOutputTokens: number;
   timeoutMs: number;
-  /** Syntactically accepted; semantically rejected while text-only. */
+  /** Optional negotiated JSON schema. The producer applies dialect-specific shape validation. */
   outputSchema?: Record<string, unknown>;
   correlation: RuntimeCorrelation;
 }
