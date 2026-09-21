@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -17,7 +17,6 @@ fn bin_path() -> PathBuf {
 struct BrokerChild {
     child: Child,
     _temp: tempfile::TempDir,
-    socket_path: PathBuf,
 }
 
 impl Drop for BrokerChild {
@@ -146,10 +145,12 @@ fn test_executor_stub_reads_then_drops_yields_after_dispatch() {
 fn test_executor_stub_dead_listener_yields_before_dispatch() {
     let temp = tempdir().unwrap();
     let sock_path = temp.path().join("dead.sock");
-    {
-        let _listener = UnixListener::bind(&sock_path).unwrap();
-        // Listener dropped immediately -> socket exists on disk but nobody listening
-    }
+    // NOTE: do NOT bind+drop a listener here. On macOS the socket teardown
+    // after drop races a subsequent connect (connect can transiently succeed
+    // against the dying socket, yielding AfterDispatch instead of
+    // BeforeDispatch). A regular file models the same observable state —
+    // path present, nobody listening — with zero kernel timing dependence.
+    std::fs::write(&sock_path, b"not a socket").unwrap();
 
     let upstream = ExecutorUpstream::new(&sock_path);
     let res = upstream.execute(b"{}", Duration::from_secs(1));
@@ -231,7 +232,6 @@ fn test_broker_forwarding_lifecycle_with_executor_socket() {
     let mut broker = BrokerChild {
         child,
         _temp: temp,
-        socket_path: broker_sock.clone(),
     };
 
     let mut stream = None;
