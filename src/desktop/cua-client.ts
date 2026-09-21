@@ -16,7 +16,7 @@ export function buildCuaEnvironment(env:Record<string,string|undefined>=process.
 export function cuaServerParameters(env:Record<string,string|undefined>=process.env):StdioServerParameters { return { command:CUA_DRIVER_COMMAND,args:['mcp'],env:buildCuaEnvironment(env),stderr:'pipe' }; }
 export interface CuaCallOptions { signal?:AbortSignal; timeout?:number; resource?:string; mutation?:boolean; }
 export interface CuaTransport { callTool(name:string,args:Record<string,unknown>, options?:{signal?:AbortSignal;timeout?:number}):Promise<unknown>; listTools?():Promise<unknown>; close():Promise<void>; status?():Promise<unknown>; }
-export interface CuaClientDeps { verifyDriver?:(command:string)=>Promise<void>; createTransport?:(params:cuaServerParametersLike)=>StdioClientTransport; createClient?:()=>Client; }
+export interface CuaClientDeps { verifyDriver?: (command: string) => Promise<string | void>; createTransport?: (params: cuaServerParametersLike) => StdioClientTransport; createClient?: () => Client; }
 export class CuaClient implements CuaTransport {
  private client:Client|undefined; private transport:StdioClientTransport|undefined; private connecting:Promise<void>|undefined; private closed=false; private readonly queues=new Map<string,Promise<void>>(); private readonly factoryTransports=new Set<CuaTransport>();
  constructor(private readonly params:cuaServerParametersLike=cuaServerParameters(), private readonly factory?:()=>CuaTransport, private readonly deps:CuaClientDeps={}) {}
@@ -25,7 +25,7 @@ export class CuaClient implements CuaTransport {
  async close():Promise<void>{this.closed=true; const connecting=this.connecting; if(connecting){try{await connecting;}catch{/* open error belongs to the connect caller; close still reaps */}} const transport=this.transport; this.transport=undefined; this.client=undefined; try{await transport?.close();}catch{/* primary close is best-effort; continue factory cleanup */} const pending=[...this.factoryTransports]; this.factoryTransports.clear(); await Promise.allSettled(pending.map(t=>t.close())); this.queues.clear();}
  private async rawCall(name:string,args:Record<string,unknown>,options:CuaCallOptions):Promise<unknown>{ if(this.factory){ if(this.closed)throw new Error('Cua client is closed.'); const transport=this.factory(); this.factoryTransports.add(transport); try{return await transport.callTool(name,args,options);}finally{this.factoryTransports.delete(transport);} } const client=await this.connect(); return client.callTool({name,arguments:args},undefined,{...(options.signal?{signal:options.signal}:{}),timeout:options.timeout??15000,resetTimeoutOnProgress:true}); }
  private async connect():Promise<Client>{ if(this.closed)throw new Error('Cua client is closed.'); if(this.client)return this.client; if(this.connecting){await this.connecting; if(this.closed)throw new Error('Cua client is closed.'); return this.client!;} this.connecting=this.open(); try{await this.connecting; if(this.closed)throw new Error('Cua client is closed.'); return this.client!;}finally{this.connecting=undefined;} }
- private async open():Promise<void>{ const verify=this.deps.verifyDriver??verifyCuaDriverVersion; await verify(this.params.command); const transport=(this.deps.createTransport??((params)=>new StdioClientTransport(params)))(this.params); try{ const client=this.deps.createClient?.()??new Client({name:'pi-northstar-cua-desktop',version:'0.1.0'}); transport.stderr?.on('data',()=>undefined); await client.connect(transport); const listed=await client.listTools(); const names=new Set(listed.tools.map(tool=>tool.name)); for(const required of ['health_report','list_apps','list_windows','get_window_state']) if(!names.has(required)) throw new Error(`DRIVER_UNAVAILABLE: missing required tool ${required}`); if(this.closed){ try{await transport.close();}catch{/* already closing; drop the late transport */} throw new Error('Cua client is closed.'); } this.transport=transport;this.client=client; }catch(error){ try{await transport.close();}catch{/* preserve original open error; close is best-effort child reaping */} throw error; } }
+ private async open():Promise<void>{ const verify=this.deps.verifyDriver??verifyCuaDriverVersion; const verified=await verify(this.params.command); const driverCommand=typeof verified==='string'&&verified.length>0?verified:this.params.command; const spawnParams={...this.params,command:driverCommand}; const transport=(this.deps.createTransport??((params)=>new StdioClientTransport(params)))(spawnParams); try{ const client=this.deps.createClient?.()??new Client({name:'pi-northstar-cua-desktop',version:'0.1.0'}); transport.stderr?.on('data',()=>undefined); await client.connect(transport); const listed=await client.listTools(); const names=new Set(listed.tools.map(tool=>tool.name)); for(const required of ['health_report','list_apps','list_windows','get_window_state']) if(!names.has(required)) throw new Error(`DRIVER_UNAVAILABLE: missing required tool ${required}`); if(this.closed){ try{await transport.close();}catch{/* already closing; drop the late transport */} throw new Error('Cua client is closed.'); } this.transport=transport;this.client=client; }catch(error){ try{await transport.close();}catch{/* preserve original open error; close is best-effort child reaping */} throw error; } }
 }
 type cuaServerParametersLike=StdioServerParameters;
 export function resolveCuaDriverExecutable(
@@ -50,27 +50,28 @@ export function resolveCuaDriverExecutable(
   return undefined;
 }
 
-function verifyCuaDriverVersion(command: string): Promise<void> {
+function verifyCuaDriverVersion(command: string): Promise<string> {
   // Gate B Slice 10: verify driver binary against artifact manifest before spawn.
   // Missing manifest or unenrolled entry skips gate silently; enrolled mismatch throws.
   // Resolve executable via sanitized PATH logic.
   const resolvedPath = resolveCuaDriverExecutable(command);
-  if (resolvedPath) {
-    const manifest = loadBundledManifest();
-    if (manifest) {
-      const platform = `${process.platform}-${process.arch}`;
-      assertDriverTrusted(manifest, 'cua-driver', platform, resolvedPath);
-    }
+  if (!resolvedPath) {
+    return Promise.reject(new Error(`DRIVER_UNAVAILABLE: driver executable not found for '${command}'`));
+  }
+  const manifest = loadBundledManifest();
+  if (manifest) {
+    const platform = `${process.platform}-${process.arch}`;
+    assertDriverTrusted(manifest, 'cua-driver', platform, resolvedPath);
   }
 
   return new Promise((resolve, reject) => {
-    execFile(command, ['--version'], { timeout: 10000, env: { PATH: process.env.PATH ?? '' } }, (error, stdout) => {
+    execFile(resolvedPath, ['--version'], { timeout: 10000, env: { PATH: process.env.PATH ?? '' } }, (error, stdout) => {
       if (error) { reject(new Error(`DRIVER_UNAVAILABLE: version check failed: ${error.message}`)); return; }
       const output = String(stdout).trim();
       const expected = CUA_DRIVER_VERSION;
       const valid = output === expected || output === `cua-driver ${expected}`;
       if (!valid) { reject(new Error(`DRIVER_UNAVAILABLE: expected exact Cua Driver ${expected}`)); return; }
-      resolve();
+      resolve(resolvedPath);
     });
   });
 }

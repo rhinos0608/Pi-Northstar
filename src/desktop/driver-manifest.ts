@@ -4,9 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 
 export class DriverManifestError extends Error {
-  constructor(message: string) {
+  readonly code?: string;
+  constructor(message: string, options?: { code?: string }) {
     super(message);
     this.name = 'DriverManifestError';
+    if (options?.code !== undefined) this.code = options.code;
   }
 }
 
@@ -46,7 +48,7 @@ export function loadManifestIfPresent(manifestPath: string): ArtifactManifest | 
   try {
     return loadArtifactManifest(manifestPath);
   } catch (error) {
-    if (error instanceof DriverManifestError && error.message.includes('ENOENT')) {
+    if (error instanceof DriverManifestError && error.code === 'ENOENT') {
       return undefined;
     }
     throw error;
@@ -65,8 +67,10 @@ export function loadArtifactManifest(manifestPath: string): ArtifactManifest {
   try {
     rawText = readFileSync(manifestPath, 'utf8');
   } catch (error) {
+    const errnoCode = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
     throw new DriverManifestError(
-      `Failed to read artifact manifest at ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to read artifact manifest at ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+      ...(typeof errnoCode === 'string' ? [{ code: errnoCode } as const] : []),
     );
   }
 

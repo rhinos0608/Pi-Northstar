@@ -17,7 +17,7 @@ import {
 } from '../../src/desktop/driver-manifest.js';
 
 test('loadArtifactManifest loads and validates valid manifest', () => {
-  const manifest = loadArtifactManifest('artifacts/artifacts.manifest.json');
+  const manifest = loadArtifactManifest(bundledManifestPath());
   assert.equal(manifest.manifestVersion, '1.0.0');
   assert.ok(manifest.generatedAt);
   assert.deepEqual(manifest.artifacts, {});
