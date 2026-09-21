@@ -21,6 +21,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run build
       - run: node --import tsx --test --test-timeout=30000 "test/**/*.test.ts"
         # Pin bash on all three OS: the quoted glob must reach node's own
         # glob expansion unexpanded (pwsh/cmd would split or expand it).
@@ -78,6 +79,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+      - run: npm ci
       - run: npm pack --json
       - name: Install tarball into empty directory and invoke packaged CLI
         run: |
