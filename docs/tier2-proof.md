@@ -350,3 +350,9 @@ node scripts/enroll-artifacts.mjs \
 - **Pass Criteria:**
   - Signature status is `Valid` / assessed accepted by OS security authority.
   - Manifest hash verification strictly matches file byte payload without drift.
+
+---
+
+## 3. Local Verification Log
+
+- **2026-09-21:** Local unsigned install on operator MacBook proved pkgbuild/productbuild flow, postinstall pool creation (`_northstar_pool_1..4`, hidden), launchd load; daemon stopped+uninstalled after verify because binary was then a stub. Note this daemon slice supersedes the stub.

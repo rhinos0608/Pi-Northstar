@@ -257,6 +257,11 @@ Stateful Northstar operations (`jobs`, background tasks, state queries, cancella
   - Stale endpoints are removed only after proving current UID ownership and verifying lock process is dead.
   - Foreground serve stays attached to terminal; Pi-owned child stays attached to Pi lifecycle.
   - Node executor never receives broker root signing key or session tokens.
+- **Executor Composition & Authority Boundary:**
+  - On the TypeScript host side, `ExecutorListener` binds an owner-only Unix socket (`0600`) within the project's runtime directory (`0700`) and enforces dual peer gating: (a) a single-use 32-byte CSPRNG token file (`0600`) unlinked immediately upon first successful auth, and (b) accepting only the very first connection while awaiting the broker child.
+  - On the Rust side, the broker connects to the executor socket and verifies peer UID matches its own EUID (`get_peer_identity`), achieving defense in depth without exposing secrets on argv.
+  - Failures before request dispatch are classified as `BeforeDispatch` (triggering fail-closed `runtime_unavailable` replies), whereas communication lost after dispatch is classified as `AfterDispatch` (triggering `runtime_timeout` and transitioning mutations to `outcome_unknown`).
+  - Cancellation requests (`cancelAndSettle`) stay local to the host/executor engine without altering wire reply shapes.
 - **TDD / Verification:**
   - Command: `node --import tsx --test test/runtime/broker-host-composition.test.ts test/runtime/broker-lifecycle-lock.test.ts`
   - Unprivileged test: Bidirectional message exchange over private pipe; concurrent starters test proving only one owner spawns; stale endpoint refusal test; fate-sharing tests: broker death terminates host, host death terminates broker.
