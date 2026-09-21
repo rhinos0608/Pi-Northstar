@@ -304,74 +304,34 @@ async function githubCommandResult(
         ? "OWNER/REPO and PATH required"
         : "OWNER/REPO required",
     );
-  try {
-    const { executeGithubFile } =
-      await import("../commands/github-file-handler.js");
-    const { executeGithubRepo } =
-      await import("../commands/github-repo-handler.js");
-    const { executeGithubTree } =
-      await import("../commands/github-tree-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result =
-      action === "repo"
-        ? await executeGithubRepo(
-            {
-              owner: match[1],
-              repo: match[2],
-              ...(includeReadme !== undefined ? { includeReadme } : {}),
-            },
-            createCommandContext({ surface: "cli", env }),
-          )
-        : action === "tree"
-          ? await executeGithubTree(
-              {
-                owner: match[1],
-                repo: match[2],
-                ...(ref ? { ref } : {}),
-                ...(recursive ? { recursive: true } : {}),
-              },
-              createCommandContext({ surface: "cli", env }),
-            )
-          : await executeGithubFile(
-              {
-                owner: match[1],
-                repo: match[2],
-                path,
-                ...(ref ? { ref } : {}),
-              },
-              createCommandContext({ surface: "cli", env }),
-            );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    const rendered = renderCommandResult(commandResult as never, mode);
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: rendered,
-      };
+  return runCommandResult(async () => {
+    const { executeGithubFile } = await import("../commands/github-file-handler.js");
+    const { executeGithubRepo } = await import("../commands/github-repo-handler.js");
+    const { executeGithubTree } = await import("../commands/github-tree-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    const context = createCommandContext({ surface: "cli", env });
+    if (action === "repo") {
+      return executeGithubRepo({
+        owner: match[1],
+        repo: match[2],
+        ...(includeReadme !== undefined ? { includeReadme } : {}),
+      }, context);
     }
-    return {
-      ok: true,
-      data: rendered,
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
+    if (action === "tree") {
+      return executeGithubTree({
+        owner: match[1],
+        repo: match[2],
+        ...(ref ? { ref } : {}),
+        ...(recursive ? { recursive: true } : {}),
+      }, context);
     }
-    return cliToolError(error);
-  }
+    return executeGithubFile({
+      owner: match[1],
+      repo: match[2],
+      path,
+      ...(ref ? { ref } : {}),
+    }, context);
+  }, mode);
 }
 
 async function researchPaperCommand(
@@ -412,44 +372,14 @@ async function researchPaperCommand(
   }
   if (positional.length !== 1)
     return errorResult("invalid_usage", `Usage: ${usage}`);
-  try {
-    const { executeResearchPaper } =
-      await import("../commands/research-paper-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result = await executeResearchPaper(
+  return runCommandResult(async () => {
+    const { executeResearchPaper } = await import("../commands/research-paper-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    return executeResearchPaper(
       { idOrUrl: positional[0], ...(source !== undefined ? { source } : {}) },
       createCommandContext({ surface: "cli", env }),
     );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  }, mode);
 }
 
 async function researchCitationsCommand(
@@ -503,49 +433,16 @@ async function researchCitationsCommand(
   }
   if (positional.length !== 1)
     return errorResult("invalid_usage", `Usage: ${usage}`);
-  try {
-    const { executeResearchCitations } =
-      await import("../commands/research-citations-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result = await executeResearchCitations(
-      {
-        id: positional[0],
-        ...(source !== undefined ? { source } : {}),
-        ...(limit !== undefined ? { limit } : {}),
-        ...(cursor !== undefined ? { cursor } : {}),
-      },
-      createCommandContext({ surface: "cli", env }),
-    );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeResearchCitations } = await import("../commands/research-citations-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    return executeResearchCitations({
+      id: positional[0],
+      ...(source !== undefined ? { source } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
+    }, createCommandContext({ surface: "cli", env }));
+  }, mode);
 }
 
 async function researchCommandResult(
@@ -664,52 +561,17 @@ async function researchCommandResult(
   }
   if (positional.length !== 1)
     return errorResult("invalid_usage", `Usage: ${usage}`);
-  try {
-    const { executeResearchSearch } =
-      await import("../commands/research-search-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result = await executeResearchSearch(
-      {
-        query: positional[0],
-        ...(source !== undefined ? { source } : {}),
-        ...(limit !== undefined ? { limit } : {}),
-        ...(yearFrom !== undefined ? { yearFrom } : {}),
-        ...(cursor !== undefined ? { cursor } : {}),
-      },
-      createCommandContext({ surface: "cli", env }),
-    );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    // Envelope failures return (never throw) like the native path; the CLI
-    // exit contract still reports them as failures.
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeResearchSearch } = await import("../commands/research-search-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    return executeResearchSearch({
+      query: positional[0],
+      ...(source !== undefined ? { source } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+      ...(yearFrom !== undefined ? { yearFrom } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
+    }, createCommandContext({ surface: "cli", env }));
+  }, mode);
 }
 
 interface CommandFlagSpec {
@@ -1244,52 +1106,15 @@ async function socialCommandResult(
       "--action is only supported for social read",
     );
   if (subcommand === "search") requestArgs.action = "search";
-  try {
-    const { executeSocialSearch } =
-      await import("../commands/social-search-handler.js");
-    const { executeSocialRead } =
-      await import("../commands/social-read-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result =
-      subcommand === "search"
-        ? await executeSocialSearch(
-            requestArgs,
-            createCommandContext({ surface: "cli", env }),
-          )
-        : await executeSocialRead(
-            requestArgs,
-            createCommandContext({ surface: "cli", env }),
-          );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeSocialSearch } = await import("../commands/social-search-handler.js");
+    const { executeSocialRead } = await import("../commands/social-read-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    const context = createCommandContext({ surface: "cli", env });
+    return subcommand === "search"
+      ? executeSocialSearch(requestArgs, context)
+      : executeSocialRead(requestArgs, context);
+  }, mode);
 }
 
 async function mediaCommandResult(
@@ -1413,73 +1238,20 @@ async function mediaCommandResult(
     )
       return errorResult("invalid_usage", "one of --id or --url is required");
   }
-  try {
-    const { executeMediaSearch } =
-      await import("../commands/media-search-handler.js");
-    const { executeMediaHot } =
-      await import("../commands/media-hot-handler.js");
-    const { executeMediaDetails } =
-      await import("../commands/media-details-handler.js");
-    const { executeMediaTranscript } =
-      await import("../commands/media-transcript-handler.js");
-    const { executeMediaFeed } =
-      await import("../commands/media-feed-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result =
-      subcommand === "search"
-        ? await executeMediaSearch(
-            requestArgs,
-            createCommandContext({ surface: "cli", env }),
-          )
-        : subcommand === "hot"
-          ? await executeMediaHot(
-              requestArgs,
-              createCommandContext({ surface: "cli", env }),
-            )
-          : subcommand === "details"
-            ? await executeMediaDetails(
-                requestArgs,
-                createCommandContext({ surface: "cli", env }),
-              )
-            : subcommand === "transcript"
-              ? await executeMediaTranscript(
-                  requestArgs,
-                  createCommandContext({ surface: "cli", env }),
-                )
-              : await executeMediaFeed(
-                  requestArgs,
-                  createCommandContext({ surface: "cli", env }),
-                );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeMediaSearch } = await import("../commands/media-search-handler.js");
+    const { executeMediaHot } = await import("../commands/media-hot-handler.js");
+    const { executeMediaDetails } = await import("../commands/media-details-handler.js");
+    const { executeMediaTranscript } = await import("../commands/media-transcript-handler.js");
+    const { executeMediaFeed } = await import("../commands/media-feed-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    const context = createCommandContext({ surface: "cli", env });
+    if (subcommand === "search") return executeMediaSearch(requestArgs, context);
+    if (subcommand === "hot") return executeMediaHot(requestArgs, context);
+    if (subcommand === "details") return executeMediaDetails(requestArgs, context);
+    if (subcommand === "transcript") return executeMediaTranscript(requestArgs, context);
+    return executeMediaFeed(requestArgs, context);
+  }, mode);
 }
 
 const KG_SEARCH_USAGE =
@@ -1665,52 +1437,15 @@ async function kgCommandResult(
         "--type Person|Organization is required for kg enhance",
       );
   }
-  try {
-    const { executeKgSearch } =
-      await import("../commands/kg-search-handler.js");
-    const { executeKgEnhance } =
-      await import("../commands/kg-enhance-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result =
-      subcommand === "search"
-        ? await executeKgSearch(
-            requestArgs,
-            createCommandContext({ surface: "cli", env }),
-          )
-        : await executeKgEnhance(
-            requestArgs,
-            createCommandContext({ surface: "cli", env }),
-          );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeKgSearch } = await import("../commands/kg-search-handler.js");
+    const { executeKgEnhance } = await import("../commands/kg-enhance-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    const context = createCommandContext({ surface: "cli", env });
+    return subcommand === "search"
+      ? executeKgSearch(requestArgs, context)
+      : executeKgEnhance(requestArgs, context);
+  }, mode);
 }
 
 const GRAPH_QUERY_USAGE =
@@ -1822,52 +1557,15 @@ async function graphCommandResult(
   } else {
     requestArgs.queries = queries;
   }
-  try {
-    const { executeGraphQuery } =
-      await import("../commands/graph-query-handler.js");
-    const { executeGraphProbe } =
-      await import("../commands/graph-probe-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result =
-      subcommand === "query"
-        ? await executeGraphQuery(
-            requestArgs,
-            createCommandContext({ surface: "cli", env }),
-          )
-        : await executeGraphProbe(
-            requestArgs,
-            createCommandContext({ surface: "cli", env }),
-          );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeGraphQuery } = await import("../commands/graph-query-handler.js");
+    const { executeGraphProbe } = await import("../commands/graph-probe-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    const context = createCommandContext({ surface: "cli", env });
+    return subcommand === "query"
+      ? executeGraphQuery(requestArgs, context)
+      : executeGraphProbe(requestArgs, context);
+  }, mode);
 }
 
 async function fetchCommandResult(
@@ -1992,44 +1690,11 @@ async function fetchCommandResult(
     return errorResult("invalid_usage", "URL or --response-id is required");
   }
 
-  try {
-    const { executeFetchRead } =
-      await import("../commands/fetch-read-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result = await executeFetchRead(
-      requestArgs,
-      createCommandContext({ surface: "cli", env }),
-    );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeFetchRead } = await import("../commands/fetch-read-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    return executeFetchRead(requestArgs, createCommandContext({ surface: "cli", env }));
+  }, mode);
 }
 
 async function searchCommandResult(
@@ -2134,44 +1799,11 @@ async function searchCommandResult(
     return errorResult("invalid_usage", `Usage: ${usage}`);
   requestArgs.query = positional[0];
 
-  try {
-    const { executeSearchWeb } =
-      await import("../commands/search-web-handler.js");
-    const { createCommandContext } =
-      await import("../commands/command-context.js");
-    const { renderCommandResult } =
-      await import("../commands/command-render.js");
-    const result = await executeSearchWeb(
-      requestArgs,
-      createCommandContext({ surface: "cli", env }),
-    );
-    const commandResult = (result.details as Record<string, unknown>)
-      ?.northstarCommand as { outcome?: string } | undefined;
-    if (
-      commandResult?.outcome === "failed" ||
-      commandResult?.outcome === "cancelled"
-    ) {
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return {
-      ok: true,
-      data: renderCommandResult(commandResult as never, mode),
-    };
-  } catch (error) {
-    const commandResult = (error as { commandResult?: unknown })?.commandResult;
-    if (commandResult !== undefined) {
-      const { renderCommandResult } =
-        await import("../commands/command-render.js");
-      return {
-        ok: false,
-        data: renderCommandResult(commandResult as never, mode),
-      };
-    }
-    return cliToolError(error);
-  }
+  return runCommandResult(async () => {
+    const { executeSearchWeb } = await import("../commands/search-web-handler.js");
+    const { createCommandContext } = await import("../commands/command-context.js");
+    return executeSearchWeb(requestArgs, createCommandContext({ surface: "cli", env }));
+  }, mode);
 }
 
 async function brokerCommandResult(
