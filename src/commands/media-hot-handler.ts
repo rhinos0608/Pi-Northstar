@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { BackendCallResult } from '../backend.js';
 import { executeMedia } from '../media/media.js';
 import type { NorthstarResultV1 } from '../result-contract.js';
@@ -212,11 +213,12 @@ type MediaExecutor = (
 ) => Promise<BackendCallResult>;
 
 const defaultExecutor: MediaExecutor = (channelName, args, options) => executeMedia(channelName, args, options);
+const scopedExecutor = new AsyncLocalStorage<MediaExecutor>();
 
-let executor: MediaExecutor = defaultExecutor;
-
+/** Test seam: override the media executor with scoped storage without touching network/CLIs. */
 export function setMediaHotExecutor(next: MediaExecutor | undefined): void {
-  executor = next ?? defaultExecutor;
+  if (next !== undefined) scopedExecutor.enterWith(next);
+  else scopedExecutor.disable();
 }
 
 export async function executeMediaHot(
@@ -233,6 +235,7 @@ export async function executeMediaHot(
     if (context.signal?.aborted === true) {
       throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     }
+    const executor = scopedExecutor.getStore() ?? defaultExecutor;
     const result = await executor(
       'media',
       {
