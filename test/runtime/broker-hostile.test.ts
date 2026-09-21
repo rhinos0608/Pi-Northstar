@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { connect, type Socket } from 'node:net';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { BrokerServer, type BrokerServerOptions } from '../../src/runtime/broker-server.js';
 import {
   decodeBrokerFrame,
@@ -137,7 +139,7 @@ test('decodeBrokerFrame hostile inputs fail closed', () => {
 //    and closes — assert error code, never a welcome.
 // ---------------------------------------------------------------------------
 test('malformed hello over live socket returns error code and closes (never welcome)', async () => {
-  const root = await mkdtemp('/tmp/ns-hostile-hello-');
+  const root = await mkdtemp(join(tmpdir(), 'ns-hostile-hello-'));
   const reply = {
     version: 1 as const,
     requestId: 'req',
@@ -181,6 +183,7 @@ test('malformed hello over live socket returns error code and closes (never welc
     });
   } finally {
     await server.stop();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -190,7 +193,7 @@ test('malformed hello over live socket returns error code and closes (never welc
 //    (start, connect, stop, restart, reconnect with old welcome must fail)
 // ---------------------------------------------------------------------------
 test('cross-project hello yields project_denied and token replay across restart fails', async () => {
-  const root = await mkdtemp('/tmp/ns-hostile-restart-');
+  const root = await mkdtemp(join(tmpdir(), 'ns-hostile-restart-'));
   const reply = {
     version: 1 as const,
     requestId: 'req',
@@ -312,6 +315,7 @@ test('cross-project hello yields project_denied and token replay across restart 
     }
   } finally {
     await server.stop();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -322,8 +326,9 @@ test('cross-project hello yields project_denied and token replay across restart 
 //    (write a lock file with dead pid e.g. 2^31-1 -> then acquire succeeds).
 // ---------------------------------------------------------------------------
 test('lock contention: double acquire throws lock_held; stale lock retaken', async () => {
-  const root = await mkdtemp('/tmp/ns-hostile-lock-');
+  const root = await mkdtemp(join(tmpdir(), 'ns-hostile-lock-'));
   const projectId = 'p_lock';
+  try {
 
   // 4a. First acquire succeeds
   await acquireBrokerLock(projectId, 'serve', root);
@@ -354,6 +359,9 @@ test('lock contention: double acquire throws lock_held; stale lock retaken', asy
 
   // Release lock
   await releaseBrokerLock(projectId, root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

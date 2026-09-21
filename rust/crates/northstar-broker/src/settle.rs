@@ -68,6 +68,8 @@ pub struct SettleRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettleReport {
     pub settled: Vec<String>,
+    /// Reserved for the later timed-settle slice; always empty from `settle_books`.
+    /// See `settle_books` docs and the `mark_timed_out` probe.
     pub timed_out: Vec<String>,
     pub unknown: Vec<String>,
 }
@@ -127,6 +129,12 @@ pub fn find_by_job_id(conn: &Connection, job_id: &str) -> Result<Option<ReceiptR
 /// - Completed -> settled (idempotent)
 /// - Pending | Dispatched -> transition_job(completed) -> settled
 /// - OutcomeUnknown -> unknown
+///
+/// Later-slice contract: the synchronous path settles immediately, so `timed_out`
+/// is always empty here by design. Async timeout observation uses the explicit
+/// `mark_timed_out` probe (Dispatched + owned -> true, job stays Dispatched);
+/// a future timed-settle loop should move probe-true ids into `timed_out` instead
+/// of settling them.
 pub fn settle_books(
     conn: &Connection,
     client_id: &str,

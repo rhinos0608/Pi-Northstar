@@ -13,6 +13,7 @@ function validDocument(value: unknown, maxEntries: number): value is StateDocume
 /** Atomic owner-local state. Corruption and unknown versions fail closed. */
 export class BrokerStateStore {
   private state: StateDocument | undefined;
+  private writeChain: Promise<void> = Promise.resolve();
   constructor(readonly path: string, private readonly maxReceipts = 512) { if (!Number.isInteger(maxReceipts) || maxReceipts < 1) throw new RangeError('Invalid receipt bound.'); }
   async open(): Promise<{ epoch: string; restarted: boolean }> { const document = await this.load(); const restarted = document !== undefined; this.state = document ?? { version: BROKER_STATE_VERSION, epoch: this.newEpoch(), receipts: [], mutationIds: [] }; this.state = { ...this.state, epoch: this.newEpoch() }; await this.persist(); return { epoch: this.state.epoch, restarted }; }
   /** Load persisted state for queries without rotating epoch or writing. */
@@ -26,6 +27,6 @@ export class BrokerStateStore {
   snapshot(): { version: 1; epoch: string; receipts: JobSubmissionReceipt[] } { const state = this.requireState(); return { version: 1, epoch: state.epoch, receipts: state.receipts.map(r => ({ ...r })) }; }
   private requireState(): StateDocument { if (!this.state) throw new BrokerStateError('state_io', 'State store is not open.'); return this.state; }
   private newEpoch(): string { return randomBytes(16).toString('base64url'); }
-  private async persist(): Promise<void> { const state = this.requireState(); const temporary = `${this.path}.tmp-${process.pid}`; try { await writeFile(temporary, JSON.stringify(state), { mode: 0o600 }); await chmod(temporary, 0o600); await rename(temporary, this.path); } catch (error) { throw new BrokerStateError('state_io', error instanceof Error ? error.message : 'State write failed.'); } }
+  private persist(): Promise<void> { const payload = JSON.stringify(this.requireState()); const run = this.writeChain.then(async () => { const temporary = `${this.path}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`; try { await writeFile(temporary, payload, { mode: 0o600 }); await chmod(temporary, 0o600); await rename(temporary, this.path); } catch (error) { throw new BrokerStateError('state_io', error instanceof Error ? error.message : 'State write failed.'); } }); this.writeChain = run.then(undefined, () => undefined); return run; }
 }
 export async function queryJobSubmission(path: string, clientId: string, requestId: string): Promise<JobSubmissionReceipt | undefined> { const store = new BrokerStateStore(path); await store.openReadOnly(); return store.getReceipt(clientId, requestId); }

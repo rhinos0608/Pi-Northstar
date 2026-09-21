@@ -41,6 +41,12 @@ impl BrokerAuth {
     }
 }
 
+impl Default for BrokerAuth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn new_epoch() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);

@@ -7,7 +7,7 @@ export interface BrokerEndpoint { rootDir: string; socketPath: string; }
 export function brokerEndpoint(projectId: string, root = process.env.NORTHSTAR_RUNTIME_DIR ?? join(homedir(), '.northstar', 'runtime')): BrokerEndpoint {
   if (!/^[A-Za-z0-9._-]{1,96}$/.test(projectId)) throw new BrokerError('endpoint_unsafe');
   const rootDir = join(root, projectId);
-  return { rootDir, socketPath: process.platform === 'win32' ? `\\.\\pipe\\northstar-${projectId}` : join(rootDir, 'broker.sock') };
+  return { rootDir, socketPath: process.platform === 'win32' ? `\\\\.\\pipe\\northstar-${projectId}` : join(rootDir, 'broker.sock') };
 }
 export async function ensureOwnerOnlyDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 }); await chmod(path, 0o700); await assertOwner(path, true);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireBrokerLock, releaseBrokerLock, readBrokerLock, BrokerLockError } from '../../src/runtime/broker-lock.js';
@@ -43,14 +43,18 @@ test('second acquire while held throws lock_held', async () => {
 test('release by non-owner is a no-op', async () => {
   await withTempRoot(async (root) => {
     await acquireBrokerLock(PROJECT, 'serve', root);
-    // Simulate a different process releasing (wrong pid won't match)
-    // We can't truly fork, so just verify the lock still exists after a no-op release
-    // by a different "caller" — here we verify release only removes our own lock.
     const before = await readBrokerLock(PROJECT, root);
     assert.ok(before);
+    // Simulate a different process owning the lock: overwrite with a foreign pid.
+    const foreignPid = before.pid === 1 ? 2 : 1;
+    await writeFile(
+      join(root, PROJECT, 'broker.lock'),
+      JSON.stringify({ pid: foreignPid, startedAt: Date.now(), mode: 'serve' }),
+    );
     await releaseBrokerLock(PROJECT, root);
     const after = await readBrokerLock(PROJECT, root);
-    assert.equal(after, undefined);
+    assert.ok(after, 'lock file must remain after non-owner release');
+    assert.equal(after!.pid, foreignPid);
   });
 });
 

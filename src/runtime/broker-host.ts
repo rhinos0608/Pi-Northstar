@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BrokerError } from './broker-errors.js';
 import { acquireBrokerLock, releaseBrokerLock } from './broker-lock.js';
@@ -283,8 +283,9 @@ export class ExecutorListener {
 /** Resolve the expected path of the compiled northstar-broker binary. */
 export function resolveBrokerBinaryPath(): string {
   // Binary lives at the package root's bin/ after build
-  const pkgRoot = join(fileURLToPath(import.meta.url), '..', '..', '..', '..');
-  return join(pkgRoot, 'bin', 'northstar-broker');
+  const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const binaryName = process.platform === 'win32' ? 'northstar-broker.exe' : 'northstar-broker';
+  return join(pkgRoot, 'bin', binaryName);
 }
 
 /**

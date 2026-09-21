@@ -3,10 +3,8 @@
 //! Tier 1 (CI): validates mock UID/SID mismatch rejection logic.
 //! Tier 2 (privileged): validates real per-job cross-UID denial with worker service.
 
+#[cfg(unix)]
 pub mod unix;
-
-#[cfg(target_os = "windows")]
-pub mod windows;
 
 use std::io;
 

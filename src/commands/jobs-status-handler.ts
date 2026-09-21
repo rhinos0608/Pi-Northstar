@@ -2,6 +2,7 @@ import {
   type NorthstarCommandResultV1,
   validateCommandResult,
 } from './command-result.js';
+import { randomUUID } from 'node:crypto';
 import { probeExistingBroker } from '../runtime/broker-host.js';
 
 export const JOBS_STATUS_COMMAND = 'jobs.status';
@@ -47,7 +48,7 @@ function buildResult(params: {
     schema: 'northstar.command-result.v1',
     version: 1,
     commandId: JOBS_STATUS_COMMAND,
-    invocationId: 'jobs-status',
+    invocationId: randomUUID(),
     outcome: params.outcome,
     retryability: params.retryability,
     data: params.data,

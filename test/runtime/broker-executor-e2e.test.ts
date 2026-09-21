@@ -90,7 +90,7 @@ function readNextFrame(socket: Socket, timeoutMs = 5000): Promise<BrokerMessage>
   });
 }
 
-test('broker-executor cross-language end-to-end integration', async (t) => {
+test('broker-executor cross-language end-to-end integration', { timeout: 300_000, skip: process.platform === 'win32' }, async (t) => {
   // Ensure broker binary exists / build release binary if missing
   const manifestPath = join(process.cwd(), 'rust', 'Cargo.toml');
   const binaryPath = join(process.cwd(), 'rust', 'target', 'release', 'northstar-broker');

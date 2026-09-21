@@ -348,9 +348,7 @@ fn test_scoped_env_zero_ambient_keys_in_child_map() {
     // Set a probe var in the current test process
     let probe_key = "NORTHSTAR_HOSTILE_PROBE_SECRET";
     let probe_val = "ambient_secret_value_xyz";
-    unsafe {
-        std::env::set_var(probe_key, probe_val);
-    }
+    std::env::set_var(probe_key, probe_val);
 
     let mut env = ScopedEnv::new();
     env.grant("ALLOWED_FOO", "bar").expect("grant valid key");
@@ -363,9 +361,7 @@ fn test_scoped_env_zero_ambient_keys_in_child_map() {
     assert_eq!(built_map.get("ALLOWED_FOO").unwrap(), "bar");
 
     // Clean up test env var
-    unsafe {
-        std::env::remove_var(probe_key);
-    }
+    std::env::remove_var(probe_key);
 }
 
 // ---------------------------------------------------------------------------

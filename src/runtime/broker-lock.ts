@@ -23,8 +23,9 @@ function lockPath(projectId: string, rootDir?: string): string {
 }
 
 /**
- * Returns true if the pid in the lock record is demonstrably dead (ESRCH).
- * Throws lock_held if process is alive (signal 0 succeeded or EPERM).
+ * Returns true if the pid in the lock record is demonstrably dead (ESRCH only).
+ * Returns false if the process is alive (signal 0 succeeded) or liveness cannot
+ * be ruled out (EPERM means a live process we lack permission to signal).
  * Throws lock_io_error if pid is invalid or unexpected error occurs.
  */
 function assertLockStaleOrHeld(record: BrokerLockRecord): boolean {
@@ -40,7 +41,7 @@ function assertLockStaleOrHeld(record: BrokerLockRecord): boolean {
       return true;
     }
     if (code === 'EPERM') {
-      throw new BrokerLockError('lock_held', `Broker process alive (pid ${record.pid}, EPERM)`);
+      return false;
     }
     throw new BrokerLockError('lock_io_error', `Process liveness check failed: ${(err as Error).message}`);
   }
@@ -91,11 +92,25 @@ export async function acquireBrokerLock(
       throw new BrokerLockError('lock_held', `Broker already running (pid ${existing.pid}, mode: ${existing.mode})`);
     }
 
-    // Owner is dead — safe to remove and retry
+    // Owner is dead — safe to remove and retake atomically
     try {
       await rm(path, { force: true });
     } catch {
       throw new BrokerLockError('stale_lock_removal_failed', 'Cannot remove stale lock file');
+    }
+
+    // Retake with O_EXCL under lock error handling: a racing contender
+    // winning the slot surfaces as lock_held, not a raw EEXIST.
+    try {
+      const retake = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      await retake.writeFile(JSON.stringify(record));
+      await retake.close();
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new BrokerLockError('lock_held', 'Failed to acquire broker lock after retries: lock contested');
+      }
+      throw new BrokerLockError('lock_io_error', `Lock file error: ${(err as Error).message}`);
     }
   }
 

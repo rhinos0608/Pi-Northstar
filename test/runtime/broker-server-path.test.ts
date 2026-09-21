@@ -190,7 +190,7 @@ test('broker server maps duplicate mutation to duplicate_mutation by error code,
 });
 
 test('broker restart during idempotent read fails closed and does not replay old connection/token', async () => {
-  const root = await mkdtemp('/tmp/ns-broker-restart-');
+  const root = await mkdtemp(join(tmpdir(), 'ns-broker-restart-'));
   const secret = Buffer.alloc(32, 9);
   let handlerInvocations = 0;
   let releaseHandler!: () => void;

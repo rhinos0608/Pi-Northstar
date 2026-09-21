@@ -98,6 +98,41 @@ fn grant_ceiling_cannot_be_exceeded() {
     assert!(intersect_capabilities(&none).is_empty());
 }
 
+/// Exhaustive match forces a compile error when a new BrokerCapability variant
+/// is added, so the ceiling cannot silently miss it.
+fn assert_exhaustive_capability(cap: &BrokerCapability) {
+    match cap {
+        BrokerCapability::RuntimeNegotiate
+        | BrokerCapability::RuntimeStart
+        | BrokerCapability::RuntimeStatus
+        | BrokerCapability::RuntimeResult
+        | BrokerCapability::RuntimeCancel => {}
+    }
+}
+
+#[test]
+fn grant_ceiling_covers_all_capability_variants() {
+    let all_variants = vec![
+        BrokerCapability::RuntimeNegotiate,
+        BrokerCapability::RuntimeStart,
+        BrokerCapability::RuntimeStatus,
+        BrokerCapability::RuntimeResult,
+        BrokerCapability::RuntimeCancel,
+    ];
+    for cap in &all_variants {
+        assert_exhaustive_capability(cap);
+        assert!(
+            CLI_GRANT_CEILING.contains(cap),
+            "ceiling must cover every BrokerCapability variant, missing: {cap:?}"
+        );
+    }
+    // Ceiling must not grant anything outside the known variants either.
+    for cap in CLI_GRANT_CEILING {
+        assert_exhaustive_capability(cap);
+        assert!(all_variants.contains(cap));
+    }
+}
+
 #[test]
 fn token_ttl_is_sixty_seconds() {
     assert_eq!(TOKEN_TTL_SECS, 60);

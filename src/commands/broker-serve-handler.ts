@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   type NorthstarCommandResultV1,
   validateCommandResult,
@@ -38,7 +39,7 @@ function buildResult(params: {
     schema: 'northstar.command-result.v1',
     version: 1,
     commandId: BROKER_SERVE_COMMAND,
-    invocationId: 'broker-serve',
+    invocationId: randomUUID(),
     outcome: params.outcome,
     retryability: params.retryability,
     data: params.data,

@@ -28,6 +28,8 @@ test('rpc golden fixtures validate according to prefix contract', async () => {
     } else if (file.startsWith('rpc-v1-reply-')) {
       const res = validateReply(parsed);
       assert.equal(res.ok, true, `fixture ${file} must validate as valid rpc-v1 reply`);
+    } else {
+      assert.fail(`fixture ${file} has unrecognized prefix`);
     }
   }
 });

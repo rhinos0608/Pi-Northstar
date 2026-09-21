@@ -141,17 +141,23 @@ fn test_ambient_secret_leak_probe_in_map() {
     let mut env = ScopedEnv::new();
     env.grant("EXPLICIT_VAR", "visible").unwrap();
 
-    let map = env.build_command_env();
-    assert!(!map.contains_key("NS_TEST_SECRET_LEAK_PROBE"));
-    assert_eq!(map.len(), 1);
-    assert_eq!(map.get("EXPLICIT_VAR").unwrap(), "visible");
+    {
+        let map = env.build_command_env();
+        assert!(!map.contains_key("NS_TEST_SECRET_LEAK_PROBE"));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("EXPLICIT_VAR").unwrap(), "visible");
+    }
+
+    // Leave no ambient env changes behind.
+    std::env::remove_var("NS_TEST_SECRET_LEAK_PROBE");
+    assert!(std::env::var_os("NS_TEST_SECRET_LEAK_PROBE").is_none());
 }
 
 #[cfg(unix)]
 #[test]
 fn test_live_spawn_true_unix() {
-    std::env::set_var("NS_TEST_SECRET_LEAK_PROBE", "super_secret_ambient_token");
-
+    // No ambient env mutation: launch uses env_clear + explicit grants only,
+    // so the child cannot inherit ambient secrets regardless of test env.
     let mut env = ScopedEnv::new();
     env.grant("PERMITTED_VAR", "test_val").unwrap();
 
@@ -161,6 +167,7 @@ fn test_live_spawn_true_unix() {
         scoped_env: env,
         timeout_ms: 5000,
         run_as_uid: None,
+        run_as_gid: None,
     };
 
     let mut child = launch(&spec).expect("launch true must succeed");
@@ -177,6 +184,7 @@ fn test_graceful_terminate_fast_exit() {
         scoped_env: ScopedEnv::new(),
         timeout_ms: 5000,
         run_as_uid: None,
+        run_as_gid: None,
     };
 
     let mut child = launch(&spec).expect("launch true");
@@ -203,6 +211,7 @@ fn test_graceful_terminate_timeout_escalates_to_sigkill() {
         scoped_env: ScopedEnv::new(),
         timeout_ms: 5000,
         run_as_uid: None,
+        run_as_gid: None,
     };
 
     let mut child = launch(&spec).expect("launch process ignoring SIGTERM");
@@ -224,6 +233,7 @@ fn test_kill_to_zero_reaps_process() {
         scoped_env: ScopedEnv::new(),
         timeout_ms: 5000,
         run_as_uid: None,
+        run_as_gid: None,
     };
 
     let mut child = launch(&spec).expect("launch sleep 60");
@@ -240,6 +250,7 @@ fn test_windows_launch_returns_unsupported() {
         scoped_env: ScopedEnv::new(),
         timeout_ms: 5000,
         run_as_uid: None,
+        run_as_gid: None,
     };
 
     let result = launch(&spec);

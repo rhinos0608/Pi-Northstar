@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { jobsStatusCommand } from '../../src/commands/jobs-status-handler.js';
 import { validateCommandResult } from '../../src/commands/command-result.js';
 import { BrokerServer } from '../../src/runtime/broker-server.js';
@@ -48,7 +50,7 @@ test('jobsStatusCommand rejects malformed projectId without probing', async () =
 });
 
 test('jobsStatusCommand returns broker_unavailable when no socket exists', async () => {
-  const tempDir = await mkdtemp('/tmp/ns-jobs-status-');
+  const tempDir = await mkdtemp(join(tmpdir(), 'ns-jobs-status-'));
   try {
     const result = await jobsStatusCommand({
       projectId: 'test-project',
@@ -69,7 +71,7 @@ test('jobsStatusCommand returns broker_unavailable when no socket exists', async
 test('jobsStatusCommand returns broker_query_unimplemented when broker socket is probed live', async () => {
   if (process.platform === 'win32') return;
 
-  const tempDir = await mkdtemp('/tmp/ns-jobs-live-');
+  const tempDir = await mkdtemp(join(tmpdir(), 'ns-jobs-live-'));
   const projectId = 'live';
   const server = new BrokerServer({
     projectId,

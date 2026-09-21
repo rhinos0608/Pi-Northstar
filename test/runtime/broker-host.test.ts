@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,33 +15,45 @@ import { writeFile, stat } from 'node:fs/promises';
 
 test('probeExistingBroker returns false when no socket exists', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ns-host-'));
-  const result = await probeExistingBroker('probe-test', root);
-  assert.equal(result, false);
+  try {
+    const result = await probeExistingBroker('probe-test', root);
+    assert.equal(result, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('startBrokerHost throws BrokerUnavailableError when binary missing', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ns-host-missing-'));
-  await assert.rejects(
-    () => startBrokerHost({
-      projectId: 'missing-binary-test',
-      mode: 'session',
-      rootDir: root,
-      binaryPath: '/nonexistent/northstar-broker',
-    }),
-    (err: unknown) => err instanceof BrokerUnavailableError,
-  );
+  try {
+    await assert.rejects(
+      () => startBrokerHost({
+        projectId: 'missing-binary-test',
+        mode: 'session',
+        rootDir: root,
+        binaryPath: '/nonexistent/northstar-broker',
+      }),
+      (err: unknown) => err instanceof BrokerUnavailableError,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('ordinary probe path never spawns a broker', async () => {
   // Verify probeExistingBroker is purely read-only and does not spawn
   const root = await mkdtemp(join(tmpdir(), 'ns-no-spawn-'));
-  // Should return false without any broker running
-  const result = await probeExistingBroker('no-spawn-project', root);
-  assert.equal(result, false);
-  // No child processes were started; test completes synchronously
+  try {
+    // Should return false without any broker running
+    const result = await probeExistingBroker('no-spawn-project', root);
+    assert.equal(result, false);
+    // No child processes were started; test completes synchronously
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
-test('ExecutorListener rejects wrong token and closes socket', async () => {
+test('ExecutorListener rejects wrong token and closes socket', { skip: process.platform === 'win32' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'ns-exec-wrong-token-'));
   const socketPath = join(root, 'executor.sock');
   const tokenPath = join(root, 'executor.token');
@@ -81,10 +93,11 @@ test('ExecutorListener rejects wrong token and closes socket', async () => {
     assert.ok(tokenStat !== undefined, 'token file must remain when auth fails');
   } finally {
     await listener.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
-test('ExecutorListener closes connection on malformed JSON frame after auth', async () => {
+test('ExecutorListener closes connection on malformed JSON frame after auth', { skip: process.platform === 'win32' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'ns-exec-malformed-'));
   const socketPath = join(root, 'executor.sock');
   const tokenPath = join(root, 'executor.token');
@@ -126,10 +139,11 @@ test('ExecutorListener closes connection on malformed JSON frame after auth', as
     });
   } finally {
     await listener.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
-test('ExecutorListener unlinks token file after successful auth and serves validated RPC', async () => {
+test('ExecutorListener unlinks token file after successful auth and serves validated RPC', { skip: process.platform === 'win32' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'ns-exec-success-'));
   const socketPath = join(root, 'executor.sock');
   const tokenPath = join(root, 'executor.token');
@@ -201,5 +215,6 @@ test('ExecutorListener unlinks token file after successful auth and serves valid
     client.destroy();
   } finally {
     await listener.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

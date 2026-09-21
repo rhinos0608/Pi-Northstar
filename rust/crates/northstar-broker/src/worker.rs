@@ -135,6 +135,8 @@ pub struct WorkerSpec {
     pub scoped_env: ScopedEnv,
     pub timeout_ms: u64,
     pub run_as_uid: Option<u32>,
+    /// Sandbox group for privilege-dropped workers. Applied before uid.
+    pub run_as_gid: Option<u32>,
 }
 
 #[cfg(target_os = "windows")]
@@ -156,8 +158,33 @@ pub fn launch(spec: &WorkerSpec) -> io::Result<Child> {
 
     cmd.process_group(0);
 
-    if let Some(uid) = spec.run_as_uid {
-        cmd.uid(uid);
+    // Sandbox identity: drop supplementary groups, then gid, then uid.
+    // Order matters: groups first (while still privileged), gid before uid
+    // (uid drop may revoke permission to change gid). Skipped entirely when
+    // no identity downgrade is requested, preserving plain launch behavior.
+    let run_as_uid = spec.run_as_uid;
+    let run_as_gid = spec.run_as_gid;
+    if run_as_uid.is_some() || run_as_gid.is_some() {
+        // SAFETY: runs in the child between fork and exec; only async-signal-safe
+        // libc calls, no allocation, error reported via Err return.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setgroups(0, std::ptr::null()) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if let Some(gid) = run_as_gid {
+                    if libc::setgid(gid as libc::gid_t) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                if let Some(uid) = run_as_uid {
+                    if libc::setuid(uid as libc::uid_t) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
     }
 
     cmd.spawn()

@@ -57,6 +57,7 @@ pub enum DbError {
     PayloadTooLarge,
     InvalidState(String),
     Duplicate,
+    SchemaMismatch { expected: u32, found: u32 },
 }
 
 impl std::fmt::Display for DbError {
@@ -66,6 +67,10 @@ impl std::fmt::Display for DbError {
             DbError::PayloadTooLarge => write!(f, "payload exceeds {MAX_PAYLOAD_BYTES} byte limit"),
             DbError::InvalidState(s) => write!(f, "invalid job state: {s}"),
             DbError::Duplicate => write!(f, "duplicate job_id"),
+            DbError::SchemaMismatch { expected, found } => write!(
+                f,
+                "schema version mismatch: expected {expected}, found {found}"
+            ),
         }
     }
 }
@@ -104,6 +109,27 @@ pub fn open_durable<P: AsRef<Path>>(path: P) -> Result<Connection, DbError> {
          CREATE INDEX IF NOT EXISTS idx_receipts_client_request
              ON job_receipts(client_id, request_id);",
     )?;
+    // Populate schema_version on create, read+validate on open.
+    let found: Option<u32> = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .ok();
+    match found {
+        None => {
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                rusqlite::params![DB_SCHEMA_VERSION],
+            )?;
+        }
+        Some(v) if v == DB_SCHEMA_VERSION => {}
+        Some(v) => {
+            return Err(DbError::SchemaMismatch {
+                expected: DB_SCHEMA_VERSION,
+                found: v,
+            });
+        }
+    }
     Ok(conn)
 }
 
