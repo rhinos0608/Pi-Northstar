@@ -71,10 +71,14 @@ fn read_exact_frame(stream: &mut UnixStream) -> Vec<u8> {
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).expect("failed to read frame len");
+    stream
+        .read_exact(&mut len_buf)
+        .expect("failed to read frame len");
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).expect("failed to read frame body");
+    stream
+        .read_exact(&mut body)
+        .expect("failed to read frame body");
 
     let mut frame = Vec::with_capacity(4 + len);
     frame.extend_from_slice(&len_buf);
@@ -106,9 +110,18 @@ fn test_daemon_smoke_lifecycle() {
     assert_eq!(welcome_val["kind"], "welcome");
     assert_eq!(welcome_val["projectId"], project_id);
     assert_eq!(welcome_val["clientId"], "golden-client");
-    let token = welcome_val["token"].as_str().expect("token str").to_string();
-    let epoch = welcome_val["epoch"].as_str().expect("epoch str").to_string();
-    let session_id = welcome_val["sessionId"].as_str().expect("sessionId str").to_string();
+    let token = welcome_val["token"]
+        .as_str()
+        .expect("token str")
+        .to_string();
+    let epoch = welcome_val["epoch"]
+        .as_str()
+        .expect("epoch str")
+        .to_string();
+    let session_id = welcome_val["sessionId"]
+        .as_str()
+        .expect("sessionId str")
+        .to_string();
 
     // 2. Query unknown receipt -> queryResponse without receipt
     let query_msg = serde_json::json!({
@@ -172,7 +185,7 @@ fn test_daemon_smoke_lifecycle() {
     let epoch2 = w2_val["epoch"].as_str().unwrap();
     let session2 = w2_val["sessionId"].as_str().unwrap();
 
-    // 5. cancel unknown run -> response success with empty settled
+    // 5. cancel unknown run -> scope_denied (no journal ownership)
     let cancel_unknown = serde_json::json!({
         "version": 2,
         "kind": "request",
@@ -195,13 +208,8 @@ fn test_daemon_smoke_lifecycle() {
     let resp_frame = read_exact_frame(&mut stream2);
     let resp_val: serde_json::Value = serde_json::from_slice(&resp_frame[4..]).unwrap();
     assert_eq!(resp_val["version"], 2);
-    assert_eq!(resp_val["kind"], "response");
-    assert_eq!(resp_val["sequence"], 1);
-    assert_eq!(resp_val["reply"]["success"], true);
-    assert_eq!(resp_val["reply"]["method"], "cancelAndSettle");
-    assert_eq!(resp_val["reply"]["data"]["settledRunIds"], serde_json::json!([]));
-    assert_eq!(resp_val["reply"]["data"]["timedOutRunIds"], serde_json::json!([]));
-    assert_eq!(resp_val["reply"]["data"]["unknownRunIds"], serde_json::json!(["runtime_unknown_0001"]));
+    assert_eq!(resp_val["kind"], "error");
+    assert_eq!(resp_val["code"], "scope_denied");
 
     drop(stream2);
 

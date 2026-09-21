@@ -31,10 +31,14 @@ fn read_exact_frame(stream: &mut UnixStream) -> Vec<u8> {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).expect("failed to read frame len");
+    stream
+        .read_exact(&mut len_buf)
+        .expect("failed to read frame len");
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).expect("failed to read frame body");
+    stream
+        .read_exact(&mut body)
+        .expect("failed to read frame body");
 
     let mut frame = Vec::with_capacity(4 + len);
     frame.extend_from_slice(&len_buf);
@@ -87,26 +91,38 @@ fn test_executor_same_uid_attestation_passes_and_roundtrips() {
 
         if let Some(mut stream) = client_stream {
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
 
-            let mut len_buf = [0u8; 4];
-            if stream.read_exact(&mut len_buf).is_ok() {
+            for _ in 0..2 {
+                let mut len_buf = [0u8; 4];
+                if stream.read_exact(&mut len_buf).is_err() {
+                    break;
+                }
                 let len = u32::from_be_bytes(len_buf) as usize;
                 let mut body = vec![0u8; len];
-                if stream.read_exact(&mut body).is_ok() {
-                    let reply = b"{\"success\":true}";
-                    let reply_len = reply.len() as u32;
-                    let _ = stream.write_all(&reply_len.to_be_bytes());
-                    let _ = stream.write_all(reply);
-                    let _ = stream.flush();
+                if stream.read_exact(&mut body).is_err() {
+                    break;
                 }
+                let reply = b"{\"success\":true}";
+                let reply_len = reply.len() as u32;
+                let _ = stream.write_all(&reply_len.to_be_bytes());
+                let _ = stream.write_all(reply);
+                let _ = stream.flush();
             }
         }
     });
 
     let upstream = ExecutorUpstream::new(&sock_path);
-    let reply = upstream.execute(b"{\"hello\":1}", Duration::from_secs(2)).unwrap();
-    assert_eq!(reply, b"{\"success\":true}");
+    let first = upstream
+        .execute(b"{\"hello\":1}", Duration::from_secs(2))
+        .unwrap();
+    let second = upstream
+        .execute(b"{\"hello\":2}", Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(first, b"{\"success\":true}");
+    assert_eq!(second, b"{\"success\":true}");
 
     stop.store(true, Ordering::SeqCst);
     let _ = handle.join();
@@ -178,7 +194,9 @@ fn test_broker_forwarding_lifecycle_with_executor_socket() {
             match exec_listener.accept() {
                 Ok((mut stream, _)) => {
                     stream.set_nonblocking(false).unwrap();
-                    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
                     let mut len_buf = [0u8; 4];
                     if stream.read_exact(&mut len_buf).is_ok() {
                         let len = u32::from_be_bytes(len_buf) as usize;
@@ -196,7 +214,7 @@ fn test_broker_forwarding_lifecycle_with_executor_socket() {
                                 "success": true,
                                 "data": {
                                     "executed": true,
-                                    "runId": "run_123"
+                                    "runId": "runtime_123"
                                 }
                             });
                             let reply_bytes = serde_json::to_vec(&reply_val).unwrap();
@@ -229,10 +247,7 @@ fn test_broker_forwarding_lifecycle_with_executor_socket() {
         .spawn()
         .expect("spawn broker with executor socket");
 
-    let mut broker = BrokerChild {
-        child,
-        _temp: temp,
-    };
+    let mut broker = BrokerChild { child, _temp: temp };
 
     let mut stream = None;
     for _ in 0..50 {
@@ -290,14 +305,31 @@ fn test_broker_forwarding_lifecycle_with_executor_socket() {
     assert_eq!(resp["reply"]["success"], true);
     assert_eq!(resp["reply"]["data"]["executed"], true);
 
-    // 3. Send duplicate start request -> duplicate_mutation
+    // 3. Receipt exists and is bound to the runtime-issued run id.
+    let receipt_query = serde_json::json!({
+        "version": 2,
+        "kind": "query",
+        "token": token,
+        "epoch": epoch,
+        "sessionId": session_id,
+        "sequence": 2,
+        "projectId": project_id,
+        "query": { "method": "submissionReceipt", "requestId": "start-req-1" }
+    });
+    send_raw_frame(&mut stream, &serde_json::to_vec(&receipt_query).unwrap());
+    let receipt_frame = read_exact_frame(&mut stream);
+    let receipt: serde_json::Value = serde_json::from_slice(&receipt_frame[4..]).unwrap();
+    assert_eq!(receipt["kind"], "queryResponse");
+    assert_eq!(receipt["receipt"]["jobId"], "runtime_123");
+
+    // 4. Send duplicate start request -> duplicate_mutation
     let dup_req = serde_json::json!({
         "version": 2,
         "kind": "request",
         "token": token,
         "epoch": epoch,
         "sessionId": session_id,
-        "sequence": 2,
+        "sequence": 3,
         "projectId": project_id,
         "request": {
             "version": 1,

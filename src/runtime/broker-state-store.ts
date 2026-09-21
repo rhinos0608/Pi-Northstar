@@ -2,13 +2,14 @@ import { randomBytes } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 
 export const BROKER_STATE_VERSION = 1 as const;
-export interface JobSubmissionReceipt { jobId: string; clientId: string; requestId: string; submittedAt: number; }
+export type JobReceiptState = 'pending' | 'dispatched' | 'completed' | 'outcome_unknown';
+export interface JobSubmissionReceipt { jobId: string; clientId: string; requestId: string; submittedAt: number; state?: JobReceiptState; }
 interface StateDocument { version: 1; epoch: string; receipts: JobSubmissionReceipt[]; mutationIds: string[]; }
 export type BrokerStateErrorCode = 'state_corrupt' | 'state_incompatible' | 'state_io' | 'duplicate_mutation';
 export class BrokerStateError extends Error { readonly code: BrokerStateErrorCode; constructor(code: BrokerStateErrorCode, message: string = code) { super(message); this.name = 'BrokerStateError'; this.code = code; } }
 export class BrokerDuplicateMutationError extends BrokerStateError { constructor(message: string = 'Duplicate mutation.') { super('duplicate_mutation', message); this.name = 'BrokerDuplicateMutationError'; } }
 /** Canonical receipt shape (mirrored by broker-protocol isBrokerQueryResponse). */
-export function validReceipt(value: unknown): value is JobSubmissionReceipt { if (!value || typeof value !== 'object' || Array.isArray(value)) return false; const r = value as Record<string, unknown>; return typeof r.jobId === 'string' && typeof r.clientId === 'string' && typeof r.requestId === 'string' && typeof r.submittedAt === 'number' && Number.isSafeInteger(r.submittedAt); }
+export function validReceipt(value: unknown): value is JobSubmissionReceipt { if (!value || typeof value !== 'object' || Array.isArray(value)) return false; const r = value as Record<string, unknown>; const stateOk = r.state === undefined || r.state === 'pending' || r.state === 'dispatched' || r.state === 'completed' || r.state === 'outcome_unknown'; return typeof r.jobId === 'string' && typeof r.clientId === 'string' && typeof r.requestId === 'string' && typeof r.submittedAt === 'number' && Number.isSafeInteger(r.submittedAt) && stateOk; }
 function validDocument(value: unknown, maxEntries: number): value is StateDocument { if (!value || typeof value !== 'object' || Array.isArray(value)) return false; const d = value as Record<string, unknown>; return d.version === BROKER_STATE_VERSION && typeof d.epoch === 'string' && /^[A-Za-z0-9_-]{16,}$/.test(d.epoch) && Array.isArray(d.receipts) && d.receipts.length <= maxEntries && d.receipts.every(validReceipt) && Array.isArray(d.mutationIds) && d.mutationIds.length <= maxEntries && d.mutationIds.every(id => typeof id === 'string'); }
 /** Atomic owner-local state. Corruption and unknown versions fail closed. */
 export class BrokerStateStore {

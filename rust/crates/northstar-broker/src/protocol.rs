@@ -42,7 +42,7 @@ pub struct BrokerWelcome {
     pub session_id: String,
     pub token: String,
     #[serde(rename = "expiresAt")]
-    pub expires_at: u64,
+    pub expires_at: u64, // Unix epoch milliseconds on the broker wire
     pub capabilities: Vec<BrokerCapability>,
     #[serde(rename = "projectId")]
     pub project_id: String,
@@ -129,6 +129,8 @@ pub struct JobSubmissionReceipt {
     pub request_id: String,
     #[serde(rename = "submittedAt")]
     pub submitted_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

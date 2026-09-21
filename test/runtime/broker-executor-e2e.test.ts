@@ -122,15 +122,29 @@ test('broker-executor cross-language end-to-end integration', { timeout: 300_000
       token: Buffer.from(rawTokenHex, 'utf8'),
       leafClient: {
         async request(method: string, params: Record<string, unknown>): Promise<unknown> {
-          if (method === 'cancelAndSettle') {
+          if (method === 'start' && params.modelId === 'provider/missing') {
+            throw Object.assign(new Error('missing test model'), { code: 'model_unavailable' });
+          }
+          if (method === 'start') return { runId: 'runtime_e2e_1', state: 'running' };
+          if (method === 'status') {
+            return { runId: String(params.runId), state: 'completed', startedAt: 1, updatedAt: 2 };
+          }
+          if (method === 'result') {
             return {
-              settledRunIds: [],
-              timedOutRunIds: [],
+              runId: String(params.runId),
+              state: 'completed',
+              output: 'local executor result',
+              outputTokens: 4,
+              truncated: false,
             };
           }
-          return { method, params, handled: true };
+          if (method === 'cancelAndSettle') {
+            const runIds = params.runIds as string[];
+            return { settlements: runIds.map((runId) => ({ runId, state: 'cancelled' })) };
+          }
+          return { compatible: true, modelId: String(params.modelId), capabilities: {} };
         },
-      } as any,
+      },
     });
     await listener.listen();
 
@@ -179,6 +193,8 @@ test('broker-executor cross-language end-to-end integration', { timeout: 300_000
     assert.equal(welcomeMsg.kind, 'welcome');
     if (welcomeMsg.kind !== 'welcome') return;
     assert.equal(welcomeMsg.projectId, projectId);
+    assert.ok(welcomeMsg.expiresAt > Date.now(), 'Rust welcome expiry must be epoch milliseconds');
+    assert.ok(welcomeMsg.expiresAt <= Date.now() + 61_000, 'welcome TTL should stay bounded near 60s');
     const { token, epoch, sessionId } = welcomeMsg;
 
     // Query unknown receipt -> queryResponse without receipt
@@ -202,8 +218,8 @@ test('broker-executor cross-language end-to-end integration', { timeout: 300_000
     assert.equal(queryResp.sequence, 1);
     assert.equal(queryResp.receipt, undefined);
 
-    // Cancel unknown run -> forwards to executor -> returns success response with empty settled
-    const cancelMsg: BrokerMessage = {
+    // Start a real job through the executor and persist its durable receipt.
+    const startMsg: BrokerMessage = {
       version: 2,
       kind: 'request',
       token,
@@ -213,10 +229,144 @@ test('broker-executor cross-language end-to-end integration', { timeout: 300_000
       projectId,
       request: {
         version: 1,
+        requestId: 'start-run-req-1',
+        method: 'start',
+        params: {
+          modelId: 'provider/model',
+          prompt: 'run locally',
+          maxOutputTokens: 16,
+          timeoutMs: 1_000,
+          correlation: {
+            owner: 'northstar',
+            correlationId: 'e2e-run',
+            queryIndex: 0,
+            role: 'researcher',
+            stage: 'test',
+            attempt: 0,
+          },
+        },
+      },
+    };
+    await sendFrame(clientSocket, startMsg);
+    const startResp = await readNextFrame(clientSocket);
+    assert.equal(startResp.kind, 'response');
+    if (startResp.kind !== 'response') return;
+    assert.equal(startResp.reply.success, true);
+    if (!startResp.reply.success) return;
+    assert.deepEqual(startResp.reply.data, { runId: 'runtime_e2e_1', state: 'running' });
+
+    const receiptMsg: BrokerMessage = {
+      version: 2,
+      kind: 'query',
+      token,
+      epoch,
+      sessionId,
+      sequence: 3,
+      projectId,
+      query: { method: 'submissionReceipt', requestId: 'start-run-req-1' },
+    };
+    await sendFrame(clientSocket, receiptMsg);
+    const receiptResp = await readNextFrame(clientSocket);
+    assert.equal(receiptResp.kind, 'queryResponse');
+    if (receiptResp.kind !== 'queryResponse') return;
+    assert.equal(receiptResp.receipt?.jobId, 'runtime_e2e_1');
+    assert.equal(receiptResp.receipt?.state, 'dispatched');
+
+    // Status reuses the same authenticated executor connection and a verified
+    // terminal observation settles the durable receipt before result retrieval.
+    for (const [sequence, method] of [[4, 'status']] as const) {
+      const request: BrokerMessage = {
+        version: 2,
+        kind: 'request',
+        token,
+        epoch,
+        sessionId,
+        sequence,
+        projectId,
+        request: {
+          version: 1,
+          requestId: method + '-run-req-1',
+          method,
+          params: { runId: 'runtime_e2e_1' },
+        },
+      };
+      await sendFrame(clientSocket, request);
+      const response = await readNextFrame(clientSocket);
+      assert.equal(response.kind, 'response');
+      if (response.kind !== 'response') return;
+      assert.equal(response.reply.success, true);
+      if (!response.reply.success) return;
+      assert.equal((response.reply.data as { runId: string }).runId, 'runtime_e2e_1');
+    }
+
+    const statusSettledReceiptMsg: BrokerMessage = {
+      version: 2,
+      kind: 'query',
+      token,
+      epoch,
+      sessionId,
+      sequence: 5,
+      projectId,
+      query: { method: 'submissionReceipt', requestId: 'start-run-req-1' },
+    };
+    await sendFrame(clientSocket, statusSettledReceiptMsg);
+    const statusSettledReceiptResp = await readNextFrame(clientSocket);
+    assert.equal(statusSettledReceiptResp.kind, 'queryResponse');
+    if (statusSettledReceiptResp.kind !== 'queryResponse') return;
+    assert.equal(statusSettledReceiptResp.receipt?.state, 'completed');
+
+    const resultRequest: BrokerMessage = {
+      version: 2,
+      kind: 'request',
+      token,
+      epoch,
+      sessionId,
+      sequence: 6,
+      projectId,
+      request: {
+        version: 1,
+        requestId: 'result-run-req-1',
+        method: 'result',
+        params: { runId: 'runtime_e2e_1' },
+      },
+    };
+    await sendFrame(clientSocket, resultRequest);
+    const resultResponse = await readNextFrame(clientSocket);
+    assert.equal(resultResponse.kind, 'response');
+    if (resultResponse.kind !== 'response') return;
+    assert.equal(resultResponse.reply.success, true);
+
+    const completedReceiptMsg: BrokerMessage = {
+      version: 2,
+      kind: 'query',
+      token,
+      epoch,
+      sessionId,
+      sequence: 7,
+      projectId,
+      query: { method: 'submissionReceipt', requestId: 'start-run-req-1' },
+    };
+    await sendFrame(clientSocket, completedReceiptMsg);
+    const completedReceiptResp = await readNextFrame(clientSocket);
+    assert.equal(completedReceiptResp.kind, 'queryResponse');
+    if (completedReceiptResp.kind !== 'queryResponse') return;
+    assert.equal(completedReceiptResp.receipt?.state, 'completed');
+
+    // Cancellation is client-bound and forwarded unchanged to the local executor.
+    const cancelMsg: BrokerMessage = {
+      version: 2,
+      kind: 'request',
+      token,
+      epoch,
+      sessionId,
+      sequence: 8,
+      projectId,
+      request: {
+        version: 1,
         requestId: 'cancel-run-req-1',
         method: 'cancelAndSettle',
         params: {
-          runIds: ['unknown-run-123'],
+          runIds: ['runtime_e2e_1'],
           settlementWindowMs: 100,
         },
       },
@@ -225,17 +375,67 @@ test('broker-executor cross-language end-to-end integration', { timeout: 300_000
     const cancelResp = await readNextFrame(clientSocket);
     assert.equal(cancelResp.kind, 'response');
     if (cancelResp.kind !== 'response') return;
-    assert.equal(cancelResp.sequence, 2);
-    assert.equal(cancelResp.reply.requestId, 'cancel-run-req-1');
-    assert.equal(cancelResp.reply.method, 'cancelAndSettle');
+    assert.equal(cancelResp.sequence, 8);
     assert.equal(cancelResp.reply.success, true);
     if (cancelResp.reply.success) {
       assert.deepEqual(cancelResp.reply.data, {
-        settledRunIds: [],
-        timedOutRunIds: [],
-        unknownRunIds: ['unknown-run-123'],
+        settlements: [{ runId: 'runtime_e2e_1', state: 'cancelled' }],
       });
     }
+
+    // A definitive failed start remains durably settled internally, but must
+    // never surface its provisional journal id as a submitted runtime job.
+    const failedStartMsg: BrokerMessage = {
+      version: 2,
+      kind: 'request',
+      token,
+      epoch,
+      sessionId,
+      sequence: 9,
+      projectId,
+      request: {
+        version: 1,
+        requestId: 'start-run-req-failed',
+        method: 'start',
+        params: {
+          modelId: 'provider/missing',
+          prompt: 'fail before job creation',
+          maxOutputTokens: 16,
+          timeoutMs: 1_000,
+          correlation: {
+            owner: 'northstar',
+            correlationId: 'e2e-failed-run',
+            queryIndex: 0,
+            role: 'researcher',
+            stage: 'test',
+            attempt: 0,
+          },
+        },
+      },
+    };
+    await sendFrame(clientSocket, failedStartMsg);
+    const failedStartResp = await readNextFrame(clientSocket);
+    assert.equal(failedStartResp.kind, 'response');
+    if (failedStartResp.kind !== 'response') return;
+    assert.equal(failedStartResp.reply.success, false);
+    if (failedStartResp.reply.success) return;
+    assert.equal(failedStartResp.reply.error.code, 'model_unavailable');
+
+    const failedReceiptMsg: BrokerMessage = {
+      version: 2,
+      kind: 'query',
+      token,
+      epoch,
+      sessionId,
+      sequence: 10,
+      projectId,
+      query: { method: 'submissionReceipt', requestId: 'start-run-req-failed' },
+    };
+    await sendFrame(clientSocket, failedReceiptMsg);
+    const failedReceiptResp = await readNextFrame(clientSocket);
+    assert.equal(failedReceiptResp.kind, 'queryResponse');
+    if (failedReceiptResp.kind !== 'queryResponse') return;
+    assert.equal(failedReceiptResp.receipt, undefined);
 
   } finally {
     // Teardown: close client socket, SIGTERM broker, close listener, remove tmpdir

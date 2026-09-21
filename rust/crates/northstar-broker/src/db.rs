@@ -1,7 +1,7 @@
 //! Durable SQLite receipt authority.
 //! WAL + synchronous=FULL + macOS fullfsync. Fail-closed on any write error.
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
 
 pub const DB_SCHEMA_VERSION: u32 = 1;
@@ -76,7 +76,9 @@ impl std::fmt::Display for DbError {
 }
 impl std::error::Error for DbError {}
 impl From<rusqlite::Error> for DbError {
-    fn from(e: rusqlite::Error) -> Self { DbError::Sql(e) }
+    fn from(e: rusqlite::Error) -> Self {
+        DbError::Sql(e)
+    }
 }
 
 /// Open a durable SQLite connection with WAL + FULL sync + macOS fullfsync.
@@ -112,15 +114,14 @@ pub fn open_durable<P: AsRef<Path>>(path: P) -> Result<Connection, DbError> {
     // Populate schema_version on create, read+validate on open.
     // Empty table -> QueryReturnedNoRows -> initialize version 1.
     // Any other SQLite or u32 decoding error propagates, never treated as empty.
-    let found: Option<u32> = match conn.query_row(
-        "SELECT version FROM schema_version LIMIT 1",
-        [],
-        |row| row.get(0),
-    ) {
-        Ok(v) => Some(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(DbError::Sql(e)),
-    };
+    let found: Option<u32> =
+        match conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        }) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::Sql(e)),
+        };
     match found {
         None => {
             conn.execute(
@@ -141,7 +142,9 @@ pub fn open_durable<P: AsRef<Path>>(path: P) -> Result<Connection, DbError> {
 
 fn check_payload(s: &Option<String>) -> Result<(), DbError> {
     if let Some(p) = s {
-        if p.len() > MAX_PAYLOAD_BYTES { return Err(DbError::PayloadTooLarge); }
+        if p.len() > MAX_PAYLOAD_BYTES {
+            return Err(DbError::PayloadTooLarge);
+        }
     }
     Ok(())
 }
@@ -166,14 +169,20 @@ pub fn insert_job(conn: &Connection, rec: &ReceiptRecord) -> Result<(), DbError>
         ],
     );
     match result {
-        Ok(_) => { conn.execute_batch("COMMIT;")?; Ok(()) }
+        Ok(_) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
         Err(rusqlite::Error::SqliteFailure(ref e, _))
             if e.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
             conn.execute_batch("ROLLBACK;")?;
             Err(DbError::Duplicate)
         }
-        Err(e) => { let _ = conn.execute_batch("ROLLBACK;"); Err(DbError::Sql(e)) }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Sql(e))
+        }
     }
 }
 
@@ -185,25 +194,36 @@ pub fn transition_job(conn: &Connection, job_id: &str, new_state: JobState) -> R
         params![new_state.as_str(), job_id],
     );
     match rows {
-        Ok(0) => { conn.execute_batch("ROLLBACK;")?; Ok(()) } // not found; no-op
-        Ok(_) => { conn.execute_batch("COMMIT;")?; Ok(()) }
-        Err(e) => { let _ = conn.execute_batch("ROLLBACK;"); Err(DbError::Sql(e)) }
+        Ok(0) => {
+            conn.execute_batch("ROLLBACK;")?;
+            Ok(())
+        } // not found; no-op
+        Ok(_) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Sql(e))
+        }
     }
 }
 
 /// Query a receipt by client + request_id. Read-only; no epoch rotation.
-pub fn query_receipt(conn: &Connection, client_id: &str, request_id: &str)
-    -> Result<Option<ReceiptRecord>, DbError>
-{
+pub fn query_receipt(
+    conn: &Connection,
+    client_id: &str,
+    request_id: &str,
+) -> Result<Option<ReceiptRecord>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT job_id, client_id, request_id, state, submitted_at, receipt_payload, request_digest
-         FROM job_receipts WHERE client_id = ?1 AND request_id = ?2 LIMIT 1"
+         FROM job_receipts WHERE client_id = ?1 AND request_id = ?2 LIMIT 1",
     )?;
     let mut rows = stmt.query(params![client_id, request_id])?;
     if let Some(row) = rows.next()? {
         let state_str: String = row.get(3)?;
-        let state = JobState::from_str(&state_str)
-            .ok_or_else(|| DbError::InvalidState(state_str))?;
+        let state =
+            JobState::from_str(&state_str).ok_or_else(|| DbError::InvalidState(state_str))?;
         Ok(Some(ReceiptRecord {
             job_id: row.get(0)?,
             client_id: row.get(1)?,
@@ -216,4 +236,104 @@ pub fn query_receipt(conn: &Connection, client_id: &str, request_id: &str)
     } else {
         Ok(None)
     }
+}
+
+/** Transition a receipt selected by its stable client/request identity. */
+pub fn transition_job_by_request(
+    conn: &Connection,
+    client_id: &str,
+    request_id: &str,
+    new_state: JobState,
+) -> Result<(), DbError> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let rows = conn.execute(
+        "UPDATE job_receipts SET state = ?1 WHERE client_id = ?2 AND request_id = ?3",
+        params![new_state.as_str(), client_id, request_id],
+    );
+    match rows {
+        Ok(_) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Sql(e))
+        }
+    }
+}
+
+/** Replace a provisional receipt id with the runtime-issued id while keeping the job dispatched. */
+pub fn bind_dispatched_job(
+    conn: &Connection,
+    client_id: &str,
+    request_id: &str,
+    job_id: &str,
+) -> Result<(), DbError> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let rows = conn.execute(
+        "UPDATE job_receipts SET job_id = ?1, state = ?2
+         WHERE client_id = ?3 AND request_id = ?4",
+        params![job_id, JobState::Dispatched.as_str(), client_id, request_id],
+    );
+    match rows {
+        Ok(0) => {
+            conn.execute_batch("ROLLBACK;")?;
+            Err(DbError::InvalidState("missing pending receipt".into()))
+        }
+        Ok(_) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(rusqlite::Error::SqliteFailure(ref e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Duplicate)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Sql(e))
+        }
+    }
+}
+
+/** Remove a receipt only when dispatch is known not to have occurred. */
+pub fn delete_job_by_request(
+    conn: &Connection,
+    client_id: &str,
+    request_id: &str,
+) -> Result<(), DbError> {
+    conn.execute(
+        "DELETE FROM job_receipts WHERE client_id = ?1 AND request_id = ?2",
+        params![client_id, request_id],
+    )?;
+    Ok(())
+}
+
+/** Mark unfinished receipts unknown after broker/executor restart. Never retries them. */
+pub fn recover_incomplete_jobs(conn: &Connection) -> Result<usize, DbError> {
+    let changed = conn.execute(
+        "UPDATE job_receipts SET state = ?1 WHERE state IN ('pending','dispatched')",
+        params![JobState::OutcomeUnknown.as_str()],
+    )?;
+    Ok(changed)
+}
+
+/** Cancellation targets are authorized only when every runtime id belongs to this client. */
+pub fn owns_all_jobs(
+    conn: &Connection,
+    client_id: &str,
+    job_ids: &[String],
+) -> Result<bool, DbError> {
+    for job_id in job_ids {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM job_receipts WHERE client_id = ?1 AND job_id = ?2",
+            params![client_id, job_id],
+            |row| row.get(0),
+        )?;
+        if count != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

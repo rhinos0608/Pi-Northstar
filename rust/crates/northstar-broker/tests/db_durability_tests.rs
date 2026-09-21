@@ -3,8 +3,9 @@
 //! payload bounding, and outcome_unknown mapping. Unprivileged / Tier 1.
 
 use northstar_broker::db::{
-    open_durable, insert_job, transition_job, query_receipt,
-    JobState, ReceiptRecord, DbError, MAX_PAYLOAD_BYTES,
+    bind_dispatched_job, delete_job_by_request, insert_job, open_durable, owns_all_jobs,
+    query_receipt, recover_incomplete_jobs, transition_job, transition_job_by_request, DbError,
+    JobState, ReceiptRecord, MAX_PAYLOAD_BYTES,
 };
 use tempfile::tempdir;
 
@@ -26,16 +27,28 @@ fn durability_pragmas_are_active() {
     let path = dir.path().join("durability.db");
     let conn = open_durable(&path).unwrap();
 
-    let journal_mode: String = conn.query_row("PRAGMA journal_mode;", [], |r| r.get(0)).unwrap();
-    assert_eq!(journal_mode.to_lowercase(), "wal", "journal_mode must be WAL");
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        journal_mode.to_lowercase(),
+        "wal",
+        "journal_mode must be WAL"
+    );
 
-    let synchronous: i32 = conn.query_row("PRAGMA synchronous;", [], |r| r.get(0)).unwrap();
+    let synchronous: i32 = conn
+        .query_row("PRAGMA synchronous;", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(synchronous, 2, "synchronous must be FULL (2)");
 
-    let fullfsync: i32 = conn.query_row("PRAGMA fullfsync;", [], |r| r.get(0)).unwrap();
+    let fullfsync: i32 = conn
+        .query_row("PRAGMA fullfsync;", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(fullfsync, 1, "fullfsync must be enabled");
 
-    let ckpt_fullfsync: i32 = conn.query_row("PRAGMA checkpoint_fullfsync;", [], |r| r.get(0)).unwrap();
+    let ckpt_fullfsync: i32 = conn
+        .query_row("PRAGMA checkpoint_fullfsync;", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(ckpt_fullfsync, 1, "checkpoint_fullfsync must be enabled");
 }
 
@@ -58,7 +71,9 @@ fn state_transition_pending_to_dispatched() {
     let conn = open_durable(dir.path().join("states.db")).unwrap();
     insert_job(&conn, &sample_record("job-002")).unwrap();
     transition_job(&conn, "job-002", JobState::Dispatched).unwrap();
-    let rec = query_receipt(&conn, "test-client", "test-req-1").unwrap().unwrap();
+    let rec = query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(rec.state, JobState::Dispatched);
 }
 
@@ -68,7 +83,9 @@ fn outcome_unknown_state_stored_and_queried() {
     let conn = open_durable(dir.path().join("outcome.db")).unwrap();
     insert_job(&conn, &sample_record("job-003")).unwrap();
     transition_job(&conn, "job-003", JobState::OutcomeUnknown).unwrap();
-    let rec = query_receipt(&conn, "test-client", "test-req-1").unwrap().unwrap();
+    let rec = query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(rec.state, JobState::OutcomeUnknown);
 }
 
@@ -78,7 +95,10 @@ fn duplicate_job_id_rejected() {
     let conn = open_durable(dir.path().join("dup.db")).unwrap();
     insert_job(&conn, &sample_record("job-004")).unwrap();
     let result = insert_job(&conn, &sample_record("job-004"));
-    assert!(matches!(result, Err(DbError::Duplicate)), "duplicate job_id must be rejected");
+    assert!(
+        matches!(result, Err(DbError::Duplicate)),
+        "duplicate job_id must be rejected"
+    );
 }
 
 #[test]
@@ -108,7 +128,9 @@ fn accepted_payload_at_exact_limit_succeeds() {
     let mut rec = sample_record("job-007");
     rec.receipt_payload = Some("z".repeat(MAX_PAYLOAD_BYTES));
     insert_job(&conn, &rec).unwrap();
-    let found = query_receipt(&conn, "test-client", "test-req-1").unwrap().unwrap();
+    let found = query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(found.receipt_payload.unwrap().len(), MAX_PAYLOAD_BYTES);
 }
 
@@ -118,4 +140,45 @@ fn query_missing_returns_none() {
     let conn = open_durable(dir.path().join("missing.db")).unwrap();
     let result = query_receipt(&conn, "nobody", "nonexistent").unwrap();
     assert!(result.is_none());
+}
+
+#[test]
+fn bind_dispatched_job_replaces_provisional_id_and_keeps_job_dispatched() {
+    let dir = tempdir().unwrap();
+    let conn = open_durable(dir.path().join("bind.db")).unwrap();
+    insert_job(&conn, &sample_record("runtime_pending_1")).unwrap();
+
+    bind_dispatched_job(&conn, "test-client", "test-req-1", "runtime_actual_1").unwrap();
+
+    let rec = query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.job_id, "runtime_actual_1");
+    assert_eq!(rec.state, JobState::Dispatched);
+    assert!(owns_all_jobs(&conn, "test-client", &["runtime_actual_1".into()]).unwrap());
+    assert!(!owns_all_jobs(&conn, "other-client", &["runtime_actual_1".into()]).unwrap());
+}
+
+#[test]
+fn transition_by_request_and_restart_recovery_are_conservative() {
+    let dir = tempdir().unwrap();
+    let conn = open_durable(dir.path().join("recover.db")).unwrap();
+    insert_job(&conn, &sample_record("runtime_pending_2")).unwrap();
+    transition_job_by_request(&conn, "test-client", "test-req-1", JobState::Dispatched).unwrap();
+    assert_eq!(recover_incomplete_jobs(&conn).unwrap(), 1);
+    let rec = query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.state, JobState::OutcomeUnknown);
+}
+
+#[test]
+fn known_before_dispatch_failure_can_remove_pending_receipt() {
+    let dir = tempdir().unwrap();
+    let conn = open_durable(dir.path().join("delete.db")).unwrap();
+    insert_job(&conn, &sample_record("runtime_pending_3")).unwrap();
+    delete_job_by_request(&conn, "test-client", "test-req-1").unwrap();
+    assert!(query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .is_none());
 }

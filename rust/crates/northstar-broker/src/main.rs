@@ -8,10 +8,16 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 use northstar_broker::auth::{issue_session, verify_token, BrokerAuth};
-use northstar_broker::db::{open_durable, query_receipt, transition_job, JobState};
+use northstar_broker::db::{
+    bind_dispatched_job, delete_job_by_request, insert_job, open_durable, owns_all_jobs,
+    query_receipt, recover_incomplete_jobs, transition_job, transition_job_by_request, JobState,
+    ReceiptRecord,
+};
 use northstar_broker::endpoint::unix::get_peer_identity;
 use northstar_broker::executor::{ExecutorError, ExecutorUpstream};
 use northstar_broker::frame::{decode_frame, encode_frame, BROKER_MAX_FRAME_BYTES};
@@ -20,7 +26,6 @@ use northstar_broker::protocol::{
     BrokerCapability, BrokerErrorMessage, BrokerMessage, BrokerQueryResponse, BrokerResponse,
     BrokerWelcome, JobSubmissionReceipt, RpcMethod, RuntimeRpcRequest,
 };
-use northstar_broker::settle::{settle_books, SettleRequest};
 
 #[derive(Debug)]
 struct CliArgs {
@@ -69,7 +74,9 @@ fn parse_args() -> Result<CliArgs, String> {
                 executor_socket = Some(PathBuf::from(val));
             }
             "--executor-token-file" => {
-                let val = args.next().ok_or("Missing value for --executor-token-file")?;
+                let val = args
+                    .next()
+                    .ok_or("Missing value for --executor-token-file")?;
                 executor_token_file = Some(PathBuf::from(val));
             }
             other => {
@@ -134,6 +141,64 @@ fn capability_for_method(method: &RpcMethod) -> BrokerCapability {
     }
 }
 
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn request_digest(request: &RuntimeRpcRequest) -> Result<String, serde_json::Error> {
+    let bytes = serde_json::to_vec(request)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn provisional_job_id(client_id: &str, request_id: &str) -> String {
+    let material = format!("{client_id}:{request_id}");
+    let digest = format!("{:x}", Sha256::digest(material.as_bytes()));
+    format!("runtime_pending_{}", &digest[..32])
+}
+
+fn is_provisional_job_id(job_id: &str) -> bool {
+    let Some(suffix) = job_id.strip_prefix("runtime_pending_") else {
+        return false;
+    };
+    suffix.len() == 32 && suffix.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn valid_runtime_job_id(job_id: &str) -> bool {
+    let Some(suffix) = job_id.strip_prefix("runtime_") else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix.len() <= 64
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn terminal_runtime_state(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "cancelled")
+}
+
+fn terminal_result_error(code: &str) -> bool {
+    matches!(
+        code,
+        "provider_error"
+            | "output_token_limit_exceeded"
+            | "result_byte_limit_exceeded"
+            | "output_contract_breach"
+            | "contract_breach"
+    )
+}
+
+fn mark_jobs_outcome_unknown(db_conn: &rusqlite::Connection, run_ids: &[String]) {
+    for run_id in run_ids {
+        let _ = transition_job(db_conn, run_id, JobState::OutcomeUnknown);
+    }
+}
+
 fn send_error(stream: &mut UnixStream, code: &str) {
     let msg = BrokerMessage::Error(BrokerErrorMessage {
         version: 2,
@@ -146,12 +211,15 @@ fn send_error(stream: &mut UnixStream, code: &str) {
 }
 
 fn send_msg(stream: &mut UnixStream, msg: &BrokerMessage) -> io::Result<()> {
-    let frame = encode_frame(msg)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let frame =
+        encode_frame(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     stream.write_all(&frame)
 }
 
-fn read_one_frame(stream: &mut UnixStream, buf: &mut Vec<u8>) -> Result<Option<BrokerMessage>, String> {
+fn read_one_frame(
+    stream: &mut UnixStream,
+    buf: &mut Vec<u8>,
+) -> Result<Option<BrokerMessage>, String> {
     loop {
         if buf.len() >= 4 {
             let size = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
@@ -254,7 +322,9 @@ fn handle_connection(
                 client_id: hello.client_id.clone(),
                 session_id: session.session_id.clone(),
                 token: session.token.clone(),
-                expires_at: session.expires_at,
+                // Wire timestamps are JavaScript epoch milliseconds. Token claims
+                // remain second-based internally for verification.
+                expires_at: session.expires_at.saturating_mul(1_000),
                 capabilities: session.capabilities.clone(),
                 project_id: project_id.to_string(),
             };
@@ -306,19 +376,29 @@ fn handle_connection(
                     return;
                 }
 
-                let maybe_rec = match query_receipt(db_conn, &current_welcome.client_id, &q.query.request_id) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        send_error(&mut stream, "invalid_frame");
-                        return;
-                    }
-                };
+                let maybe_rec =
+                    match query_receipt(db_conn, &current_welcome.client_id, &q.query.request_id) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            send_error(&mut stream, "invalid_frame");
+                            return;
+                        }
+                    };
 
-                let receipt = maybe_rec.map(|r| JobSubmissionReceipt {
-                    job_id: r.job_id,
-                    client_id: r.client_id,
-                    request_id: r.request_id,
-                    submitted_at: r.submitted_at as u64,
+                // A definitive failed start is journaled as completed for durable
+                // mutation accounting, but it never created a runtime job. Do not
+                // expose its provisional id as a job submission receipt.
+                let receipt = maybe_rec.and_then(|r| {
+                    if r.state == JobState::Completed && is_provisional_job_id(&r.job_id) {
+                        return None;
+                    }
+                    Some(JobSubmissionReceipt {
+                        job_id: r.job_id,
+                        client_id: r.client_id,
+                        request_id: r.request_id,
+                        submitted_at: r.submitted_at as u64,
+                        state: Some(r.state.as_str().to_string()),
+                    })
                 });
 
                 let resp = BrokerMessage::QueryResponse(BrokerQueryResponse {
@@ -379,6 +459,7 @@ fn handle_connection(
                             req.sequence,
                             &current_welcome.client_id,
                             db_conn,
+                            executor,
                         );
                     }
                     RpcMethod::Start => {
@@ -386,7 +467,7 @@ fn handle_connection(
                             "INSERT INTO mutation_claims (client_id, request_id) VALUES (?1, ?2)",
                             rusqlite::params![&current_welcome.client_id, &req.request.request_id],
                         ) {
-                            Ok(_) => {},
+                            Ok(_) => {}
                             Err(rusqlite::Error::SqliteFailure(e, _))
                                 if e.code == rusqlite::ErrorCode::ConstraintViolation =>
                             {
@@ -399,56 +480,204 @@ fn handle_connection(
                             }
                         }
 
+                        let digest = match request_digest(&req.request) {
+                            Ok(value) => value,
+                            Err(_) => {
+                                send_error(&mut stream, "invalid_frame");
+                                return;
+                            }
+                        };
+                        let pending_job_id =
+                            provisional_job_id(&current_welcome.client_id, &req.request.request_id);
+                        let pending_receipt = ReceiptRecord {
+                            job_id: pending_job_id,
+                            client_id: current_welcome.client_id.clone(),
+                            request_id: req.request.request_id.clone(),
+                            state: JobState::Pending,
+                            submitted_at: now_millis(),
+                            receipt_payload: None,
+                            request_digest: Some(digest),
+                        };
+                        if insert_job(db_conn, &pending_receipt).is_err() {
+                            send_error(&mut stream, "invalid_frame");
+                            return;
+                        }
+
                         if let Some(upstream) = executor {
                             let req_bytes = match serde_json::to_vec(&req.request) {
                                 Ok(b) => b,
                                 Err(_) => {
+                                    let _ = delete_job_by_request(
+                                        db_conn,
+                                        &current_welcome.client_id,
+                                        &req.request.request_id,
+                                    );
                                     send_error(&mut stream, "invalid_frame");
                                     return;
                                 }
                             };
-                            match upstream.execute(&req_bytes, Duration::from_secs(60)) {
+                            if let Err(err) = upstream.prepare() {
+                                let _ = delete_job_by_request(
+                                    db_conn,
+                                    &current_welcome.client_id,
+                                    &req.request.request_id,
+                                );
+                                let reply_val = serde_json::json!({
+                                    "version": 1,
+                                    "requestId": req.request.request_id,
+                                    "method": "start",
+                                    "success": false,
+                                    "error": {
+                                        "code": "runtime_unavailable",
+                                        "message": format!("Upstream executor unavailable before dispatch: {err}")
+                                    }
+                                });
+                                let _ = send_msg(
+                                    &mut stream,
+                                    &BrokerMessage::Response(BrokerResponse {
+                                        version: 2,
+                                        kind: "response".to_string(),
+                                        sequence: req.sequence,
+                                        reply: reply_val,
+                                    }),
+                                );
+                                continue;
+                            }
+                            if transition_job_by_request(
+                                db_conn,
+                                &current_welcome.client_id,
+                                &req.request.request_id,
+                                JobState::Dispatched,
+                            )
+                            .is_err()
+                            {
+                                send_error(&mut stream, "invalid_frame");
+                                return;
+                            }
+                            match upstream.execute_prepared(&req_bytes, Duration::from_secs(60)) {
                                 Ok(reply_bytes) => {
-                                    match serde_json::from_slice::<serde_json::Value>(&reply_bytes) {
+                                    match serde_json::from_slice::<serde_json::Value>(&reply_bytes)
+                                    {
                                         Ok(reply_val) => {
                                             if let Some(obj) = reply_val.as_object() {
-                                                let echo_req_id = obj.get("requestId").and_then(|v| v.as_str()) == Some(&req.request.request_id);
-                                                let echo_method = obj.get("method").and_then(|v| v.as_str()) == Some("start");
-                                                let has_success = obj.get("success").and_then(|v| v.as_bool()).is_some();
-                                                if echo_req_id && echo_method && has_success {
-                                                    let resp = BrokerMessage::Response(BrokerResponse {
+                                                let echo_req_id =
+                                                    obj.get("requestId").and_then(|v| v.as_str())
+                                                        == Some(&req.request.request_id);
+                                                let echo_method =
+                                                    obj.get("method").and_then(|v| v.as_str())
+                                                        == Some("start");
+                                                let success =
+                                                    obj.get("success").and_then(|v| v.as_bool());
+                                                if !echo_req_id || !echo_method || success.is_none()
+                                                {
+                                                    let _ = transition_job_by_request(
+                                                        db_conn,
+                                                        &current_welcome.client_id,
+                                                        &req.request.request_id,
+                                                        JobState::OutcomeUnknown,
+                                                    );
+                                                    send_error(&mut stream, "invalid_frame");
+                                                    return;
+                                                }
+                                                if success == Some(true) {
+                                                    let run_id = obj
+                                                        .get("data")
+                                                        .and_then(|v| v.as_object())
+                                                        .and_then(|v| v.get("runId"))
+                                                        .and_then(|v| v.as_str());
+                                                    let Some(run_id) = run_id
+                                                        .filter(|id| valid_runtime_job_id(id))
+                                                    else {
+                                                        let _ = transition_job_by_request(
+                                                            db_conn,
+                                                            &current_welcome.client_id,
+                                                            &req.request.request_id,
+                                                            JobState::OutcomeUnknown,
+                                                        );
+                                                        send_error(&mut stream, "invalid_frame");
+                                                        return;
+                                                    };
+                                                    if bind_dispatched_job(
+                                                        db_conn,
+                                                        &current_welcome.client_id,
+                                                        &req.request.request_id,
+                                                        run_id,
+                                                    )
+                                                    .is_err()
+                                                    {
+                                                        let _ = transition_job_by_request(
+                                                            db_conn,
+                                                            &current_welcome.client_id,
+                                                            &req.request.request_id,
+                                                            JobState::OutcomeUnknown,
+                                                        );
+                                                        send_error(&mut stream, "invalid_frame");
+                                                        return;
+                                                    }
+                                                } else if transition_job_by_request(
+                                                    db_conn,
+                                                    &current_welcome.client_id,
+                                                    &req.request.request_id,
+                                                    JobState::Completed,
+                                                )
+                                                .is_err()
+                                                {
+                                                    send_error(&mut stream, "invalid_frame");
+                                                    return;
+                                                }
+
+                                                let resp =
+                                                    BrokerMessage::Response(BrokerResponse {
                                                         version: 2,
                                                         kind: "response".to_string(),
                                                         sequence: req.sequence,
                                                         reply: reply_val,
                                                     });
-                                                    if send_msg(&mut stream, &resp).is_err() {
-                                                        return;
-                                                    }
-                                                } else {
-                                                    send_error(&mut stream, "invalid_frame");
+                                                if send_msg(&mut stream, &resp).is_err() {
                                                     return;
                                                 }
                                             } else {
+                                                let _ = transition_job_by_request(
+                                                    db_conn,
+                                                    &current_welcome.client_id,
+                                                    &req.request.request_id,
+                                                    JobState::OutcomeUnknown,
+                                                );
                                                 send_error(&mut stream, "invalid_frame");
                                                 return;
                                             }
                                         }
                                         Err(_) => {
+                                            let _ = transition_job_by_request(
+                                                db_conn,
+                                                &current_welcome.client_id,
+                                                &req.request.request_id,
+                                                JobState::OutcomeUnknown,
+                                            );
                                             send_error(&mut stream, "invalid_frame");
                                             return;
                                         }
                                     }
                                 }
                                 Err(ExecutorError::BeforeDispatch(err_msg)) => {
+                                    // The durable journal was already marked dispatched immediately
+                                    // before the write. A write/flush failure may be partial, so the
+                                    // external outcome is ambiguous even though the executor labels
+                                    // transport setup failures as BeforeDispatch.
+                                    let _ = transition_job_by_request(
+                                        db_conn,
+                                        &current_welcome.client_id,
+                                        &req.request.request_id,
+                                        JobState::OutcomeUnknown,
+                                    );
                                     let reply_val = serde_json::json!({
                                         "version": 1,
                                         "requestId": req.request.request_id,
                                         "method": "start",
                                         "success": false,
                                         "error": {
-                                            "code": "runtime_unavailable",
-                                            "message": format!("Upstream executor dispatch failed: {err_msg}")
+                                            "code": "timeout",
+                                            "message": format!("Upstream executor dispatch outcome is unknown: {err_msg}")
                                         }
                                     });
                                     let resp = BrokerMessage::Response(BrokerResponse {
@@ -464,17 +693,19 @@ fn handle_connection(
                                 Err(ExecutorError::AfterDispatch(err_msg)) => {
                                     // Attempt OutcomeUnknown transition; on failure keep the same
                                     // outcome_unknown-conservative error reply below — never success.
-                                    match transition_job(db_conn, &req.request.request_id, JobState::OutcomeUnknown) {
-                                        Ok(()) => {},
-                                        Err(_) => {},
-                                    }
+                                    let _ = transition_job_by_request(
+                                        db_conn,
+                                        &current_welcome.client_id,
+                                        &req.request.request_id,
+                                        JobState::OutcomeUnknown,
+                                    );
                                     let reply_val = serde_json::json!({
                                         "version": 1,
                                         "requestId": req.request.request_id,
                                         "method": "start",
                                         "success": false,
                                         "error": {
-                                            "code": "runtime_timeout",
+                                            "code": "timeout",
                                             "message": format!("Upstream executor communication lost after dispatch: {err_msg}")
                                         }
                                     });
@@ -490,7 +721,12 @@ fn handle_connection(
                                 }
                             }
                         } else {
-                            // Executor socket absent: return well-formed runtime_unavailable reply
+                            // No executor exists, so dispatch is provably absent.
+                            let _ = delete_job_by_request(
+                                db_conn,
+                                &current_welcome.client_id,
+                                &req.request.request_id,
+                            );
                             let reply_val = serde_json::json!({
                                 "version": 1,
                                 "requestId": req.request.request_id,
@@ -498,7 +734,7 @@ fn handle_connection(
                                 "success": false,
                                 "error": {
                                     "code": "runtime_unavailable",
-                                    "message": "Native executor not yet composed"
+                                    "message": "Broker host did not supply a native executor"
                                 }
                             });
                             let resp = BrokerMessage::Response(BrokerResponse {
@@ -519,6 +755,38 @@ fn handle_connection(
                             RpcMethod::Result => "result",
                             _ => unreachable!(),
                         };
+                        let owned_run_id = if matches!(
+                            req.request.method,
+                            RpcMethod::Status | RpcMethod::Result
+                        ) {
+                            let Some(run_id) = req
+                                .request
+                                .params
+                                .get("runId")
+                                .and_then(|v| v.as_str())
+                                .filter(|id| valid_runtime_job_id(id))
+                            else {
+                                send_error(&mut stream, "invalid_frame");
+                                return;
+                            };
+                            match owns_all_jobs(
+                                db_conn,
+                                &current_welcome.client_id,
+                                &[run_id.to_string()],
+                            ) {
+                                Ok(true) => Some(run_id.to_string()),
+                                Ok(false) => {
+                                    send_error(&mut stream, "scope_denied");
+                                    return;
+                                }
+                                Err(_) => {
+                                    send_error(&mut stream, "invalid_frame");
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
 
                         if let Some(upstream) = executor {
                             let req_bytes = match serde_json::to_vec(&req.request) {
@@ -530,19 +798,63 @@ fn handle_connection(
                             };
                             match upstream.execute(&req_bytes, Duration::from_secs(60)) {
                                 Ok(reply_bytes) => {
-                                    match serde_json::from_slice::<serde_json::Value>(&reply_bytes) {
+                                    match serde_json::from_slice::<serde_json::Value>(&reply_bytes)
+                                    {
                                         Ok(reply_val) => {
                                             if let Some(obj) = reply_val.as_object() {
-                                                let echo_req_id = obj.get("requestId").and_then(|v| v.as_str()) == Some(&req.request.request_id);
-                                                let echo_method = obj.get("method").and_then(|v| v.as_str()) == Some(method_str);
-                                                let has_success = obj.get("success").and_then(|v| v.as_bool()).is_some();
+                                                let echo_req_id =
+                                                    obj.get("requestId").and_then(|v| v.as_str())
+                                                        == Some(&req.request.request_id);
+                                                let echo_method =
+                                                    obj.get("method").and_then(|v| v.as_str())
+                                                        == Some(method_str);
+                                                let has_success = obj
+                                                    .get("success")
+                                                    .and_then(|v| v.as_bool())
+                                                    .is_some();
                                                 if echo_req_id && echo_method && has_success {
-                                                    let resp = BrokerMessage::Response(BrokerResponse {
-                                                        version: 2,
-                                                        kind: "response".to_string(),
-                                                        sequence: req.sequence,
-                                                        reply: reply_val,
-                                                    });
+                                                    let success = obj
+                                                        .get("success")
+                                                        .and_then(|v| v.as_bool())
+                                                        .unwrap_or(false);
+                                                    if let Some(run_id) = owned_run_id.as_deref() {
+                                                        let should_settle = match req.request.method {
+                                                            RpcMethod::Status if success => obj
+                                                                .get("data")
+                                                                .and_then(|v| v.as_object())
+                                                                .is_some_and(|data| {
+                                                                    data.get("runId")
+                                                                        .and_then(|v| v.as_str())
+                                                                        == Some(run_id)
+                                                                        && data
+                                                                            .get("state")
+                                                                            .and_then(|v| v.as_str())
+                                                                            .is_some_and(terminal_runtime_state)
+                                                                }),
+                                                            RpcMethod::Result if success => true,
+                                                            RpcMethod::Result => obj
+                                                                .get("error")
+                                                                .and_then(|v| v.as_object())
+                                                                .and_then(|error| error.get("code"))
+                                                                .and_then(|v| v.as_str())
+                                                                .is_some_and(terminal_result_error),
+                                                            _ => false,
+                                                        };
+                                                        if should_settle {
+                                                            let _ = transition_job(
+                                                                db_conn,
+                                                                run_id,
+                                                                JobState::Completed,
+                                                            );
+                                                        }
+                                                    }
+                                                    let resp =
+                                                        BrokerMessage::Response(BrokerResponse {
+                                                            version: 2,
+                                                            kind: "response".to_string(),
+                                                            sequence: req.sequence,
+                                                            reply: reply_val,
+                                                        });
                                                     if send_msg(&mut stream, &resp).is_err() {
                                                         return;
                                                     }
@@ -589,7 +901,7 @@ fn handle_connection(
                                         "method": method_str,
                                         "success": false,
                                         "error": {
-                                            "code": "runtime_timeout",
+                                            "code": "timeout",
                                             "message": format!("Upstream executor communication lost after dispatch: {err_msg}")
                                         }
                                     });
@@ -613,7 +925,7 @@ fn handle_connection(
                                 "success": false,
                                 "error": {
                                     "code": "runtime_unavailable",
-                                    "message": "Native executor not yet composed"
+                                    "message": "Broker host did not supply a native executor"
                                 }
                             });
                             let resp = BrokerMessage::Response(BrokerResponse {
@@ -644,6 +956,7 @@ fn handle_cancel_and_settle(
     sequence: i64,
     client_id: &str,
     db_conn: &rusqlite::Connection,
+    executor: Option<&ExecutorUpstream>,
 ) {
     let params_obj = match req.params.as_object() {
         Some(o) => o,
@@ -654,42 +967,53 @@ fn handle_cancel_and_settle(
     };
 
     let run_ids_arr = match params_obj.get("runIds").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => {
+        Some(a) if !a.is_empty() && a.len() <= 64 => a,
+        _ => {
             send_error(stream, "invalid_frame");
             return;
         }
     };
-
     let mut run_ids = Vec::with_capacity(run_ids_arr.len());
     for item in run_ids_arr {
-        match item.as_str() {
-            Some(s) => run_ids.push(s.to_string()),
-            None => {
-                send_error(stream, "invalid_frame");
-                return;
-            }
+        let Some(run_id) = item.as_str().filter(|id| valid_runtime_job_id(id)) else {
+            send_error(stream, "invalid_frame");
+            return;
+        };
+        if run_ids.iter().any(|existing| existing == run_id) {
+            send_error(stream, "invalid_frame");
+            return;
         }
+        run_ids.push(run_id.to_string());
     }
 
-    let settlement_window_ms = match params_obj.get("settlementWindowMs").and_then(|v| v.as_u64()) {
-        Some(w) => w,
-        None => {
+    let settlement_window_ms = match params_obj
+        .get("settlementWindowMs")
+        .and_then(|v| v.as_u64())
+    {
+        Some(w) if (1..=10_000).contains(&w) => w,
+        _ => {
             send_error(stream, "invalid_frame");
             return;
         }
     };
 
-    let settle_req = SettleRequest {
-        run_ids,
-        settlement_window_ms,
-    };
+    match owns_all_jobs(db_conn, client_id, &run_ids) {
+        Ok(true) => {}
+        Ok(false) => {
+            send_error(stream, "scope_denied");
+            return;
+        }
+        Err(_) => {
+            send_error(stream, "invalid_frame");
+            return;
+        }
+    }
 
     match db_conn.execute(
         "INSERT INTO mutation_claims (client_id, request_id) VALUES (?1, ?2)",
         rusqlite::params![client_id, &req.request_id],
     ) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(rusqlite::Error::SqliteFailure(e, _))
             if e.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
@@ -702,34 +1026,121 @@ fn handle_cancel_and_settle(
         }
     }
 
-    let report = match settle_books(db_conn, client_id, &settle_req) {
-        Ok(r) => r,
+    let Some(upstream) = executor else {
+        let reply = serde_json::json!({
+            "version": 1,
+            "requestId": req.request_id,
+            "method": "cancelAndSettle",
+            "success": false,
+            "error": {
+                "code": "runtime_unavailable",
+                "message": "Native executor not composed"
+            }
+        });
+        let _ = send_msg(
+            stream,
+            &BrokerMessage::Response(BrokerResponse {
+                version: 2,
+                kind: "response".to_string(),
+                sequence,
+                reply,
+            }),
+        );
+        return;
+    };
+
+    let req_bytes = match serde_json::to_vec(req) {
+        Ok(bytes) => bytes,
         Err(_) => {
             send_error(stream, "invalid_frame");
             return;
         }
     };
-
-    let reply_val = serde_json::json!({
-        "version": 1,
-        "requestId": req.request_id,
-        "method": "cancelAndSettle",
-        "success": true,
-        "data": {
-            "settledRunIds": report.settled,
-            "timedOutRunIds": report.timed_out,
-            "unknownRunIds": report.unknown
+    let timeout = Duration::from_millis(settlement_window_ms.saturating_add(5_000));
+    let reply_val = match upstream.execute(&req_bytes, timeout) {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_jobs_outcome_unknown(db_conn, &run_ids);
+                send_error(stream, "invalid_frame");
+                return;
+            }
+        },
+        Err(ExecutorError::BeforeDispatch(message)) => serde_json::json!({
+            "version": 1,
+            "requestId": req.request_id,
+            "method": "cancelAndSettle",
+            "success": false,
+            "error": {
+                "code": "runtime_unavailable",
+                "message": format!("Upstream executor dispatch failed: {message}")
+            }
+        }),
+        Err(ExecutorError::AfterDispatch(message)) => {
+            mark_jobs_outcome_unknown(db_conn, &run_ids);
+            serde_json::json!({
+                "version": 1,
+                "requestId": req.request_id,
+                "method": "cancelAndSettle",
+                "success": false,
+                "error": {
+                    "code": "timeout",
+                    "message": format!("Upstream executor communication lost after dispatch: {message}")
+                }
+            })
         }
-    });
+    };
 
-    let resp = BrokerMessage::Response(BrokerResponse {
-        version: 2,
-        kind: "response".to_string(),
-        sequence,
-        reply: reply_val,
+    let valid = reply_val.as_object().is_some_and(|obj| {
+        obj.get("requestId").and_then(|v| v.as_str()) == Some(&req.request_id)
+            && obj.get("method").and_then(|v| v.as_str()) == Some("cancelAndSettle")
+            && obj.get("success").and_then(|v| v.as_bool()).is_some()
     });
+    if !valid {
+        mark_jobs_outcome_unknown(db_conn, &run_ids);
+        send_error(stream, "invalid_frame");
+        return;
+    }
 
-    let _ = send_msg(stream, &resp);
+    if reply_val
+        .as_object()
+        .and_then(|obj| obj.get("success"))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
+        if let Some(settlements) = reply_val
+            .as_object()
+            .and_then(|obj| obj.get("data"))
+            .and_then(|v| v.as_object())
+            .and_then(|data| data.get("settlements"))
+            .and_then(|v| v.as_array())
+        {
+            for settlement in settlements {
+                let Some(item) = settlement.as_object() else {
+                    continue;
+                };
+                let Some(run_id) = item.get("runId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Some(state) = item.get("state").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if run_ids.iter().any(|owned| owned == run_id) && terminal_runtime_state(state) {
+                    let _ = transition_job(db_conn, run_id, JobState::Completed);
+                }
+            }
+        }
+    }
+
+    let _ = send_msg(
+        stream,
+        &BrokerMessage::Response(BrokerResponse {
+            version: 2,
+            kind: "response".to_string(),
+            sequence,
+            reply: reply_val,
+        }),
+    );
 }
 
 fn main() {
@@ -748,6 +1159,11 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    if let Err(e) = recover_incomplete_jobs(&conn) {
+        eprintln!("Failed to recover incomplete job receipts: {e}");
+        std::process::exit(1);
+    }
 
     if let Err(e) = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS mutation_claims (
@@ -776,7 +1192,10 @@ fn main() {
     };
 
     if let Err(e) = fs::set_permissions(&args.socket_path, fs::Permissions::from_mode(0o600)) {
-        eprintln!("Failed to set permissions 0600 on socket {:?}: {e}", args.socket_path);
+        eprintln!(
+            "Failed to set permissions 0600 on socket {:?}: {e}",
+            args.socket_path
+        );
         std::process::exit(1);
     }
 
