@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { callGithubTool, parseGithubRetryAfter } from '../../src/github/github-domain.js';
-import type { GithubCloneRunner } from '../../src/github/github-clone.js';
 import { SocialError } from '../../src/social/social-contract.js';
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
@@ -636,51 +635,6 @@ test('repo readme ordinary error propagates when signal aborted before throw', a
   );
 });
 
-test('clone invalid_request surfaces without REST fallback (bad slug)', async () => {
-  let fetched = 0;
-  await expectGithubError('invalid_request', () => withFetch(async () => {
-    fetched += 1;
-    return jsonResponse({});
-  }, () => callGithubTool({ action: 'repo', owner: '-o', repo: 'r' }, { env: {} })));
-  assert.equal(fetched, 0, 'clone invalid_request must surface before any REST call');
-});
-
-test('clone authentication_required surfaces without an extra REST call', async () => {
-  let fetched = 0;
-  const authFail: GithubCloneRunner = async (command) => {
-    if (command === 'gh') return { stdout: '', stderr: 'ERROR: repository not found', code: 1 };
-    return { stdout: '', stderr: "fatal: Authentication failed for 'https://github.com/o/r.git/'", code: 128 };
-  };
-  const err = await expectGithubError('authentication_required', () => withFetch(async () => {
-    fetched += 1;
-    return jsonResponse(repoRow());
-  }, () => callGithubTool(
-    { action: 'repo', owner: 'o', repo: 'r' },
-    { env: { GITHUB_TOKEN: 'configured-token' }, cloneRunner: authFail },
-  )));
-  assert.match(err.message, /authentication_required/);
-  assert.equal(fetched, 0, 'token-carrying auth failure must surface without an extra REST call');
-});
-
-test('double-absent binaries fall back to REST with the gh-absent warning', async () => {
-  const bothMissing: GithubCloneRunner = async () => {
-    throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' });
-  };
-  const result = await withFetch(async (input) => {
-    const url = String(input);
-    if (url.endsWith('/repos/octo/kit')) return jsonResponse(repoRow());
-    if (url.endsWith('/repos/octo/kit/readme')) {
-      return jsonResponse({ content: Buffer.from('hi').toString('base64'), encoding: 'base64' });
-    }
-    throw new Error(`unexpected fetch ${url}`);
-  }, () => callGithubTool({ action: 'repo', owner: 'octo', repo: 'kit' }, { env: {}, cloneRunner: bothMissing }));
-  const details = result.details as { backend: string; warnings: string[]; entities: unknown[] };
-  assert.equal(details.backend, 'github-api');
-  assert.equal(details.entities.length, 1);
-  assert.ok(details.warnings.join('; ').includes('gh absent'), 'double-absent must carry the gh-absent warning');
-  assert.ok(details.warnings.join('; ').includes('REST-only'));
-});
-
 test('trending parses repo slugs', async () => {
   const result = await withFetch(async (input) => {
     assert.match(String(input), /github\.com\/trending\?since=weekly/);
@@ -735,4 +689,16 @@ test('D2: comments failure degrades to a fixed warning while entity text stands'
   const warnings = (result.details as { warnings: string[] }).warnings;
   assert.ok(warnings.some((w) => w.startsWith('top comments unavailable (')));
   assert.ok(!warnings.join(' ').includes('oops'), 'no upstream echo in warnings');
+});
+
+test('unknown github fields reject before any fetch', async () => {
+  let calls = 0;
+  const saved = globalThis.fetch;
+  globalThis.fetch = (async () => { calls += 1; return jsonResponse({}); }) as typeof fetch;
+  try {
+    await expectGithubError('invalid_request', () => callGithubTool({ action: 'tree', owner: 'o', repo: 'r', unknownField: true }, { env: {} }));
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = saved;
+  }
 });

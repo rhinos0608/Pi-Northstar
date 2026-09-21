@@ -53,6 +53,7 @@ export {
   validateGithubPath,
   validateGithubRef,
   validateGithubRequest,
+  validateGithubActionFields,
   validateGithubSha,
 } from './github-request-contract.js';
 export type { GithubAction, GithubRequest, GithubRequestInput } from './github-request-contract.js';
@@ -695,30 +696,53 @@ export interface GithubCursorFingerprintInput {
   action: GithubAction;
   owner?: string;
   repo?: string;
+  query?: string;
+  language?: string;
   limit: number;
   workflow?: string;
   ref?: string;
   status?: string;
+  state?: string;
+  labels?: string[];
   number?: number;
   author?: string;
   jobs?: boolean;
+  files?: boolean;
+  tag?: string;
+  latest?: boolean;
+  sha?: string;
+  path?: string;
+  since?: string;
+  branch?: string;
 }
 
-/** SHA-256 fingerprint pinning action/owner/repo/limit plus every
- * result-shaping selector (workflow, ref, status, number, author, jobs), so a
- * cursor cannot be reused with a different query. */
+/** SHA-256 fingerprint pinning action/owner/repo/query/language/limit plus every
+ * result-shaping selector (workflow, ref, branch, status, state, labels,
+ * number, author, jobs, files, tag, latest, sha, path, since), so a cursor
+ * cannot be reused with a different query. */
 export function githubCursorFingerprint(input: GithubCursorFingerprintInput): string {
   const parts: string[] = [
     input.action,
     input.owner ?? '',
     input.repo ?? '',
+    input.query ?? '',
+    input.language ?? '',
     String(input.limit),
     input.workflow ?? '',
     input.ref ?? '',
     input.status ?? '',
+    input.state ?? '',
+    input.labels !== undefined ? JSON.stringify(input.labels) : '',
     input.number !== undefined ? String(input.number) : '',
     input.author ?? '',
     input.jobs === true ? 'jobs' : '',
+    input.files === true ? 'files' : '',
+    input.tag ?? '',
+    input.latest === true ? 'latest' : '',
+    input.sha ?? '',
+    input.path ?? '',
+    input.since ?? '',
+    input.branch ?? '',
   ];
   return createHash('sha256').update(parts.join('|'), 'utf8').digest('hex');
 }
@@ -825,13 +849,12 @@ export interface GithubWorker {
   normalize(request: GithubRequest, plan: GithubBackendPlan, payload: unknown): GithubPageV1;
 }
 
-/** Per-action backend preference (Plan E3 domain routing). Repo/tree are
- * clone-first ('github-clone' with 'github-api' REST fallback); blob/file
- * stay REST-first. The 'github-clone' executor is owned by github-clone.ts
- * (W-E1) behind the GithubBackendPlan seam; the domain filters it by
- * availability and serves REST until it registers. */
+/** Per-action backend preference (Plan E3 domain routing). Repository metadata
+ * is REST-first because clone payloads expose tree data, not canonical repo
+ * entity (including optional README); tree stays clone-first and blob/file stay
+ * REST-first. The clone executor is owned by github-clone.ts behind the seam. */
 export const GITHUB_BACKEND_PREFERENCE: Readonly<Record<GithubAction, readonly string[]>> = {
-  repo: ['github-clone', 'github-api'],
+  repo: ['github-api', 'github-clone'],
   file: ['github-api', 'github-clone'],
   tree: ['github-clone', 'github-api'],
   search: ['github-api'],

@@ -58,12 +58,12 @@ export const GITHUB_ACTION_FIELD_SPECS: Readonly<Record<GithubAction, GithubActi
   search: { required: ['query'], optional: ['language', 'limit', 'perPage', 'cursor'], repoSelector: 'optional' },
   trending: { required: [], optional: ['language', 'since', 'limit', 'perPage'], repoSelector: false },
   issues: { required: [], optional: ['number', 'state', 'labels', 'limit', 'perPage', 'cursor'], repoSelector: true },
-  pulls: { required: [], optional: ['number', 'state', 'labels', 'files', 'limit', 'perPage', 'cursor'], repoSelector: true },
+  pulls: { required: [], optional: ['number', 'state', 'files', 'limit', 'perPage', 'cursor'], repoSelector: true },
   releases: { required: [], optional: ['tag', 'latest', 'limit', 'perPage', 'cursor'], repoSelector: true },
   commits: { required: [], optional: ['path', 'branch', 'ref', 'sha', 'since', 'author', 'limit', 'perPage', 'cursor'], repoSelector: true },
   search_repos: { required: ['query'], optional: ['language', 'limit', 'perPage', 'cursor'], repoSelector: false },
   workflows: { required: [], optional: ['workflow', 'limit', 'perPage', 'cursor'], repoSelector: true },
-  runs: { required: [], optional: ['workflow', 'status', 'number', 'jobs', 'limit', 'perPage', 'cursor'], repoSelector: true },
+  runs: { required: [], optional: ['workflow', 'branch', 'status', 'number', 'jobs', 'author', 'limit', 'perPage', 'cursor'], repoSelector: true },
 };
 
 export function isGithubAction(value: unknown): value is GithubAction {
@@ -95,6 +95,21 @@ export function resolveGithubAction(action: string): GithubAction {
     throw githubError('unsupported_action', `Unsupported github action: ${echo(action)}`);
   }
   return action;
+}
+
+/** Reject fields not declared by canonical action vocabulary before projection. */
+export function validateGithubActionFields(args: Readonly<Record<string, unknown>>, action: string): void {
+  const resolved = resolveGithubAction(action);
+  const spec = GITHUB_ACTION_FIELD_SPECS[resolved];
+  const allowed = new Set<string>(['action', ...spec.required, ...spec.optional]);
+  if (spec.repoSelector) {
+    allowed.add('owner');
+    allowed.add('repo');
+    allowed.add('repository');
+  }
+  for (const key of Object.keys(args)) {
+    if (!allowed.has(key)) throw githubError('invalid_request', `Unknown field for github ${resolved}: ${echo(key)}`);
+  }
 }
 
 // ── Strict selectors ──
@@ -449,6 +464,9 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   }
 
   const labels = validateLabels(input.labels);
+  if (action === 'pulls' && labels !== undefined) {
+    throw githubError('invalid_request', 'labels is only supported for github issues');
+  }
 
   const tag = cleanField(input.tag);
   if (typeof input.tag === 'string' && tag === undefined) {
@@ -465,6 +483,9 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   if (latest !== undefined && action !== 'releases') throw githubError('invalid_request', 'latest is only supported for github releases');
   const files = validateBooleanFlag(input.files, 'files');
   if (files !== undefined && action !== 'pulls') throw githubError('invalid_request', 'files is only supported for github pulls');
+  if (action === 'pulls' && files === true && number === undefined) {
+    throw githubError('invalid_request', 'files requires selector: number');
+  }
   const recursive = validateBooleanFlag(input.recursive, 'recursive');
   if (recursive !== undefined && action !== 'tree') throw githubError('invalid_request', 'recursive is only supported for github tree');
   const includeReadme = validateBooleanFlag(input.includeReadme, 'includeReadme');

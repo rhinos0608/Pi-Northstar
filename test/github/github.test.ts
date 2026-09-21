@@ -21,7 +21,7 @@ function branchAction(branch: any): unknown {
 interface CapturedTool {
   name: string;
   parameters: { properties: Record<string, any> };
-  execute: (id: string, params: unknown) => Promise<unknown>;
+  execute: (id: string, params: unknown, signal?: AbortSignal) => Promise<unknown>;
 }
 
 async function captureGitHubTool(): Promise<CapturedTool> {
@@ -107,6 +107,65 @@ test('github schema rejects schema-valid-but-runtime-invalid numerics and paths'
   assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, number: 0 } }), false);
   assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, number: -3 } }), false);
   assert.equal(Value.Check(schema, { request: { action: 'issues', ...common, number: 1.5 } }), false);
+});
+
+test('registered github file uses command handler, guards output, and preserves command details', async () => {
+  const originalFetch = globalThis.fetch;
+  const fetchCalls: string[] = [];
+  let genericBackendCalls = 0;
+  const env = { PI_SEARCH_MAX_TOOL_OUTPUT_CHARS: '1000' };
+  const tool = await (async () => {
+    const previous = process.env.PI_SEARCH_BOOTSTRAP;
+    process.env.PI_SEARCH_BOOTSTRAP = 'off';
+    let captured: CapturedTool | undefined;
+    const pi = {
+      on: () => {},
+      registerTool: (def: { name: string; parameters: unknown; execute: CapturedTool['execute'] }) => {
+        if (def.name === 'github') captured = def as CapturedTool;
+      },
+      registerCommand: () => {},
+    };
+    try {
+      registerGitHubTool(pi as unknown as ExtensionAPI, {
+        callTool: async () => {
+          genericBackendCalls += 1;
+          throw new Error('generic backend must not be called for file');
+        },
+        close: async () => {},
+      }, env);
+    } finally {
+      if (previous === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
+      else process.env.PI_SEARCH_BOOTSTRAP = previous;
+    }
+    assert.ok(captured, 'github tool must be registered');
+    return captured;
+  })();
+
+  globalThis.fetch = (async (input) => {
+    fetchCalls.push(String(input));
+    return new Response(JSON.stringify({
+      path: 'src/a.ts',
+      content: Buffer.from('x'.repeat(500)).toString('base64'),
+      encoding: 'base64',
+      size: 500,
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const result = await tool.execute('file-call', {
+      request: {
+        action: 'file', owner: 'octo', repo: 'kit',
+        paths: Array.from({ length: 10 }, (_, index) => `src/${index}.ts`),
+      },
+    });
+    const content = (result as { content: Array<{ type: string; text: string }> }).content;
+    const details = (result as { details: { details: Record<string, unknown> } }).details;
+    assert.equal(genericBackendCalls, 0);
+    assert.equal(fetchCalls.length, 10);
+    assert.match(content[0]!.text, /\[context guard: output truncated/);
+    assert.equal((details.details.northstarCommand as { commandId: string }).commandId, 'github.file');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('github schema exposes per-action selectors, caps, and cursor', async () => {

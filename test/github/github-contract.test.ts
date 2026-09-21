@@ -444,8 +444,8 @@ test('orderGithubPlans prefers complete, full, cursor, authenticated', () => {
   );
 });
 
-test('Plan E3 routing: repo/tree clone-first with REST fallback, file REST-first', () => {
-  assert.deepEqual([...GITHUB_BACKEND_PREFERENCE.repo], ['github-clone', 'github-api']);
+test('Plan E3 routing: repo REST-first, tree clone-first, file REST-first', () => {
+  assert.deepEqual([...GITHUB_BACKEND_PREFERENCE.repo], ['github-api', 'github-clone']);
   assert.deepEqual([...GITHUB_BACKEND_PREFERENCE.tree], ['github-clone', 'github-api']);
   assert.deepEqual([...GITHUB_BACKEND_PREFERENCE.file], ['github-api', 'github-clone']);
   for (const action of GITHUB_ACTIONS) {

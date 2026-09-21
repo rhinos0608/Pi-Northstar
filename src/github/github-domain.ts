@@ -30,6 +30,7 @@ import {
   validateGithubPage,
   validateGithubPath,
   validateGithubRequest,
+  validateGithubActionFields,
   type GithubAction,
   type GithubEntityV1,
   type GithubPageV1,
@@ -239,6 +240,14 @@ function repoUrl(owner: string, repo: string): string {
 export interface GithubCursorSelectors {
   author?: string;
   jobs?: boolean;
+  query?: string;
+  language?: string;
+  tag?: string;
+  latest?: boolean;
+  sha?: string;
+  path?: string;
+  since?: string;
+  branch?: string;
 }
 
 function fingerprintFor(request: GithubRequest, extra?: GithubCursorSelectors): string {
@@ -246,13 +255,24 @@ function fingerprintFor(request: GithubRequest, extra?: GithubCursorSelectors): 
     action: request.action,
     ...(request.owner !== undefined ? { owner: request.owner } : {}),
     ...(request.repo !== undefined ? { repo: request.repo } : {}),
+    ...(request.query !== undefined ? { query: request.query } : {}),
+    ...(request.language !== undefined ? { language: request.language } : {}),
     limit: request.limit,
     ...(request.workflow !== undefined ? { workflow: request.workflow } : {}),
     ...(request.ref !== undefined ? { ref: request.ref } : {}),
     ...(request.status !== undefined ? { status: request.status } : {}),
+    ...(request.state !== undefined ? { state: request.state } : {}),
+    ...(request.labels !== undefined ? { labels: request.labels } : {}),
     ...(request.number !== undefined ? { number: request.number } : {}),
+    ...(request.tag !== undefined ? { tag: request.tag } : {}),
+    ...(request.latest === true ? { latest: true as const } : {}),
+    ...(request.sha !== undefined ? { sha: request.sha } : {}),
+    ...(request.path !== undefined ? { path: request.path } : {}),
+    ...(request.since !== undefined ? { since: request.since } : {}),
+    ...(request.author !== undefined ? { author: request.author } : {}),
     ...(extra?.author !== undefined ? { author: extra.author } : {}),
     ...(extra?.jobs === true ? { jobs: true as const } : {}),
+    ...(request.files === true ? { files: true as const } : {}),
   });
 }
 
@@ -653,6 +673,7 @@ async function handleRepo(request: GithubRequest, args: Record<string, unknown>,
   const { data } = await githubFetch(repoUrl(owner, repo), env, signal);
   if (!isRecord(data)) throw githubError('malformed_upstream', 'GitHub repo response was not an object');
   let readme: string | undefined;
+  const warnings: string[] = [];
   if (args.includeReadme !== false) {
     try {
       const raw = await githubFetch(`${repoUrl(owner, repo)}/readme`, env, signal);
@@ -672,6 +693,7 @@ async function handleRepo(request: GithubRequest, args: Record<string, unknown>,
       if (error instanceof Error && error.name === 'AbortError') throw error;
       if (signal?.aborted) throw error;
       readme = undefined;
+      warnings.push('optional README unavailable; repository metadata served without README');
     }
   }
   const entity = normalizeRepo(data, readme);
@@ -679,9 +701,9 @@ async function handleRepo(request: GithubRequest, args: Record<string, unknown>,
     entities: [entity],
     pagination: { supported: false, limit: request.limit, returned: 1, hasMore: false },
     partial: false,
-    warnings: [],
+    warnings,
   });
-  return { page, degraded: false };
+  return { page, degraded: warnings.length > 0 };
 }
 
 async function fetchFileEntity(path: string, request: GithubRequest, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<GithubEntityV1[]> {
@@ -1090,6 +1112,9 @@ async function handlePulls(request: GithubRequest, args: Record<string, unknown>
 async function handleReleases(request: GithubRequest, args: Record<string, unknown>, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
   const owner = request.owner!;
   const repo = request.repo!;
+  // Single-shot selectors never issue cursors: a list cursor presented with
+  // tag/latest fails closed here instead of being silently dropped.
+  if (request.cursor !== undefined && (request.tag !== undefined || args.latest === true)) pageNumber(request);
   if (request.tag !== undefined) {
     const data = await fetchRecord(`${repoUrl(owner, repo)}/releases/tags/${encodeURIComponent(request.tag)}`, env, signal, 'GitHub release response was not an object');
     return singleEntityResult(request, [normalizeRelease(data, owner, repo)]);
@@ -1144,6 +1169,11 @@ async function fetchCommitsList(scope: RepoScope, query: CommitsQuery, io: Fetch
 async function handleCommits(request: GithubRequest, args: Record<string, unknown>, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
   const owner = request.owner!;
   const repo = request.repo!;
+  // A sha lookup never issues a cursor: a list cursor presented with sha
+  // fails closed here instead of being silently dropped.
+  if (request.cursor !== undefined && request.sha !== undefined) {
+    pageNumber(request, request.author !== undefined ? { author: request.author } : undefined);
+  }
   if (request.sha !== undefined) {
     const data = await fetchRecord(`${repoUrl(owner, repo)}/commits/${request.sha}`, env, signal, 'GitHub commit response was not an object');
     return singleEntityResult(request, [normalizeCommit(data, owner, repo)]);
@@ -1170,9 +1200,10 @@ async function handleCommits(request: GithubRequest, args: Record<string, unknow
 
 async function handleTrending(request: GithubRequest, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
   const since = request.since ?? 'daily';
+  const languageSegment = request.language !== undefined ? `/${encodeURIComponent(request.language)}` : '';
   try {
     const headers: Record<string, string> = { 'User-Agent': USER_AGENT };
-    const response = await fetch(`https://github.com/trending?since=${encodeURIComponent(since)}`, fetchInit(headers, signal, undefined, 'follow'));
+    const response = await fetch(`https://github.com/trending${languageSegment}?since=${encodeURIComponent(since)}`, fetchInit(headers, signal, undefined, 'follow'));
     // Follow-intentional: unauthenticated scrape, no bearer/cookie rides, so
     // redirect-following is safe here (unlike credentialed githubFetch).
     if (!response.ok) throw new Error(`trending status ${response.status}`);
@@ -1214,6 +1245,9 @@ async function handleTrending(request: GithubRequest, signal?: AbortSignal): Pro
 async function handleWorkflows(request: GithubRequest, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<{ page: GithubPageV1; degraded: boolean }> {
   const owner = request.owner!;
   const repo = request.repo!;
+  // A workflow lookup never issues a cursor: a list cursor presented with a
+  // workflow id fails closed here instead of being silently dropped.
+  if (request.cursor !== undefined && request.workflow !== undefined) pageNumber(request);
   if (request.workflow !== undefined) {
     const data = await fetchRecord(`${repoUrl(owner, repo)}/actions/workflows/${encodeURIComponent(request.workflow)}`, env, signal, 'GitHub workflow response was not an object');
     const workflow = normalizeWorkflow(data, owner, repo);
@@ -1275,6 +1309,10 @@ async function handleRuns(request: GithubRequest, args: Record<string, unknown>,
   if (isJobsForRunRequest(args, request)) {
     throw githubError('invalid_request', 'jobs requires selector: number');
   }
+  // A single-run lookup never issues a cursor: a list cursor presented with a
+  // run number fails closed here instead of being silently dropped. The jobs
+  // path validates its pinned cursor inside fetchRunJobs.
+  if (request.cursor !== undefined && request.number !== undefined && args.jobs !== true) pageNumber(request);
   if (request.number !== undefined) {
     if (args.jobs === true) return fetchRunJobs({ owner, repo }, request.number, request, { env, signal });
     return fetchSingleRun({ owner, repo }, request.number, request, { env, signal });
@@ -1459,6 +1497,7 @@ export async function callGithubTool(
 ): Promise<BackendCallResult> {
   const env = options.env ?? process.env;
   const action = typeof args.action === 'string' ? args.action : '';
+  validateGithubActionFields(args, action);
   // Domain-only flags validate before contract dispatch; everything else
   // flows through validateGithubRequest (selectors, limits, cursors).
   rejectMisplacedFlags(args, action);
@@ -1502,6 +1541,7 @@ export async function callGithubTool(
   const backendChain = resolveGithubBackendChain(request.action, availableBackends);
   const backendWarnings: string[] = [];
   let servingBackend = BACKEND;
+  let usedRestFallback = false;
   let result: { page: GithubPageV1; degraded: boolean } | undefined;
   if (backendChain[0] === GITHUB_CLONE_BACKEND) {
     try {
@@ -1517,6 +1557,7 @@ export async function callGithubTool(
         throw error;
       }
       const code = error instanceof SocialError ? error.code : 'upstream_error';
+      usedRestFallback = true;
       backendWarnings.push(`github-clone execution failed (${code}), using REST fallback`);
       if (isCloneDoubleAbsent(error)) backendWarnings.push(GITHUB_CLONE_GH_ABSENT_WARNING);
     }
@@ -1539,17 +1580,18 @@ export async function callGithubTool(
   }
 
   const { page, degraded } = result as { page: GithubPageV1; degraded: boolean };
+  const effectiveDegraded = degraded || usedRestFallback;
   const allWarnings = [...validationWarnings, ...backendWarnings, ...page.warnings];
   const notes = [...allWarnings];
   if (page.partial) notes.push('partial: some upstream rows were dropped or truncated');
-  if (degraded) notes.push('degraded: github-api is a limited fallback backend');
+  if (effectiveDegraded) notes.push('degraded: github-api is a limited fallback backend');
   const envelope = buildNorthstarResult({
     request: { tool: 'github', channel: 'github', action: request.action, source: servingBackend },
     outcomes: [{
       source: 'github',
       backend: servingBackend,
       ...(page.entities.length > 0 ? { entities: page.entities.map(toNorthstarEntity) } : {}),
-      ...(degraded ? { degraded: true } : {}),
+      ...(effectiveDegraded ? { degraded: true } : {}),
     }],
     pagination: {
       supported: page.pagination.supported,
@@ -1559,6 +1601,10 @@ export async function callGithubTool(
     },
     notes,
   });
+  // Tree truncation is partial evidence, not degraded backend execution.
+  const canonicalEnvelope = page.partial && !effectiveDegraded
+    ? { ...envelope, status: 'partial' as const }
+    : envelope;
   const legacyDetails: Record<string, unknown> = {
     action: request.action,
     canonicalAction: request.action,
@@ -1568,5 +1614,5 @@ export async function callGithubTool(
     partial: page.partial,
     warnings: allWarnings,
   };
-  return northstarTextResult(renderPage(page, request), legacyDetails, envelope);
+  return northstarTextResult(renderPage(page, request), legacyDetails, canonicalEnvelope);
 }
