@@ -381,7 +381,7 @@ test('twitter-cli runs with buildPythonChildEnvironment: secrets stripped', asyn
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]!.command, 'twitter');
   const env = recorded[0]!.env;
-  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.PATH, '/usr/bin:/home/tester/.local/bin');
   assert.equal(env.TWITTER_AUTH_TOKEN, undefined);
   assert.equal(env.TWITTER_CT0, undefined);
   assert.equal(env.MY_API_KEY, undefined);
@@ -440,7 +440,7 @@ test('twitter-cli still uses the Python allowlist: OPENCLI_* and secrets strippe
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]!.command, 'twitter');
   const env = recorded[0]!.env;
-  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.PATH, '/usr/bin:/home/tester/.local/bin');
   assert.equal(env.HOME, '/home/tester');
   assert.equal(env.OPENCLI_HOST, undefined);
   assert.equal(env.OPENCLI_PORT, undefined);

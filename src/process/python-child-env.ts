@@ -1,3 +1,5 @@
+import { delimiter, join } from 'node:path';
+
 /**
  * Build a sanitised environment for Python child processes (scrapling bridge, sidecar).
  *
@@ -21,6 +23,27 @@ const PYTHON_CHILD_ALLOWLIST = new Set([
   'PI_SEARCH_EMBEDDING_MODEL', 'PI_SEARCH_EMBEDDING_PORT', 'SIDECAR_DEVICE',
 ]);
 
+
+export function appendUserToolBinsToPath(
+  parentEnv: Record<string, string | undefined>,
+): string | undefined {
+  const rawPath = parentEnv.PATH ?? parentEnv.Path ?? parentEnv.path;
+  if (typeof rawPath !== 'string' || rawPath.length === 0) return undefined;
+
+  const current = rawPath.split(delimiter).filter((entry) => entry.length > 0);
+  const home = parentEnv.HOME ?? parentEnv.USERPROFILE;
+  const candidates = [
+    parentEnv.UV_TOOL_BIN_DIR,
+    parentEnv.XDG_BIN_HOME,
+    home ? join(home, '.local', 'bin') : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || candidate.length === 0 || current.includes(candidate)) continue;
+    current.push(candidate);
+  }
+  return current.join(delimiter);
+}
+
 const BLOCKED_PATTERN = /^(?:.*(?:TOKEN|KEY|SECRET|COOKIE|PASSWORD|API_KEY|API_SECRET|AUTH|BEARER).*)$|^(?:npm_config_|NODE_OPTIONS$|NODE_PATH$|PYTHONPATH$|GIT_CONFIG_|SSL_CERT_|LD_PRELOAD$|DYLD_)/i;
 
 export function buildPythonChildEnvironment(
@@ -40,5 +63,7 @@ export function buildPythonChildEnvironment(
     const alt = parentEnv.Path ?? parentEnv.path;
     if (typeof alt === 'string') out.PATH = alt;
   }
+  const toolPath = appendUserToolBinsToPath(parentEnv);
+  if (toolPath !== undefined) out.PATH = toolPath;
   return out;
 }

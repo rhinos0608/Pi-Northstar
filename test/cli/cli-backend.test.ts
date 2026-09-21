@@ -14,6 +14,11 @@ const DIFFBOT_KEYS = [
   'DIFFBOT_FALLBACK_BUDGET',
 ] as const;
 
+test('buildCliEnvironment appends the standard user tool bin after PATH for social CLI discovery', () => {
+  const env = buildCliEnvironment({ PATH: '/usr/bin:/bin', HOME: '/Users/test' }, 'social');
+  assert.equal(env.PATH, '/usr/bin:/bin:/Users/test/.local/bin');
+});
+
 test('buildCliEnvironment drops NODE_OPTIONS (CLI child sets --import tsx explicitly)', () => {
   const env = buildCliEnvironment({ PATH: '/usr/bin', NODE_OPTIONS: '--import evil.mjs --require pwn' });
   assert.equal(env.NODE_OPTIONS, undefined);

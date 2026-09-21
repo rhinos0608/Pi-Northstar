@@ -14,6 +14,7 @@ import { runWebAccessCachedSourceCheck } from '../web/access/web-access-cached-s
 import { formatWebAccessSourceCheck } from '../web/access/web-access-presentation.js';
 import { textResult } from '../core/tool-output.js';
 import { getProcessLocalBridgeToken } from '../chrome/chrome-profile-adapter.js';
+import { appendUserToolBinsToPath } from '../process/python-child-env.js';
 
 interface CliEnvelope {
   ok: boolean;
@@ -446,7 +447,10 @@ export function buildCliEnvironment(env: Record<string, string | undefined>, too
   // Credentials are scoped per tool family below, so a web_search fanout
   // child never carries github/reddit/graph secrets and vice versa.
   const scoped = CLI_TOOL_CREDENTIALS[toolName ?? ''] ?? [];
-  return Object.fromEntries(
+  const childEnv = Object.fromEntries(
     [...CLI_BASE_ENV_KEYS, ...scoped].flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),
   );
+  const toolPath = appendUserToolBinsToPath(env);
+  if (toolPath !== undefined) childEnv.PATH = toolPath;
+  return childEnv;
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
-import { buildPythonChildEnvironment } from '../../src/process/python-child-env.js';
+import { appendUserToolBinsToPath, buildPythonChildEnvironment } from '../../src/process/python-child-env.js';
 
 // ──────────────────────────────────────────────
 // Part 1: Direct unit tests for buildPythonChildEnvironment
@@ -26,11 +26,23 @@ test('passes through allowlisted PATH and HOME', () => {
     LANG: 'en_US.UTF-8',
   };
   const env = buildPythonChildEnvironment(parentEnv);
-  assert.equal(env.PATH, parentEnv.PATH);
+  assert.equal(env.PATH, `${parentEnv.PATH}:/home/testuser/.local/bin`);
   assert.equal(env.HOME, parentEnv.HOME);
   assert.equal(env.USERPROFILE, parentEnv.USERPROFILE);
   assert.equal(env.TMPDIR, parentEnv.TMPDIR);
   assert.equal(env.LANG, parentEnv.LANG);
+});
+
+test('appends user tool bins after existing PATH without changing precedence', () => {
+  assert.equal(
+    appendUserToolBinsToPath({
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/test',
+      UV_TOOL_BIN_DIR: '/custom/uv-bin',
+      XDG_BIN_HOME: '/custom/xdg-bin',
+    }),
+    '/usr/bin:/bin:/custom/uv-bin:/custom/xdg-bin:/Users/test/.local/bin',
+  );
 });
 
 test('excludes vars matching BLOCKED_PATTERN (TOKEN/KEY/SECRET/AUTH/...)', () => {
@@ -58,7 +70,7 @@ test('excludes vars matching BLOCKED_PATTERN (TOKEN/KEY/SECRET/AUTH/...)', () =>
   };
   const env = buildPythonChildEnvironment(parentEnv);
   // Allowlisted vars pass through
-  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.PATH, '/usr/bin:/home/user/.local/bin');
   assert.equal(env.HOME, '/home/user');
   assert.equal(env.PI_SEARCH_SCRAPLING_ENABLED, '1');
   // BLOCKED_PATTERN vars excluded
