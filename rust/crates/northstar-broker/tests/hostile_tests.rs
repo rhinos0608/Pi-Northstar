@@ -343,26 +343,10 @@ fn test_scoped_env_denied_without_override_then_granted_with_override() {
     assert!(res.is_ok(), "Should succeed after explicit override");
 }
 
-#[test]
-fn test_scoped_env_zero_ambient_keys_in_child_map() {
-    // Set a probe var in the current test process
-    let probe_key = "NORTHSTAR_HOSTILE_PROBE_SECRET";
-    let probe_val = "ambient_secret_value_xyz";
-    std::env::set_var(probe_key, probe_val);
-
-    let mut env = ScopedEnv::new();
-    env.grant("ALLOWED_FOO", "bar").expect("grant valid key");
-
-    let built_map: &BTreeMap<String, String> = env.build_command_env();
-
-    // Map must only contain explicit grants and zero ambient variables
-    assert!(!built_map.contains_key(probe_key), "Ambient probe secret leaked into scoped env!");
-    assert_eq!(built_map.len(), 1);
-    assert_eq!(built_map.get("ALLOWED_FOO").unwrap(), "bar");
-
-    // Clean up test env var
-    std::env::remove_var(probe_key);
-}
+// NOTE: map-vs-ambient isolation is proven by
+// test_ambient_secret_leak_probe_in_map in worker_tests.rs (child-process
+// env_clear probe). A map-only assertion here would pass by construction
+// (build_command_env returns explicit grants only) and prove nothing.
 
 // ---------------------------------------------------------------------------
 // 9. UID mismatch: assert_same_owner(peer uid 1001, owner 1000) -> UnauthorizedPeer;

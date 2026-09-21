@@ -110,11 +110,17 @@ pub fn open_durable<P: AsRef<Path>>(path: P) -> Result<Connection, DbError> {
              ON job_receipts(client_id, request_id);",
     )?;
     // Populate schema_version on create, read+validate on open.
-    let found: Option<u32> = conn
-        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
-            row.get(0)
-        })
-        .ok();
+    // Empty table -> QueryReturnedNoRows -> initialize version 1.
+    // Any other SQLite or u32 decoding error propagates, never treated as empty.
+    let found: Option<u32> = match conn.query_row(
+        "SELECT version FROM schema_version LIMIT 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(v) => Some(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(DbError::Sql(e)),
+    };
     match found {
         None => {
             conn.execute(

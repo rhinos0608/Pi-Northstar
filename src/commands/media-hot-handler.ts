@@ -114,10 +114,9 @@ type MediaExecutor = (
 const defaultExecutor: MediaExecutor = (channelName, args, options) => executeMedia(channelName, args, options);
 const scopedExecutor = new AsyncLocalStorage<MediaExecutor>();
 
-/** Test seam: override the media executor with scoped storage without touching network/CLIs. */
-export function setMediaHotExecutor(next: MediaExecutor | undefined): void {
-  if (next !== undefined) scopedExecutor.enterWith(next);
-  else scopedExecutor.disable();
+/** Test seam: callback-scoped media executor override without touching network/CLIs. */
+export function withMediaHotExecutor<T>(next: MediaExecutor, operation: () => Promise<T>): Promise<T> {
+  return scopedExecutor.run(next, operation);
 }
 
 export async function executeMediaHot(

@@ -56,9 +56,9 @@ sudo launchctl list | grep com.pi.northstar.broker
 test "$(stat -f '%u:%g:%Op' /usr/local/bin/northstar-broker)" = "0:0:755"
 
 # 4. Assert worker user pool accounts exist (UIDs 451-454) in pool group 450
-for i in 1 2 3 4; do dscl . -read /Users/_northstar_pool_$i UniqueID | grep -q "$((450 + i))"; done
-dscl . -read /Groups/_northstar_pool PrimaryGroupID | grep -q "450"
-dscl . -read /Users/_northstar_pool_1 PrimaryGroupID | grep -q "450"
+for i in 1 2 3 4; do dscl . -read /Users/_northstar_pool_$i UniqueID | grep -qx "UniqueID: $((450 + i))"; done
+dscl . -read /Groups/_northstar_pool PrimaryGroupID | grep -qx "PrimaryGroupID: 450"
+dscl . -read /Users/_northstar_pool_1 PrimaryGroupID | grep -qx "PrimaryGroupID: 450"
 
 # 5. Uninstall cleanly
 sudo launchctl bootout system/com.pi.northstar.broker

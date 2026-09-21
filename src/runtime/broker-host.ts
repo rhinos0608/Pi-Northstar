@@ -321,7 +321,7 @@ export async function startBrokerHost(options: BrokerHostOptions): Promise<void>
   let child: ChildProcess | undefined;
 
   // Setup executor listener and single-use token file inside the owner-only project runtime dir
-  const executorSocketPath = join(endpoint.rootDir, 'executor.sock');
+  const executorSocketPath = process.platform === 'win32' ? `\\\\.\\pipe\\northstar-${projectId}-executor` : join(endpoint.rootDir, 'executor.sock');
   const executorTokenPath = join(endpoint.rootDir, 'executor.token');
   const executorToken = randomBytes(32);
 
@@ -398,8 +398,16 @@ export async function startBrokerHost(options: BrokerHostOptions): Promise<void>
  * CLI commands use this before any stateful operation. They NEVER spawn a new broker.
  */
 export async function probeExistingBroker(projectId: string, rootDir?: string): Promise<boolean> {
-  const { lstat } = await import('node:fs/promises');
   const endpoint = brokerEndpoint(projectId, rootDir);
+  if (process.platform === 'win32') {
+    const { connect } = await import('node:net');
+    return new Promise<boolean>((resolve) => {
+      const socket = connect(endpoint.socketPath);
+      socket.once('connect', () => { socket.destroy(); resolve(true); });
+      socket.once('error', () => { socket.destroy(); resolve(false); });
+    });
+  }
+  const { lstat } = await import('node:fs/promises');
   try {
     const info = await lstat(endpoint.socketPath);
     return info.isSocket();

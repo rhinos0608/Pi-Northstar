@@ -163,7 +163,7 @@ jobs:
         run: |
           if [ "${{ steps.macos-certs.outputs.has_certs }}" = "true" ] && [ -n "$MACOS_SIGN_IDENTITY_APP" ]; then
             echo "Signing binary with Developer ID Application..."
-            codesign --force --options runtime --entitlements installer/macos/helper.entitlements --sign "$MACOS_SIGN_IDENTITY_APP" dist/payload/usr/local/bin/northstar-broker
+            codesign --keychain "$KEYCHAIN_PATH" --force --options runtime --entitlements installer/macos/helper.entitlements --sign "$MACOS_SIGN_IDENTITY_APP" dist/payload/usr/local/bin/northstar-broker
           else
             echo "Skipping codesign (missing certs or signing identity)."
           fi
@@ -179,7 +179,7 @@ jobs:
           
           if [ "${{ steps.macos-certs.outputs.has_certs }}" = "true" ] && [ -n "$MACOS_SIGN_IDENTITY_INSTALLER" ]; then
             echo "Signing installer with Developer ID Installer..."
-            productbuild --distribution installer/macos/Distribution.xml --package-path dist --sign "$MACOS_SIGN_IDENTITY_INSTALLER" dist/northstar-broker.pkg
+            productbuild --keychain "$KEYCHAIN_PATH" --distribution installer/macos/Distribution.xml --package-path dist --sign "$MACOS_SIGN_IDENTITY_INSTALLER" dist/northstar-broker.pkg
           else
             echo "Building unsigned installer package..."
             productbuild --distribution installer/macos/Distribution.xml --package-path dist dist/northstar-broker.pkg

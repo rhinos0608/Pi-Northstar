@@ -11,7 +11,13 @@ POOL_GID=450
 
 # Dedicated hidden pool group (not staff): isolates workers from default group 20
 if dscl . -read "/Groups/$POOL_GROUP" >/dev/null 2>&1; then
-  echo "Pool group $POOL_GROUP already exists, reusing"
+  existing_gid=$(dscl . -read "/Groups/$POOL_GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}' || true)
+  if [ "${existing_gid:-}" = "$POOL_GID" ]; then
+    echo "Pool group $POOL_GROUP already exists with expected GID $POOL_GID, reusing"
+  else
+    echo "Error: pool group $POOL_GROUP exists with unexpected GID '${existing_gid:-missing}' (expected $POOL_GID)" >&2
+    exit 1
+  fi
 else
   echo "Creating pool group: $POOL_GROUP (GID: $POOL_GID)"
   dscl . -create "/Groups/$POOL_GROUP"

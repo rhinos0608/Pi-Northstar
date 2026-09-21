@@ -33,7 +33,7 @@ export class BrokerServer {
     this.server = createServer(socket => this.connection(socket));
     await new Promise<void>((resolve, reject) => { this.server!.once('error', reject); this.server!.listen(this.endpoint.socketPath, () => resolve()); });
     if (process.platform !== 'win32') await chmod(this.endpoint.socketPath, 0o600);
-    await assertOwner(this.endpoint.socketPath);
+    if (process.platform !== 'win32') await assertOwner(this.endpoint.socketPath);
   }
   async stop(): Promise<void> { const server = this.server; if (!server) return; for (const socket of this.sockets) socket.destroy(); this.sockets.clear(); await new Promise<void>(resolve => server.close(() => resolve())); this.server = undefined; this.auth = createBrokerAuth(this.auth.rootSecret); await removeStaleEndpoint(this.endpoint).catch(() => false); }
   private connection(socket: Socket): void { this.sockets.add(socket); socket.once('close', () => this.sockets.delete(socket)); const peer = socket as Socket & { getPeerCredentials?: () => { uid?: number } }; const creds = peer.getPeerCredentials?.(); if (creds?.uid !== undefined && creds.uid !== process.getuid?.()) { sendErrorAndClose(socket, 'unauthorized'); return; } let welcome: ReturnType<typeof issueBrokerWelcome> | undefined; const sequence = new BrokerSequenceGuard();

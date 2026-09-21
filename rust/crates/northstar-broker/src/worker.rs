@@ -164,6 +164,15 @@ pub fn launch(spec: &WorkerSpec) -> io::Result<Child> {
     // no identity downgrade is requested, preserving plain launch behavior.
     let run_as_uid = spec.run_as_uid;
     let run_as_gid = spec.run_as_gid;
+    // UID sandboxing without an explicit unprivileged GID would leave the
+    // primary group privileged after setuid. Reject UID-only configs here
+    // instead of launching half-sandboxed.
+    if run_as_uid.is_some() && run_as_gid.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run_as_uid requires explicit run_as_gid",
+        ));
+    }
     if run_as_uid.is_some() || run_as_gid.is_some() {
         // SAFETY: runs in the child between fork and exec; only async-signal-safe
         // libc calls, no allocation, error reported via Err return.
