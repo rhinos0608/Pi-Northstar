@@ -36,10 +36,10 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -51,7 +51,7 @@ jobs:
       - name: Build northstar-broker binary
         shell: pwsh
         run: |
-          cargo build --release --package northstar-broker --manifest-path rust/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo build --locked --release --package northstar-broker --manifest-path rust/Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Sign executable (if secrets available)
         shell: pwsh
@@ -102,7 +102,7 @@ jobs:
           }
 
       - name: Upload MSI Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: northstar-broker-windows-msi
           path: dist/northstar-broker.msi
@@ -112,14 +112,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Build northstar-broker binary
         run: |
-          cargo build --release --package northstar-broker --manifest-path rust/Cargo.toml
+          cargo build --locked --release --package northstar-broker --manifest-path rust/Cargo.toml
 
       - name: Prepare Packaging Payload
         run: |
@@ -203,7 +203,7 @@ jobs:
           fi
 
       - name: Upload macOS PKG Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: northstar-broker-macos-pkg
           path: dist/northstar-broker.pkg
@@ -213,16 +213,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: x86_64-unknown-linux-gnu
 
       - name: Build northstar-broker binary
         run: |
-          cargo build --release --package northstar-broker --manifest-path rust/Cargo.toml --target x86_64-unknown-linux-gnu
+          cargo build --locked --release --package northstar-broker --manifest-path rust/Cargo.toml --target x86_64-unknown-linux-gnu
 
       - name: Package Linux Tarball with Systemd Unit
         run: |
@@ -234,7 +234,7 @@ jobs:
           tar -czf dist/northstar-broker-linux-x64.tar.gz -C dist/staging bin systemd
 
       - name: Upload Linux Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: northstar-broker-linux-tarball
           path: dist/northstar-broker-linux-x64.tar.gz
