@@ -52,7 +52,7 @@ This native authority boundary introduces a breaking envelope and handshake chan
 
 ## Decision
 
-We establish an immutable native authority boundary for all stateful Northstar execution. Stateful public CLI access remains strictly closed until Gate B passes all acceptance criteria.
+We establish an immutable native authority boundary for all stateful Northstar execution. Production/release stateful CLI claims remain gated until Gate B passes all acceptance criteria. The source tree may expose an unsigned local/development broker/jobs surface for unprivileged end-to-end validation, provided ordinary job commands are connect-only, broker startup remains explicit, and the local surface is not represented as privileged isolation or release proof.
 
 The architecture rests on the following foundational decisions:
 
@@ -83,7 +83,7 @@ The broker operates under an explicit dual lifecycle model:
 
 Trusted compiled Node.js host (`src/runtime/broker-host.ts`) runs as the normal user and owns existing JavaScript command handlers and domain policy.
 - Production startup topology:
-  1. The compiled Node host resolves and verifies the root-installed `northstar-broker` binary using a root-owned manifest (never searching ambient `PATH`).
+  1. Production resolves and verifies the root-installed `northstar-broker` binary using a root-owned manifest (never searching ambient `PATH`). In an unpackaged source checkout only, local development may resolve the fixed Cargo target under `rust/target/{release,debug}`; it still never searches ambient `PATH` or accepts a caller-selected executable.
   2. The Node host creates a private control channel (anonymous pipe or socketpair created close-on-exec by default). Node explicitly maps only the one designated child descriptor into the Rust broker process during `spawn`.
   3. The Rust broker process immediately marks its retained descriptor close-on-exec before spawning any descendants.
   4. Node composes internally from `src/index.ts` behind closed stateful registration. No production `tsx` is permitted.

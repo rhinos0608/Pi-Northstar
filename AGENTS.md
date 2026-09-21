@@ -46,7 +46,7 @@ These invariants are repository-wide:
 
 Northstar has intentionally separate authority surfaces:
 
-- **CLI:** broad command vocabulary. The current tree exposes 28 stateless command IDs plus `broker.serve` and `jobs.status`.
+- **CLI:** broad command vocabulary. The current tree exposes 28 stateless command IDs plus the local/development stateful IDs `broker.serve`, `jobs.start`, `jobs.status`, `jobs.result`, and `jobs.cancel`.
 - **Pi native tools:** at most 9 model-facing tools, controlled by `PI_SEARCH_NATIVE_TOOLS`; unset/blank means zero.
 - **User slash commands:** setup/status/Chrome authorization flows that require operator intent and are not model tools.
 
@@ -82,6 +82,7 @@ Northstar has intentionally separate authority surfaces:
 | desktop policy/state | `src/desktop/desktop-contract.ts`, `desktop-policy.ts`, `desktop-tools.ts` |
 | one-shot native/Python child envs | `src/process/native-child-env.ts`, `python-child-env.ts`, `mcp-client.ts` |
 | broker client/host/state seam | `src/runtime/broker-*` |
+| same-user local broker leaf runtime | `src/runtime/local-leaf-runtime.ts` |
 | native broker TCB | `rust/crates/northstar-broker/*` |
 | external-content framing | `src/core/untrusted-content.ts` |
 | per-domain agent/CLI guidance | `skills/*/SKILL.md` |
@@ -202,9 +203,9 @@ Synthetic model probes prove only that the configured endpoint/model answered th
 
 ## Broker and stateful authority
 
-Before changing broker code, read `docs/adr/0010-gate-b-native-authority-boundary.md`, `plan.md` Gate B, and `docs/tier2-proof.md`.
+Before changing broker code, read `docs/adr/0010-gate-b-native-authority-boundary.md`, `docs/plans/2026-09-21-gate-b-native-authority-boundary.md`, `docs/roadmap-ledger.md`, and `docs/tier2-proof.md`.
 
-The working tree currently exposes `broker.serve` and `jobs.status` in CLI help, while the plan text still records them as unregistered. Executable reachability is current truth; release readiness is not. Tier-2 privileged proof/signing remains an open release gate until those artifacts are updated together.
+The working tree currently exposes `broker.serve` plus `jobs.start/status/result/cancel` in CLI help as a local/development surface. Executable reachability is current truth; production release readiness is not. `broker serve` is the only explicit starter; ordinary jobs commands must remain connect-only and never auto-spawn authority. Tier-2 privileged proof/signing and per-job isolation remain open release gates.
 
 Stateful rules include: authenticated client identity, replay/sequence protection, project scope, capability-scoped worker grants, strict endpoint ownership/mode checks, durable mutation receipts, and fail-closed handling of corrupt state/config. Unknown mutation outcome requires observation/reconciliation, not automatic replay.
 

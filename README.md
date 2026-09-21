@@ -60,9 +60,9 @@ After package installation, the same surface is available as `northstar` (and `p
 | `media` | search, hot, details, transcript, feed | RSS keyless; YouTube is mixed; Bilibili uses local CLI/session backends |
 | `kg` | search, enhance | Diffbot token required |
 | `graph` | query, probe | Diffbot DQL token or operator SPARQL endpoint |
-| `broker` / `jobs` | `serve`, `status` | local stateful authority; no cloud API key |
+| `broker` / `jobs` | `serve`; `start`, `status`, `result`, `cancel` | broker authority is local; a job uses the credentials required by its exact `provider/model` |
 
-The current CLI exposes **28 stateless command IDs** plus `broker.serve` and `jobs.status`. Domain syntax belongs in `skills/<domain>/SKILL.md` and the live `--help` output.
+The current CLI exposes **28 stateless command IDs** plus five local/development stateful IDs: `broker.serve`, `jobs.start`, `jobs.status`, `jobs.result`, and `jobs.cancel`. Domain syntax belongs in `skills/<domain>/SKILL.md` and the live `--help` output.
 
 ## Configuration model
 
@@ -142,14 +142,27 @@ Browser navigation enforces URL/origin policy and treats remote content as untru
 
 ## Stateful broker
 
-The working tree currently exposes:
+A source checkout can run the complete same-user development path without the signed installer or privileged worker service:
 
 ```bash
-northstar broker serve --project-id <id> [--root-dir <dir>]
-northstar jobs status --project-id <id> --request-id <id> [--root-dir <dir>]
+npm run build:local
+
+# Terminal 1: explicit foreground authority. Ordinary jobs commands never auto-start it.
+npm run cli -- broker serve --project-id local-demo
+
+# Terminal 2: exact provider/model, using that provider's normal operator-owned credentials.
+npm run cli -- jobs start --project-id local-demo --request-id demo-1 \
+  --model openai/gpt-4o-mini --prompt "Return the word ready" --max-output-tokens 32
+npm run cli -- jobs status --project-id local-demo --request-id demo-1
+npm run cli -- jobs result --project-id local-demo --request-id demo-1
+npm run cli -- jobs cancel --project-id local-demo --request-id demo-1
 ```
 
-These commands make the local broker grammar testable, but **public release readiness is still gated**. Gate B Tier-1 is implemented; privileged Tier-2 proof and signed installer/service validation remain open in `docs/tier2-proof.md`. Treat broker commands as local/development surface until those release gates are closed and the plan is reconciled with the executable tree.
+In this local mode the TypeScript host provides a same-user, text-only leaf runtime backed by the existing Pi AI provider stack. The Rust broker still owns public IPC admission, sequence/replay checks, durable submission receipts, and cancellation ownership. Successful starts are journaled with the runtime-issued job ID; definitive failed starts remain settled internal mutations but do not fabricate a job receipt; interrupted dispatches become `outcome_unknown` and are never automatically replayed.
+
+Pi can own the same local broker lifecycle when `PI_NORTHSTAR_BROKER_PROJECT_ID` is set to an exact project ID. On `session_start`, Pi starts the broker only when no healthy owner already exists; on `session_shutdown`, it aborts the broker and local runtime. This opt-in is independent of `PI_NORTHSTAR_LEAF_MODEL`, which remains the separate staged-agent steering configuration. Ordinary CLI/model-triggered job paths never auto-start broker authority.
+
+**Production release readiness is still gated.** The local executor is not the privileged per-job isolation service. Signed installers, root/SYSTEM worker-service validation, per-job identity isolation, kill-to-zero proof, and the remaining Tier-2 checks stay open in `docs/tier2-proof.md`. Published/production stateful claims must not treat the unsigned source-checkout path as that proof.
 
 ## Development
 

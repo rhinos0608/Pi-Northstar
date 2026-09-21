@@ -1,6 +1,6 @@
 # Gate B Implementation Plan: Native Authority Boundary, Bundled SQLite & Worker Service
 
-**Status:** Approved Direction / Draft (Implementation not started).
+**Status:** Tier-1/local development implementation active; signed packaging, privileged worker isolation, and Tier-2 release proof remain open.
 **Context:** Implements the native authority boundary approved in [ADR 0010: Gate B native authority boundary](../adr/0010-gate-b-native-authority-boundary.md) and required by Phase 5 of `plan.md`.
 
 ---
@@ -10,7 +10,7 @@
 Stateful Northstar operations (`jobs`, background tasks, state queries, cancellation, browser, desktop) require a hardened native authority boundary. This plan establishes a standalone Rust broker (`northstar-broker`), peer-attested handshake without client root secrets, bundled-SQLite receipt authority, a private Node executor channel, dual lifecycle ownership, and an opt-in signed native installer for `northstar-worker-service` with per-job identity isolation.
 
 ### Non-Negotiable Invariants
-1. **Public Stateful CLI Stays Closed**: Stateful public CLI commands remain locked until Slice 13 completes Gate B acceptance. Stateless commands (28 current command IDs) remain unaffected. When unlocked, standard CLI commands connect only to an existing healthy broker (or run `northstar broker serve` explicitly); absence returns a typed unavailable error and never auto-spawns background authority.
+1. **Production Stateful Release Gate Stays Closed**: Signed/published production stateful claims remain locked until Slice 13 and Tier-2 acceptance complete. Stateless commands (28 current command IDs) remain unaffected. The source tree may expose an explicitly labeled local/development broker/jobs surface for unprivileged end-to-end validation: ordinary job commands connect only to an existing healthy broker, `northstar broker serve` is the sole foreground starter, absence returns typed unavailable, and none of these CLI routes become model tools.
 2. **Never Elevate via npm or Node**: Neither `npm postinstall`, `sudo northstar`, nor Node scripts may ever invoke privilege escalation or install system daemons.
 3. **No Client Root Secrets**: The broker root signing key resides solely in Rust broker memory. Admission is based on kernel peer UID/SID/PID attestation and server-owned grant profiles.
 4. **Project Identity Bound at Startup**: The broker endpoint and startup freeze `projectId`. Client-supplied `projectId` values in handshake and subsequent requests must match the frozen project identity exactly; client-supplied project identifiers are routing checks and never grant authority.
@@ -389,8 +389,8 @@ Stateful Northstar operations (`jobs`, background tasks, state queries, cancella
 
 ---
 
-### Slice 13: Public Stateful CLI Grammar Unlock & Gate B Sign-off
-- **Objective:** Only after all Tier 1 and Tier 2 verification gates pass, unlock public CLI grammar for stateful domains (`jobs`, stateful browser, desktop) and expose explicit `northstar broker serve`.
+### Slice 13: Production Stateful CLI Grammar Unlock & Gate B Sign-off
+- **Objective:** Only after all Tier 1 and Tier 2 verification gates pass, claim production/release readiness for stateful domains (`jobs`, stateful browser, desktop) and the explicit `northstar broker serve` lifecycle. A source-checkout local/development broker/jobs grammar may remain reachable before that sign-off when it is clearly non-production, unprivileged, connect-only for ordinary job commands, and covered by the same authority/failure contracts.
 - **Files Touched/Created:**
   - `src/cli/cli.ts` (unlock stateful commands and `broker serve`)
   - `src/commands/command-registry.ts` (register stateful commands)

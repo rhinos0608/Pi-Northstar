@@ -36,8 +36,11 @@ Rule used: trace registered route before claiming. "Registered" = `pi.registerTo
 | `kg.enhance` | yes — `kg` tool | yes — `northstar kg enhance` | yes — `skills/kg/SKILL.md` | dual | registry → shared KG execution seam; native and CLI share fanout/spend/assembly | no — migrated seam |
 | `graph.query` | yes — conditional `graph` tool | yes — `northstar graph query` | yes — `skills/graph/SKILL.md` | dual | registry → handler → `callGraphTool`; native query uses handler | no — migrated seam |
 | `graph.probe` | yes — conditional `graph` tool | yes — `northstar graph probe` | yes — `skills/graph/SKILL.md` | dual | registry → handler → `callGraphTool`; native probe uses handler | no — migrated seam |
-| `broker.serve` | no (internal/infrastructure) | no (unregistered handler `src/commands/broker-serve-handler.ts`, CLI grammar closed) | no | internal-only | `brokerServeCommand` → `startBrokerHost` (Slice 6/13, Gate B Tier-1 complete, public CLI closed until Tier-2 proof) | no — unregistered stateful seam |
-| `jobs.status` | no (internal/infrastructure) | no (unregistered handler `src/commands/jobs-status-handler.ts`, CLI grammar closed) | no | internal-only | `jobsStatusCommand` → probe-only (Slice 13, Gate B Tier-1 complete, public CLI closed until Tier-2 proof) | no — unregistered stateful seam |
+| `broker.serve` | no (operator infrastructure, never a model tool) | yes — explicit foreground local/development command | no | CLI local-dev infrastructure | `brokerServeCommand` → `startBrokerHost` → Rust broker + same-user local runtime executor; never auto-started by ordinary job commands | production signing/isolation gate remains open |
+| `jobs.start` | no | yes — local/development | no | CLI local-dev | `jobsStartCommand` → existing `BrokerClient` → runtime `start`; durable receipt is written before dispatch and bound to returned runtime job ID after verified ack | production isolation gate remains open |
+| `jobs.status` | no | yes — local/development | no | CLI local-dev | `jobsStatusCommand` → durable receipt query → runtime `status`; preserves `outcome_unknown` and stale/not-found distinctions | production isolation gate remains open |
+| `jobs.result` | no | yes — local/development | no | CLI local-dev | `jobsResultCommand` → receipt-owned runtime `result` | production isolation gate remains open |
+| `jobs.cancel` | no | yes — local/development | no | CLI local-dev | `jobsCancelCommand` → receipt-owned `cancelAndSettle`; broker denies unowned run IDs and forwards the runtime reply without inventing settlement labels | production isolation gate remains open |
 | `tcb.manifest` | no (driver gate infrastructure) | no (CLI enrollment script `scripts/enroll-artifacts.mjs`) | no | internal-only | `verifyDriverArtifact` in `src/desktop/driver-manifest.ts` (Slice 10/12, Gate B Tier-1 complete, verify-if-enrolled) | no — security gate infrastructure |
 
 ## Phase 4 exit-gate audit (checked)
@@ -78,6 +81,6 @@ Migrated command breakdown: 28 command IDs total (20 dual + 8 CLI+skill). Workfl
 
 ## Notes / uncertainty flags
 
-- `browser`/`desktop`/`agent_poll` remain Phase 5 or workflow surfaces, not migrated Phase 4 command ids. Gate B Tier-1 implementation complete (broker-v2 wire, lifecycle host, TCB manifest gate, unregistered stateful handlers); public stateful CLI grammar remains closed pending Tier-2 privileged integration proof.
+- `browser`/`desktop`/`agent_poll` remain Phase 5 or workflow surfaces, not migrated Phase 4 command ids. Broker/jobs local-development grammar is reachable and tested, while production stateful release claims remain gated on the privileged installer/isolation/Tier-2 proof. No broker/job command becomes a model tool by being CLI-reachable.
 - Social per-platform auth tiers are registry/provider concerns and were not changed by this audit.
 - `browse` and residual branches in `src/native-tools.ts` remain internal cleanup targets for Phase 7 after zero-import proof.
