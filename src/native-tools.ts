@@ -1,4 +1,7 @@
 import type { BackendCallResult } from './backend.js';
+import { commandHandler, commandSurface } from './commands/command-registry.js';
+import { createCommandContext } from './commands/command-context.js';
+import { inferPlatformFromUrl, socialPlatforms } from './capabilities.js';
 import {
   analyzeTextDiffbotKg,
   DIFFBOT_KG_ADAPTER_CURSOR_V,
@@ -10,10 +13,11 @@ import {
   type DiffbotKgSpend,
   type DiffbotNlpOutcome,
 } from './diffbot/diffbot-kg.js';
-import { DiffbotError, resolveDiffbotSpend, type DiffbotSpend } from './diffbot/diffbot-transport.js';
+import { DiffbotError, type DiffbotSpend } from './diffbot/diffbot-transport.js';
 import { callGithubTool } from './github/github-domain.js';
 import type { KgIdentitySignals } from './knowledge/knowledge-normalize.js';
-import { aggregateKgTextAnalysis, dedupeKgEntities, groupKgEntitiesByIdentity, partitionEnhanceClaims, rrfRankKgEntities } from './knowledge/knowledge-aggregate.js';
+import { aggregateKgTextAnalysis } from './knowledge/knowledge-aggregate.js';
+import { assembleKgEnhanceResult, assembleKgSearchResult, resolveKgSpend as resolveSharedKgSpend, runKgProviderPlan } from './knowledge/knowledge-execution.js';
 import {
   buildKnowledgeResult,
   KgContractError,
@@ -21,7 +25,6 @@ import {
   validateKgNlp,
   validateKgSearch,
   type KgAction,
-  type KgAlignedGroup,
   type KgClaim,
   type KgEntity,
   type KgEntityEvidence,
@@ -34,10 +37,7 @@ import {
   fingerprintKgRequest,
   issueKgCursor,
   KG_MAX_PROVIDERS_CEILING,
-  planExplicitProviders,
   rejectCursorForExplicitFanout,
-  runKgAuto,
-  runKgFanout,
   selectAutoProviders,
 } from './knowledge/knowledge-domain.js';
 import { callGraphTool } from './graph/graph-tools.js';
@@ -59,7 +59,6 @@ export {
   dispatchSpecializedUrl,
   parseGithubFetchUrl,
 } from './native-fetch.js';
-import { validateWebRequest } from './web/web-contract.js';
 import {
   requireString,
   webSearch,
@@ -68,13 +67,72 @@ import {
 
 type NativeToolName = 'web_search' | 'fetch' | 'browse' | 'research' | 'github' | 'kg' | 'graph';
 
-interface NativeToolOptions extends WebToolOptions {}
+interface NativeToolOptions extends WebToolOptions {
+  fetchPageText?: (url: string, signal?: AbortSignal) => Promise<string>;
+}
+
+export { GITHUB_COMMAND_IDS } from './github/github.js';
+import { GITHUB_COMMAND_IDS } from './github/github.js';
+
+const RESEARCH_COMMANDS: Readonly<Record<string, string>> = {
+  academic: 'research.search', search: 'research.search', paper: 'research.paper', citations: 'research.citations',
+};
+const SOCIAL_READ_ACTIONS = new Set(['get_post', 'get_thread', 'get_comments', 'get_profile', 'get_community', 'get_feed', 'get_followers', 'get_user_posts', 'get_trending', 'get_community_posts']);
+const MEDIA_COMMANDS: Readonly<Record<string, string>> = {
+  details: 'media.details', transcript: 'media.transcript', feed: 'media.feed', search: 'media.search', hot: 'media.hot',
+};
+
+async function runCommand(commandId: string, args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
+  const handler = commandHandler(commandId);
+  const result = await (handler.execute(args, createCommandContext({
+    surface: 'native_tool',
+    env: options.env ?? process.env,
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.lookup !== undefined ? { lookup: options.lookup } : {}),
+    ...(options.fetchPageText !== undefined ? { fetchPageText: options.fetchPageText } : {}),
+  })) as Promise<BackendCallResult>);
+  return guardResult(result, { env: options.env });
+}
+
+function commandIdFor(name: string, args: Record<string, unknown>): string | undefined {
+  const action = typeof args.action === 'string' ? args.action : undefined;
+  if (name === 'github' && action) return GITHUB_COMMAND_IDS[action];
+  if (name === 'research' && action) return RESEARCH_COMMANDS[action];
+  if (name === 'social') {
+    if (action === 'search' || action === undefined) return 'social.search';
+    return action !== undefined && SOCIAL_READ_ACTIONS.has(action) ? 'social.read' : undefined;
+  }
+  if ((name === 'video' || name === 'media') && action) return MEDIA_COMMANDS[action];
+  if (name === 'feeds') return 'media.feed';
+  // Native KG retains richer multi-provider semantics; CLI handler is narrower.
+  if (name === 'kg' && action === 'search' && args.cursor !== undefined && args.providers === undefined) return 'kg.search';
+  if (name === 'graph' && (action === 'query' || action === 'probe')) return `graph.${action}`;
+  if (name === 'fetch') return 'fetch.read';
+  if (name === 'web_search') return 'search.web';
+  return undefined;
+}
+
+async function dispatchRegisteredNativeTool(name: string, args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult | undefined> {
+  let routedArgs = args;
+  if (name === 'social' && args.platform === undefined && typeof args.url === 'string') {
+    const platform = inferPlatformFromUrl(args.url, socialPlatforms());
+    if (platform !== undefined) routedArgs = { ...args, platform };
+  }
+  const commandId = commandIdFor(name, routedArgs);
+  if (commandId === undefined) return undefined;
+  // Legacy fallback is allowed only when command id is absent from registry.
+  // Once resolved, handler failures are terminal and must not downgrade.
+  if (!commandSurface().includes(commandId)) return undefined;
+  return runCommand(commandId, routedArgs, options);
+}
 
 export async function callNativeTool(
   name: string,
   args: Record<string, unknown>,
   options: NativeToolOptions = {},
 ): Promise<BackendCallResult> {
+  const registered = await dispatchRegisteredNativeTool(name, args, options);
+  if (registered !== undefined) return registered;
   const reachResult = await callReachTool(name, args, options);
   if (reachResult) return reachResult;
 
@@ -107,8 +165,6 @@ async function dispatchNativeTool(
 }
 
 
-
-
 async function webSearchCached(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
   const result = await webSearch(args, options);
   try {
@@ -131,15 +187,12 @@ async function research(args: Record<string, unknown>, options: NativeToolOption
 
   const query = requireString(args.query, 'query');
   const source = typeof args.source === 'string' ? args.source : 'all';
-  // Reject-on-out-of-range: research limit 1-30 rejects via the web contract
-  // instead of silently clamping.
-  const { request: bound } = validateWebRequest({
-    action: 'search',
-    query,
-    category: 'research',
-    limit: args.limit === undefined ? 12 : (args.limit as number),
-  });
-  const limit = bound.limit;
+  // Reject-on-out-of-range: preserve research's 1..30 bound without importing
+  // web-contract into this legacy fallback seam.
+  const limit = args.limit === undefined ? 12 : args.limit;
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 30) {
+    throw new Error('limit must be an integer 1..30');
+  }
   // Every advertised source dispatches to its exact native adapter via the
   // research seam; unknown sources return an explicit error envelope, never a
   // DuckDuckGo/web substitution.
@@ -266,24 +319,10 @@ interface KgRouting {
 }
 
 async function routeKg(
-  action: KgAction,
-  requested: readonly string[] | undefined,
-  configured: string[],
-  maxProviders: number | undefined,
+  action: KgAction, requested: readonly string[] | undefined, configured: string[], maxProviders: number,
   execute: (provider: string) => Promise<KgSourceOutcome>,
 ): Promise<KgRouting> {
-  if (requested !== undefined) {
-    const plan = planExplicitProviders(action, requested, {
-      configured,
-      ...(maxProviders !== undefined ? { maxProviders } : {}),
-    });
-    const ran = await runKgFanout(execute, plan.runnable);
-    const outcomes = [...ran, ...plan.unsupported.map((error) => unsupportedKgOutcome(error.provider ?? 'unknown', error.message))];
-    return { outcomes, providers: [...requested], attempted: [...plan.runnable] };
-  }
-  const ordered = selectAutoProviders(action, configured);
-  const { outcome, attempted } = await runKgAuto(execute, ordered);
-  return { outcomes: [outcome], providers: [...attempted], attempted };
+  return runKgProviderPlan(action, requested, configured, maxProviders, execute);
 }
 
 async function kg(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
@@ -354,7 +393,7 @@ interface KgCallContext {
 /** Resolve DIFFBOT_* spend once; invalid config becomes a contract rejection, never a paid call. */
 function resolveKgSpend(env: Record<string, string | undefined>): DiffbotSpend {
   try {
-    return resolveDiffbotSpend(env);
+    return resolveSharedKgSpend(env);
   } catch (error) {
     if (error instanceof DiffbotError) throw new KgContractError('unsupported_option', error.message);
     throw error;
@@ -399,11 +438,6 @@ async function kgSearch(args: Record<string, unknown>, call: KgCallContext): Pro
     return toKgSourceOutcome(await searchDiffbotKg({ query, language: 'dql', limit: pageSize, from }, call.ctx));
   });
   const rawEntities = outcomes.flatMap((outcome) => (outcome.entities ? [...outcome.entities] : []));
-  // Every provider ranking aggregates through RRF (identity-aware fusion,
-  // first copy kept); a single ranking keeps fetch order by construction.
-  const entities = rrfRankKgEntities(
-    outcomes.map((outcome) => (outcome.entities ? [...outcome.entities] : [])),
-  ).map((entry) => entry.item);
   // Single-provider auto mode pages by offset; explicit fanout is one bounded page.
   const single = call.requested === undefined && outcomes.length === 1 && outcomes[0] !== undefined;
   const hasMore = single && rawEntities.length >= pageSize && pageSize > 0 && from + pageSize < DIFFBOT_KG_MAX_FROM;
@@ -416,15 +450,9 @@ async function kgSearch(args: Record<string, unknown>, call: KgCallContext): Pro
       fanout: false,
     })
     : undefined;
-  const envelope = buildKnowledgeResult({
-    request: { tool: 'kg', action: 'search', providers },
-    outcomes,
-    data: { kind: 'search', entities },
-    pagination: {
-      supported: single,
-      limit: pageSize,
-      ...(nextCursor !== undefined ? { hasMore: true as const, nextCursor } : { hasMore: false as const }),
-    },
+  const { entities, envelope } = assembleKgSearchResult({
+    query, outcomes, providers, limit: pageSize,
+    pagination: { supported: single, hasMore: nextCursor !== undefined, ...(nextCursor === undefined ? {} : { nextCursor }) },
   });
   const text = kgResultText('search', query, entities, envelope.errors);
   return textResult(wrapUntrustedText(text, { source: 'kg' }), { action: 'search', query, providers, knowledge: envelope });
@@ -447,66 +475,10 @@ async function kgEnhance(args: Record<string, unknown>, call: KgCallContext): Pr
     if (provider !== DIFFBOT_KG_PROVIDER) return unsupportedKgOutcome(provider, `Unknown kg provider: ${provider}.`);
     return toKgEnhanceOutcome(await enhanceDiffbotKg(input, call.ctx));
   });
-  const enhanceOutcomes = outcomes as KgEnhanceSourceOutcome[];
-  const inputs = enhanceOutcomes.flatMap((outcome) =>
-    (outcome.entities ?? []).map((entity, index) => ({
-      entity,
-      provider: outcome.provider,
-      ...(outcome.signals?.[index] !== undefined ? { signals: outcome.signals[index] as KgIdentitySignals } : {}),
-    })),
-  );
-  const entities = dedupeKgEntities(inputs).map((member) => member.entity);
-  // Conservative alignment: members grouped without adjudication; public
-  // records carry basis/strength only (alignment confidence never computed).
-  // Internal identity keys stay private: public groups use opaque
-  // response-local deterministic-by-order ids (alignment:1, ...).
-  const internalGroups = groupKgEntitiesByIdentity(inputs);
-  const publicIdByKey = new Map<string, string>();
-  internalGroups.forEach((group, index) => {
-    publicIdByKey.set(group.key, `alignment:${index + 1}`);
-  });
-  const groups: KgAlignedGroup[] = internalGroups.map((group) => ({
-    id: publicIdByKey.get(group.key) ?? 'alignment:0',
-    basis: group.basis,
-    strength: group.strength,
-    ...(group.alignmentConfidence !== undefined ? { alignmentConfidence: group.alignmentConfidence } : {}),
-    members: group.members.map((member) => ({ entity: member.entity, provider: member.provider })),
-  }));
-  // Provider-normalized claims keep trace tags; partition surfaces real
-  // conflicts while preserving every input row. Partitions mirror outcomes.
-  const allClaims: KgClaim[] = enhanceOutcomes.flatMap((outcome) =>
-    (outcome.claims ?? []).map((claim) =>
-      claim.provider === undefined ? { ...claim, provider: outcome.provider } : claim,
-    ),
-  );
-  // Aligned subjects share one partition key: remap each claim's raw
-  // provider-native subjectId to its opaque public group id so cross-row
-  // conflicts (e.g. same canonical_url, different diffbotUri) compare.
-  const subjectToGroup = new Map<string, string>();
-  for (const group of internalGroups) {
-    const publicId = publicIdByKey.get(group.key) ?? 'alignment:0';
-    for (const member of group.members) {
-      if (!subjectToGroup.has(member.entity.id)) subjectToGroup.set(member.entity.id, publicId);
-    }
-  }
-  const alignedClaims: KgClaim[] = allClaims.map((claim) => {
-    const key = subjectToGroup.get(claim.subjectId);
-    return key !== undefined && key !== claim.subjectId ? { ...claim, subjectId: key } : claim;
-  });
-  const { claims, conflicts } = partitionEnhanceClaims(alignedClaims);
-  const seenEvidence = new Set<string>();
-  const evidence: KgEntityEvidence[] = [];
-  for (const outcome of enhanceOutcomes) {
-    for (const record of outcome.evidence ?? []) {
-      if (seenEvidence.has(record.entityId)) continue;
-      seenEvidence.add(record.entityId);
-      evidence.push(record);
-    }
-  }
-  const partitions = outcomes.map(partitionForOutcome);
+  const assembled = assembleKgEnhanceResult(outcomes);
+  const { entities, claims, conflicts, partitions, groups, evidence } = assembled;
   const envelope = buildKnowledgeResult({
-    request: { tool: 'kg', action: 'enhance', providers },
-    outcomes,
+    request: { tool: 'kg', action: 'enhance', providers }, outcomes,
     data: { kind: 'enhance', entities, claims, conflicts, partitions, groups, evidence },
   });
   const emailSelector = kgString(args.email);

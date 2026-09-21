@@ -51,6 +51,33 @@ test('callNativeTool rejects unsupported tools', async () => {
   );
 });
 
+test('native github.file guards content while preserving handler details', async () => {
+  const original = globalThis.fetch;
+  const source = 'github native file output '.repeat(100);
+  globalThis.fetch = (async (input) => {
+    assert.match(String(input), /^https:\/\/api\.github\.com\/repos\/octo\/kit\/contents\/(README|SECOND)\.md$/);
+    return new Response(JSON.stringify({
+      path: 'README.md',
+      content: Buffer.from(source).toString('base64'),
+      encoding: 'base64',
+      size: source.length,
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const result = await callNativeTool('github', { action: 'file', owner: 'octo', repo: 'kit', paths: ['README.md', 'SECOND.md'] }, {
+      env: { PI_SEARCH_MAX_TOOL_OUTPUT_CHARS: '1000' },
+    });
+    const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+    assert.match(text, /\[context guard: output truncated,/);
+    const details = result.details as { northstarCommand?: { commandId?: string }; entities?: Array<{ content?: string }> };
+    assert.equal(details.northstarCommand?.commandId, 'github.file');
+    assert.equal(details.entities?.length, 2);
+    assert.equal(details.entities?.[0]?.content, source);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('native browse rejects localhost and private URLs — SSRF defense-in-depth', async () => {
   const { validatePublicHttpUrl } = await import('../src/core/http.js');
   assert.throws(() => validatePublicHttpUrl('http://localhost:3000'), /Blocked hostname/);

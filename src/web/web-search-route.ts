@@ -187,7 +187,6 @@ function buildCanonicalSearchRoute(params: SearchRouteParams, contractInput: Sea
       // (PI_SEARCH_WEB_BACKENDS). Batch order rides the canonical runtime.
       ...(single !== undefined ? { query: single } : { queries: [...request.queries] }),
       limit: request.limit,
-      resultFormat: 'collated',
       ...(params.category ? { category: params.category } : {}),
       ...(request.includeContent ? { includeContent: true } : {}),
       ...(request.recency !== undefined ? { recency: request.recency } : {}),

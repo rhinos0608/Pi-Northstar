@@ -110,16 +110,57 @@ function requireNonEmptyString(record: Record<string, unknown>, key: string, mes
   return value.trim();
 }
 
-function optionalNumber(record: Record<string, unknown>, key: string): number | undefined {
-  const value: unknown = record[key];
-  return typeof value === 'number' ? value : undefined;
-}
-
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
   const value: unknown = record[key];
-  if (typeof value !== 'string') return undefined;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`${key} must be a string`);
   const trimmed = value.trim();
   return trimmed === '' ? undefined : trimmed;
+}
+
+function requireTopK(record: Record<string, unknown>): number | undefined {
+  const value: unknown = record['topK'];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 20) {
+    throw new Error('topK must be an integer 1..20');
+  }
+  return value;
+}
+
+function requireMaxChars(record: Record<string, unknown>): number | undefined {
+  const value: unknown = record['maxChars'];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 50000) {
+    throw new Error('maxChars must be an integer 1..50000');
+  }
+  return value;
+}
+
+function requireMaxPages(record: Record<string, unknown>): number | undefined {
+  const value: unknown = record['maxPages'];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 25) {
+    throw new Error('maxPages must be an integer 1..25');
+  }
+  return value;
+}
+
+function requireOffset(record: Record<string, unknown>): number | undefined {
+  const value: unknown = record['offset'];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error('offset must be a non-negative integer');
+  }
+  return value;
+}
+
+function requireLimit(record: Record<string, unknown>): number | undefined {
+  const value: unknown = record['limit'];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 50000) {
+    throw new Error('limit must be an integer 1..50000');
+  }
+  return value;
 }
 
 /** Key-presence check: an empty/non-string url key still counts as present,
@@ -151,14 +192,29 @@ function requireClaims(record: Record<string, unknown>): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 20) {
     throw new Error('source_check requires claims[1..20]');
   }
-  return value as string[];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      throw new Error('claims must contain non-empty strings');
+    }
+    out.push(entry.trim());
+  }
+  return out;
 }
 
 function requireSourceIds(record: Record<string, unknown>): string[] | undefined {
   const value: unknown = record['sourceIds'];
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new Error('sourceIds must be an array');
-  return value as string[];
+  if (value.length > 32) throw new Error('sourceIds must contain at most 32 entries');
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      throw new Error('sourceIds entries must be non-empty strings');
+    }
+    out.push(entry.trim());
+  }
+  return out;
 }
 
 /** HTTP(S)/GitHub asset URLs only; filesystem paths and other schemes reject. */
@@ -206,8 +262,8 @@ export function buildFetchRoute(params: FetchRouteParams | Record<string, unknow
     rejectUnknownKeys(record, ['responseId', 'sourceIds', 'offset', 'limit', 'findText'], 'retrieve');
     const responseId = requireNonEmptyString(record, 'responseId', 'retrieve requires responseId');
     const sourceIds = requireSourceIds(record);
-    const offset = optionalNumber(record, 'offset');
-    const limit = optionalNumber(record, 'limit');
+    const offset = requireOffset(record);
+    const limit = requireLimit(record);
     const findText = optionalString(record, 'findText');
     return buildRetrieveFetchRoute({
       responseId,
@@ -222,7 +278,7 @@ export function buildFetchRoute(params: FetchRouteParams | Record<string, unknow
     rejectUnknownKeys(record, ['url', 'siteMap', 'query', 'maxPages'], 'sitemap');
     const url = requireHttpUrl(record, 'url', 'sitemap requires url');
     const query = optionalString(record, 'query');
-    const maxPages = optionalNumber(record, 'maxPages');
+    const maxPages = requireMaxPages(record);
     return buildSitemapFetchRoute({
       url,
       siteMap: true,
@@ -240,8 +296,8 @@ export function buildFetchRoute(params: FetchRouteParams | Record<string, unknow
       }
     }
     const query = optionalString(record, 'query');
-    const topK = optionalNumber(record, 'topK');
-    const maxChars = optionalNumber(record, 'maxChars');
+    const topK = requireTopK(record);
+    const maxChars = requireMaxChars(record);
     return buildMultiFetchRoute({
       urls,
       ...(query !== undefined ? { query } : {}),
@@ -253,8 +309,8 @@ export function buildFetchRoute(params: FetchRouteParams | Record<string, unknow
     rejectUnknownKeys(record, ['url', 'query', 'topK', 'maxChars'], 'read');
     const url = requireHttpUrl(record, 'url', 'fetch requires url or urls[1..8]');
     const query = optionalString(record, 'query');
-    const topK = optionalNumber(record, 'topK');
-    const maxChars = optionalNumber(record, 'maxChars');
+    const topK = requireTopK(record);
+    const maxChars = requireMaxChars(record);
     return buildReadQueryFetchRoute({
       url,
       ...(query !== undefined ? { query } : {}),

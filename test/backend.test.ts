@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { createSearchBackend, resultToText } from '../src/backend.js';
-import { buildCliEnvironment } from '../src/cli/cli-backend.js';
+import { fileURLToPath } from 'node:url';
+import { createSearchBackend } from '../src/backend.js';
+import { buildCliEnvironment, CliSearchBackend } from '../src/cli/cli-backend.js';
 
 test('createSearchBackend returns backend interface', () => {
   const backend = createSearchBackend({
@@ -29,8 +30,13 @@ test('CliSearchBackend child process works from a foreign cwd', async () => {
 
   try {
     process.chdir(dir);
-    const result = await backend.callTool('reach_status', { family: 'media' }, { timeout: 60_000 });
-    assert.match(resultToText(result), /native-rss-atom/);
+    // 'fetch' maps to the canonical fetch.read command. An invalid URL is
+    // rejected deterministically inside the child handler with no network.
+    // Resolving with the handler's invalid_input code (instead of a mapping
+    // or spawn error) proves the absolute worker entrypoint resolved and
+    // executed while the cwd was foreign.
+    const result = await backend.callTool('fetch', { url: 'notaurl' }, { timeout: 60_000 });
+    assert.equal(result.code, 'invalid_input');
   } finally {
     process.chdir(originalCwd);
     await backend.close();
@@ -55,7 +61,7 @@ test('buildCliEnvironment forwards CODE* env overrides to web_search and blocks 
   assert.equal(env.UNRELATED_API_KEY, undefined);
 });
 
-test('buildCliEnvironment forwards reach backend auth but blocks Twitter/XHS cookie secrets', () => {
+test('buildCliEnvironment forwards social backend auth but blocks Twitter/XHS cookie secrets', () => {
   assert.deepEqual(buildCliEnvironment({
     PATH: '/usr/bin',
     TWITTER_AUTH_TOKEN: 'token',
@@ -72,7 +78,7 @@ test('buildCliEnvironment forwards reach backend auth but blocks Twitter/XHS coo
     BROWSER_CDP_ENDPOINT: 'http://127.0.0.1:9222',
     BROWSER_EXECUTABLE_PATH: '/Applications/Chromium.app/Contents/MacOS/Chromium',
     DATABASE_URL: 'secret',
-  }, 'reach_status'), {
+  }, 'social'), {
     PATH: '/usr/bin',
     HTTPS_PROXY: 'http://proxy.example',
     REDDIT_COOKIE: 'session=secret',
@@ -86,16 +92,16 @@ test('buildCliEnvironment forwards reach backend auth but blocks Twitter/XHS coo
   });
 });
 
-test('buildCliEnvironment forwards REDDIT_COOKIE into the reach child but blocks unrelated secrets', () => {
+test('buildCliEnvironment forwards REDDIT_COOKIE into the social child but blocks unrelated secrets', () => {
   const env = buildCliEnvironment({
     PATH: '/usr/bin',
     REDDIT_COOKIE: 'session=reddit-cookie-secret',
     STRIPE_API_KEY: 'stripe-secret',
     AWS_SECRET_ACCESS_KEY: 'aws-secret',
     DATABASE_URL: 'postgres://u:p@db',
-  }, 'reach_status');
-  // REDDIT_COOKIE is allowed: it is the only path by which a logged-in Reddit
-  // session reaches the Pi-owned CLI process for the native cookie fallback.
+  }, 'social');
+  // REDDIT_COOKIE is allowed: it is the path by which a logged-in Reddit
+  // session reaches the canonical social CLI child for the cookie fallback.
   assert.equal(env.REDDIT_COOKIE, 'session=reddit-cookie-secret');
   assert.equal(env.STRIPE_API_KEY, undefined);
   assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
@@ -110,8 +116,8 @@ test('buildCliEnvironment blocks TWITTER_COOKIE/TWITTER_AUTH_TOKEN like unrelate
     TWITTER_CT0: 'tw-secret',
     REDDIT_COOKIE: 'session=reddit-cookie-secret',
     STRIPE_API_KEY: 'stripe-secret',
-  }, 'reach_status');
-  // Dead Twitter/XHS Pi-cookie plumbing: Stage 2 workers never consume
+  }, 'social');
+  // Dead Twitter/XHS cookie plumbing: CLI children never consume
   // imported Pi cookie state, so these secrets must not reach the CLI child.
   assert.equal(env.TWITTER_COOKIE, undefined);
   assert.equal(env.TWITTER_AUTH_TOKEN, undefined);
@@ -149,15 +155,58 @@ test('buildCliEnvironment drops PI_SEARCH_PLATFORM_WEB_FALLBACK and PI_SEARCH_AU
 test('CliSearchBackend: wall-clock timeout is a timeout failure, not AbortError', async () => {
   // A backend timeout must stay retry/fallback-eligible: it is not caller
   // cancellation, so it must reject with a timeout error, never AbortError.
-  const backend = createSearchBackend({});
+  // 'web_search' maps to canonical search.web so mapping succeeds; the
+  // injected cliPath hangs deterministically until the wall-clock fires.
+  const hangFixture = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'cli-hang.mjs');
+  const backend = new CliSearchBackend({}, hangFixture);
   try {
     await assert.rejects(
-      backend.callTool('reach_status', { family: 'media' }, { timeout: 100 }),
+      backend.callTool('web_search', { query: 'timeout determinism probe' }, { timeout: 100 }),
       (err: unknown) => err instanceof Error
         && /timed out after 100ms/i.test(err.message)
         && err.name !== 'AbortError',
     );
+    // Contrast: caller cancellation after spawn still surfaces as AbortError.
+    // Spawn is synchronous before promise return, so one event-loop turn
+    // guarantees the hang child exists before abort; rejection settles via
+    // child close, proving the termination path runs.
+    const controller = new AbortController();
+    const cancelled = backend.callTool('web_search', { query: 'cancel after spawn probe' }, { signal: controller.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    await assert.rejects(
+      cancelled,
+      (err: unknown) => err instanceof Error && err.name === 'AbortError',
+    );
   } finally {
     await backend.close();
+  }
+});
+
+test('buildCliEnvironment credential-scope matrix: status helpers get base only; social/video/feeds/media share presence keys', () => {
+  const parent = {
+    PATH: '/usr/bin',
+    REDDIT_COOKIE: 'probe-reddit-cookie',
+    GITHUB_TOKEN: 'probe-github-token',
+    YOUTUBE_API_KEY: 'probe-youtube-key',
+    PI_SEARCH_CHROME_BRIDGE_TOKEN: 'probe-bridge-token',
+    STRIPE_API_KEY: 'probe-unrelated-secret',
+  };
+  for (const tool of ['reach_status', 'reach_setup']) {
+    const env = buildCliEnvironment(parent, tool);
+    assert.equal(env.PATH, '/usr/bin');
+    assert.equal(env.REDDIT_COOKIE, undefined);
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.equal(env.YOUTUBE_API_KEY, undefined);
+    assert.equal(env.PI_SEARCH_CHROME_BRIDGE_TOKEN, undefined);
+    assert.equal(env.STRIPE_API_KEY, undefined);
+  }
+  for (const tool of ['social', 'video', 'feeds', 'media']) {
+    const env = buildCliEnvironment(parent, tool);
+    assert.equal(env.REDDIT_COOKIE, 'probe-reddit-cookie');
+    assert.equal(env.GITHUB_TOKEN, 'probe-github-token');
+    assert.equal(env.YOUTUBE_API_KEY, 'probe-youtube-key');
+    assert.equal(env.PI_SEARCH_CHROME_BRIDGE_TOKEN, 'probe-bridge-token');
+    assert.equal(env.STRIPE_API_KEY, undefined);
   }
 });
