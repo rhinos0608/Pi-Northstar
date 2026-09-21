@@ -24,7 +24,97 @@ const SENSITIVE_PARAM_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 const COMMON_CREDENTIAL_LABEL_REGEX =
-  /\b([A-Za-z0-9_-]*(?:TOKEN|API_KEY|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY)[A-Za-z0-9_-]*)\s*[:=]\s*\S+/gi;
+  /\b([A-Za-z0-9_-]{0,128}(?:TOKEN|API_KEY|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY)[A-Za-z0-9_-]{0,128})[ \t]*[:=][ \t]*[^\s]+/gi;
+
+function looksLikeUrlAuthorityHost(authority: string): boolean {
+  let host = authority;
+  const colon = authority.lastIndexOf(':');
+  if (colon > 0 && /^\d{1,5}$/.test(authority.slice(colon + 1))) host = authority.slice(0, colon);
+  if (host === 'localhost') return true;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return true;
+  if (host.length > 253 || !/^[A-Za-z0-9.-]+$/.test(host)) return false;
+  const lastDot = host.lastIndexOf('.');
+  return lastDot > 0 && /^[A-Za-z]{2,63}$/.test(host.slice(lastDot + 1));
+}
+
+function scrubCookieHeaders(text: string): string {
+  const header = /\b(?:Set-Cookie|Cookie)\b/gi;
+  let output = '';
+  let cursor = 0;
+
+  for (let match = header.exec(text); match !== null; match = header.exec(text)) {
+    let index = match.index + match[0].length;
+    while (index < text.length && (text[index] === ' ' || text[index] === '\t')) index++;
+    if (text[index] !== ':' && text[index] !== '=') continue;
+    index++;
+    while (index < text.length && (text[index] === ' ' || text[index] === '\t')) index++;
+
+    const valueStart = index;
+    while (index < text.length && !/[\s;]/.test(text[index]!)) index++;
+    if (index === valueStart) continue;
+
+    let end = index;
+    while (end < text.length) {
+      let next = end;
+      while (next < text.length && (text[next] === ' ' || text[next] === '\t')) next++;
+      if (text[next] !== ';') break;
+      next++;
+      while (next < text.length && (text[next] === ' ' || text[next] === '\t')) next++;
+      const tokenStart = next;
+      while (next < text.length && !/[\s;]/.test(text[next]!)) next++;
+      if (next === tokenStart) break;
+      end = next;
+    }
+
+    output += text.slice(cursor, match.index) + `${match[0]}: ***`;
+    cursor = end;
+    header.lastIndex = end;
+  }
+
+  return output + text.slice(cursor);
+}
+
+function scrubSensitiveQueryParameters(text: string): string {
+  const isBoundary = (char: string): boolean =>
+    char === '&' || char === ' ' || char === '\t' || char === '\r' || char === '\n'
+    || char === '"' || char === "'" || char === '>' || char === '<';
+
+  let output = '';
+  let cursor = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] !== '?' && text[index] !== '&') {
+      index++;
+      continue;
+    }
+
+    const nameStart = index + 1;
+    let equals = nameStart;
+    while (equals < text.length && text[equals] !== '=' && !isBoundary(text[equals]!)) equals++;
+    if (text[equals] !== '=') {
+      index++;
+      continue;
+    }
+
+    let valueEnd = equals + 1;
+    while (valueEnd < text.length && !isBoundary(text[valueEnd]!)) valueEnd++;
+    const rawName = text.slice(nameStart, equals);
+    let sensitive = false;
+    try {
+      sensitive = SENSITIVE_PARAM_NAMES.has(decodeURIComponent(rawName).toLowerCase());
+    } catch {
+      sensitive = true;
+    }
+
+    if (sensitive) {
+      output += text.slice(cursor, equals + 1) + '***';
+      cursor = valueEnd;
+    }
+    index = valueEnd;
+  }
+
+  return output + text.slice(cursor);
+}
 
 /**
  * Scrub secrets (headers, cookies, URL userinfo, sensitive query params, credential labels)
@@ -42,33 +132,17 @@ export function scrubDiagnosticSecrets(text: string): string {
     return `${prefix}${delim}***`;
   });
 
-  // 2. Cookie / Set-Cookie headers: scrub cookie pair(s) e.g. foo=bar; baz=qux
-  cleaned = cleaned.replace(/(?:Set-Cookie|Cookie)\s*[:=]\s*(?:[A-Za-z0-9_.-]+=[^;\r\n\s]+(?:\s*;\s*)?)+/gi, (match) => {
-    const sep = match.search(/[=:]\s*/);
-    const prefix = match.slice(0, sep + 1);
-    const delim = prefix.endsWith(' ') ? '' : ' ';
-    return `${prefix}${delim}***`;
-  });
+  // 2. Cookie / Set-Cookie headers: linear scan avoids regex backtracking on hostile diagnostics.
+  cleaned = scrubCookieHeaders(cleaned);
 
   // 3. Narrow userinfo redaction
   cleaned = cleaned.replace(/(https?:\/\/)[^\/\s:@]+(?::[^\/\s@]*)?@/gi, '$1***:***@');
-  cleaned = cleaned.replace(/(\/\/[^\/\s:@]+(?::[^\/\s@]*)?@)(?=[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?::\d+)?(?:[\/\s?]|$)|localhost(?::\d+)?(?:[\/\s?]|$)|(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:[\/\s?]|$))/gi, () => {
-    return '//***:***@';
+  cleaned = cleaned.replace(/\/\/([^\/\s@]{1,512})@([^\/\s?#]{1,255})/g, (match, _userinfo, authority) => {
+    return looksLikeUrlAuthorityHost(authority) ? `//***:***@${authority}` : match;
   });
 
-  // 4. Sensitive query parameters: parse/normalize query parameter names before matching
-  cleaned = cleaned.replace(/([?&])([^=&\s"'>]+)=([^&\s"'>]*)/g, (match, prefix, rawName) => {
-    let normalizedName = rawName;
-    try {
-      normalizedName = decodeURIComponent(rawName).toLowerCase();
-    } catch {
-      return `${prefix}${rawName}=***`;
-    }
-    if (SENSITIVE_PARAM_NAMES.has(normalizedName)) {
-      return `${prefix}${rawName}=***`;
-    }
-    return match;
-  });
+  // 4. Sensitive query parameters: linear scan normalizes names without regex backtracking.
+  cleaned = scrubSensitiveQueryParameters(cleaned);
 
   // 5. Common credential labels (e.g. GITHUB_TOKEN=xyz, MY_SECRET: abc)
   cleaned = cleaned.replace(COMMON_CREDENTIAL_LABEL_REGEX, '$1=***');

@@ -99,15 +99,46 @@ function attachFailure(error: unknown, context: CommandContext): never {
   throw target;
 }
 
+function isEmailLocalChar(char: string): boolean {
+  return /[A-Za-z0-9._%+-]/.test(char);
+}
+
+function isEmailDomainChar(char: string): boolean {
+  return /[A-Za-z0-9.-]/.test(char);
+}
+
+function redactEmbeddedEmails(label: string): string {
+  let output = '';
+  let cursor = 0;
+
+  for (let at = label.indexOf('@'); at !== -1; at = label.indexOf('@', at + 1)) {
+    let start = at;
+    while (start > cursor && isEmailLocalChar(label[start - 1]!)) start--;
+    let end = at + 1;
+    while (end < label.length && isEmailDomainChar(label[end]!)) end++;
+
+    const domain = label.slice(at + 1, end);
+    const lastDot = domain.lastIndexOf('.');
+    const tld = lastDot >= 0 ? domain.slice(lastDot + 1) : '';
+    if (start === at || lastDot <= 0 || tld.length < 2 || !/^[A-Za-z]+$/.test(tld)) continue;
+
+    output += label.slice(cursor, start) + '[REDACTED_EMAIL]';
+    cursor = end;
+    at = end - 1;
+  }
+
+  return output + label.slice(cursor);
+}
+
 /**
  * Email/phone enhance selectors are PII: never echo them into user-facing
  * text. Name/id/url labels pass through verbatim; only an embedded email is
  * scrubbed there.
  */
 function redactSelectorLabel(label: string, fromSensitiveSelector: boolean): string {
-  const noEmail = label.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]');
+  const noEmail = redactEmbeddedEmails(label);
   if (!fromSensitiveSelector) return noEmail;
-  return noEmail.replace(/\+?\d[\d\s().-]{6,}\d/g, '[REDACTED_PHONE]');
+  return noEmail.replace(/\+?\d[\d\s().-]{6,30}\d/g, '[REDACTED_PHONE]');
 }
 
 function trimmedString(value: unknown): string | undefined {
