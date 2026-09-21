@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
@@ -6,10 +7,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BrokerError } from './broker-errors.js';
 import { acquireBrokerLock, releaseBrokerLock } from './broker-lock.js';
-import { brokerEndpoint } from './broker-endpoint.js';
+import { assertOwner, brokerEndpoint } from './broker-endpoint.js';
 import { BROKER_MAX_FRAME_BYTES } from './broker-protocol.js';
-import type { LeafRuntimeClient } from './leaf-runtime-client.js';
 import {
+  RUNTIME_RPC_ERROR_MESSAGES,
+  type RuntimeRpcMethod,
   type RuntimeRpcV1Request,
   validateReply,
   validateRequest,
@@ -26,6 +28,10 @@ export class BrokerUnavailableError extends BrokerError {
 
 export type BrokerHostMode = 'serve' | 'session';
 
+export interface RuntimeExecutorClient {
+  request(method: RuntimeRpcMethod, params: Record<string, unknown>): Promise<unknown>;
+}
+
 export interface BrokerHostOptions {
   projectId: string;
   mode: BrokerHostMode;
@@ -33,15 +39,17 @@ export interface BrokerHostOptions {
   rootDir?: string;
   /** Path to compiled broker binary. Defaults to resolved package binary. */
   binaryPath?: string;
-  /** Optional LeafRuntimeClient for upstream leaf-runtime requests. */
-  leafClient?: LeafRuntimeClient;
+  /** Optional runtime executor client for upstream runtime requests. */
+  leafClient?: RuntimeExecutorClient;
+  /** Optional lifecycle signal for Pi-session-owned broker shutdown. */
+  signal?: AbortSignal;
 }
 
 export interface ExecutorListenerOptions {
   socketPath: string;
   tokenPath: string;
   token: Buffer;
-  leafClient?: LeafRuntimeClient | undefined;
+  leafClient?: RuntimeExecutorClient | undefined;
 }
 
 /**
@@ -66,7 +74,7 @@ export class ExecutorListener {
   private readonly socketPath: string;
   private readonly tokenPath: string;
   private readonly token: Buffer;
-  private readonly leafClient: LeafRuntimeClient | undefined;
+  private readonly leafClient: RuntimeExecutorClient | undefined;
   private acceptedFirst = false;
   private authenticated = false;
 
@@ -231,7 +239,7 @@ export class ExecutorListener {
         success: false,
         error: {
           code: 'runtime_unavailable',
-          message: 'Leaf runtime client not configured on executor',
+          message: 'Broker executor has no leaf runtime client',
         },
       };
     }
@@ -245,16 +253,21 @@ export class ExecutorListener {
         data,
       };
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const candidate =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? (err as { code?: unknown }).code
+          : undefined;
+      const code =
+        typeof candidate === 'string' && candidate in RUNTIME_RPC_ERROR_MESSAGES
+          ? candidate
+          : 'runtime_unavailable';
+      const message = RUNTIME_RPC_ERROR_MESSAGES[code as keyof typeof RUNTIME_RPC_ERROR_MESSAGES];
       return {
         version: 1,
         requestId: req.requestId,
         method: req.method,
         success: false,
-        error: {
-          code: 'runtime_unavailable',
-          message: msg,
-        },
+        error: { code, message },
       };
     }
   }
@@ -280,12 +293,22 @@ export class ExecutorListener {
   }
 }
 
-/** Resolve the expected path of the compiled northstar-broker binary. */
+/** Resolve the fixed packaged binary, or a known Cargo build in a source checkout. */
 export function resolveBrokerBinaryPath(): string {
-  // Binary lives at the package root's bin/ after build
   const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const binaryName = process.platform === 'win32' ? 'northstar-broker.exe' : 'northstar-broker';
-  return join(pkgRoot, 'bin', binaryName);
+  const packaged = join(pkgRoot, 'bin', binaryName);
+  if (existsSync(packaged)) return packaged;
+
+  // Unsigned local-development mode only: never PATH-search and never accept a
+  // caller-provided executable. A published package does not contain rust/Cargo.toml.
+  if (existsSync(join(pkgRoot, 'rust', 'Cargo.toml'))) {
+    for (const profile of ['release', 'debug']) {
+      const candidate = join(pkgRoot, 'rust', 'target', profile, binaryName);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return packaged;
 }
 
 /**
@@ -311,7 +334,7 @@ export async function startBrokerHost(options: BrokerHostOptions): Promise<void>
   try {
     await access(binary);
   } catch {
-    throw new BrokerUnavailableError(`Binary not found at ${binary}. Install northstar-worker-service to enable stateful commands.`);
+    throw new BrokerUnavailableError(`Binary not found at ${binary}. Run npm run build:native in a source checkout, or install the signed native package for production stateful commands.`);
   }
 
   // Acquire single-owner lock
@@ -350,14 +373,27 @@ export async function startBrokerHost(options: BrokerHostOptions): Promise<void>
     throw err instanceof BrokerError ? err : new BrokerUnavailableError('Failed to initialize executor listener: ' + String(err));
   }
 
+  let cleaned = false;
+  const handleProcessSignal = (): void => { void cleanup(); };
+  const handleAbort = (): void => { void cleanup(); };
   const cleanup = async (): Promise<void> => {
-    child?.kill('SIGTERM');
+    if (cleaned) return;
+    cleaned = true;
+    process.off('SIGTERM', handleProcessSignal);
+    process.off('SIGINT', handleProcessSignal);
+    options.signal?.removeEventListener('abort', handleAbort);
+    if (child !== undefined && child.exitCode === null) child.kill('SIGTERM');
     await executorListener?.close();
     await releaseBrokerLock(projectId, rootDir);
   };
 
-  process.once('SIGTERM', () => { void cleanup(); });
-  process.once('SIGINT', () => { void cleanup(); });
+  process.once('SIGTERM', handleProcessSignal);
+  process.once('SIGINT', handleProcessSignal);
+  if (options.signal?.aborted) {
+    await cleanup();
+    return;
+  }
+  options.signal?.addEventListener('abort', handleAbort, { once: true });
 
   const childArgs = [
     '--project-id',
@@ -409,9 +445,17 @@ export async function probeExistingBroker(projectId: string, rootDir?: string): 
   }
   const { lstat } = await import('node:fs/promises');
   try {
+    await assertOwner(endpoint.rootDir, true);
+    await assertOwner(endpoint.socketPath);
     const info = await lstat(endpoint.socketPath);
-    return info.isSocket();
+    if (!info.isSocket()) return false;
   } catch {
     return false;
   }
+  const { connect } = await import('node:net');
+  return new Promise<boolean>((resolve) => {
+    const socket = connect(endpoint.socketPath);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('error', () => { socket.destroy(); resolve(false); });
+  });
 }

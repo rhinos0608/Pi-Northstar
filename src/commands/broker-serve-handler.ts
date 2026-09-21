@@ -5,12 +5,14 @@ import {
 } from './command-result.js';
 import { BrokerUnavailableError, startBrokerHost } from '../runtime/broker-host.js';
 import { BrokerLockError } from '../runtime/broker-lock.js';
+import { LocalLeafRuntime } from '../runtime/local-leaf-runtime.js';
 
 export const BROKER_SERVE_COMMAND = 'broker.serve';
 
 export interface BrokerServeArgs {
   projectId: string;
   rootDir?: string;
+  env?: Record<string, string | undefined>;
 }
 
 export type CommandResult = NorthstarCommandResultV1;
@@ -61,10 +63,7 @@ function buildResult(params: {
   return result;
 }
 
-export async function brokerServeCommand(args: {
-  projectId: string;
-  rootDir?: string;
-}): Promise<CommandResult> {
+export async function brokerServeCommand(args: BrokerServeArgs): Promise<CommandResult> {
   let validProjectId: string;
   try {
     validProjectId = validateProjectId(args?.projectId);
@@ -83,12 +82,14 @@ export async function brokerServeCommand(args: {
     });
   }
 
+  const runtimeClient = new LocalLeafRuntime({ env: args.env ?? process.env });
   try {
     // Binary path always resolves via the default path inside startBrokerHost;
     // caller-supplied binary paths are never accepted here (arbitrary exec risk).
     await startBrokerHost({
       projectId: validProjectId,
       mode: 'serve',
+      leafClient: runtimeClient,
       ...(args.rootDir !== undefined ? { rootDir: args.rootDir } : {}),
     });
 
@@ -142,5 +143,7 @@ export async function brokerServeCommand(args: {
         category: 'runtime',
       },
     });
+  } finally {
+    await runtimeClient.dispose();
   }
 }

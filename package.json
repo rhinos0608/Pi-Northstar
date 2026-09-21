@@ -27,6 +27,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:native": "cargo build --release --manifest-path rust/Cargo.toml -p northstar-broker",
+    "build:local": "npm run build && npm run build:native",
     "prepack": "npm run build",
     "cli": "node --import tsx src/cli/cli.ts",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",

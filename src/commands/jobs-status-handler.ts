@@ -4,6 +4,9 @@ import {
 } from './command-result.js';
 import { randomUUID } from 'node:crypto';
 import { probeExistingBroker } from '../runtime/broker-host.js';
+import { BrokerClient, PUBLIC_CLI_BROKER_CLIENT_ID } from '../runtime/broker-client.js';
+import { brokerEndpoint } from '../runtime/broker-endpoint.js';
+import { BROKER_ERROR_MESSAGES, BrokerError } from '../runtime/broker-errors.js';
 
 export const JOBS_STATUS_COMMAND = 'jobs.status';
 
@@ -111,15 +114,113 @@ export async function jobsStatusCommand(args: {
     });
   }
 
-  return buildResult({
-    outcome: 'failed',
-    retryability: 'not_retryable',
-    data: null,
-    error: {
-      code: 'broker_query_unimplemented',
-      message: `Broker query unimplemented for requestId '${validRequestId}'`,
-      retryable: false,
-      category: 'runtime',
-    },
+  const client = new BrokerClient({
+    endpoint: brokerEndpoint(validProjectId, args.rootDir),
+    projectId: validProjectId,
+    clientId: PUBLIC_CLI_BROKER_CLIENT_ID,
+    capabilities: ['status'],
   });
+  try {
+    await client.connect();
+    const receipt = await client.querySubmission(validRequestId);
+    if (receipt === undefined) {
+      return buildResult({
+        outcome: 'empty',
+        retryability: 'not_retryable',
+        data: {
+          projectId: validProjectId,
+          requestId: validRequestId,
+          status: 'not_found',
+        },
+      });
+    }
+    if (receipt.state === 'outcome_unknown') {
+      return buildResult({
+        outcome: 'outcome_unknown',
+        retryability: 'not_retryable',
+        data: {
+          projectId: validProjectId,
+          requestId: validRequestId,
+          status: 'outcome_unknown',
+          receipt,
+        },
+        error: {
+          code: 'outcome_unknown',
+          message: 'The broker cannot prove the job outcome after an interrupted dispatch.',
+          retryable: false,
+          category: 'runtime',
+        },
+      });
+    }
+
+    if (receipt.state === 'pending') {
+      return buildResult({
+        outcome: 'success',
+        retryability: 'not_retryable',
+        data: {
+          projectId: validProjectId,
+          requestId: validRequestId,
+          status: 'pending',
+          receipt,
+        },
+      });
+    }
+
+    const runtimeReply = await client.request({
+      version: 1,
+      requestId: 'status_' + randomUUID().replaceAll('-', '_'),
+      method: 'status',
+      params: { runId: receipt.jobId },
+    });
+    if (!runtimeReply.success) {
+      const missing = runtimeReply.error.code === 'not_found';
+      return buildResult({
+        outcome: missing ? 'stale' : 'failed',
+        retryability: 'not_retryable',
+        data: {
+          projectId: validProjectId,
+          requestId: validRequestId,
+          receipt,
+        },
+        error: {
+          code: runtimeReply.error.code,
+          message: runtimeReply.error.message,
+          retryable: false,
+          category: 'runtime',
+        },
+      });
+    }
+
+    const runtime = runtimeReply.data as Record<string, unknown>;
+    const refreshedReceipt = await client.querySubmission(validRequestId) ?? receipt;
+    return buildResult({
+      outcome: 'success',
+      retryability: 'not_retryable',
+      data: {
+        projectId: validProjectId,
+        requestId: validRequestId,
+        status: typeof runtime.state === 'string' ? runtime.state : 'unknown',
+        receipt: refreshedReceipt,
+        runtime,
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof BrokerError
+        ? BROKER_ERROR_MESSAGES[error.code]
+        : 'Broker status query failed.';
+    return buildResult({
+      outcome: 'failed',
+      retryability: 'not_retryable',
+      data: null,
+      error: {
+        code: 'broker_query_failed',
+        message,
+        retryable: false,
+        category: 'runtime',
+      },
+    });
+  } finally {
+    client.close();
+  }
 }

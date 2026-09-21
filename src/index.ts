@@ -49,6 +49,8 @@ import { desktopEnabled } from './desktop/desktop-policy.js';
 import { getAgentJobSnapshot } from './web/agent/agent-jobs.js';
 import { setLeafRuntimeProvider, shutdownLeafRuntime } from './web/agent/agent-rpc.js';
 import { LeafRuntimeClient } from './runtime/leaf-runtime-client.js';
+import { probeExistingBroker, startBrokerHost } from './runtime/broker-host.js';
+import { LocalLeafRuntime } from './runtime/local-leaf-runtime.js';
 import { createCommandContext } from './commands/command-context.js';
 import { commandHandler } from './commands/command-registry.js';
 import { validateCommandResult, type NorthstarCommandResultV1 } from './commands/command-result.js';
@@ -499,13 +501,44 @@ export default function (pi: ExtensionAPI): void {
   // Leaf-runtime RPC client: only when an exact leaf model is configured.
   // Absent env = no client, agents stay standalone (existing behavior).
   // No new tool; the client only supplies staged steering calls inside adaptive agent jobs.
-  const leafModel = (process.env.PI_NORTHSTAR_LEAF_MODEL ?? '').trim();
-  const leafClient = leafModel !== '' ? new LeafRuntimeClient({ events: pi.events, modelId: leafModel }) : undefined;
+  const leafModel = (env.PI_NORTHSTAR_LEAF_MODEL ?? '').trim();
+  const leafEvents = pi.events as { on?: unknown } | undefined;
+  const leafClient =
+    leafModel !== '' && leafEvents !== undefined && typeof leafEvents.on === 'function'
+      ? new LeafRuntimeClient({ events: pi.events, modelId: leafModel })
+      : undefined;
   if (leafClient !== undefined) setLeafRuntimeProvider(leafClient);
+
+  const sessionBrokerProjectId = (env.PI_NORTHSTAR_BROKER_PROJECT_ID ?? '').trim();
+  if (sessionBrokerProjectId !== '' && !/^[A-Za-z0-9._-]{1,96}$/.test(sessionBrokerProjectId)) {
+    throw new TypeError('PI_NORTHSTAR_BROKER_PROJECT_ID must match ^[A-Za-z0-9._-]{1,96}$');
+  }
+  let sessionBrokerAbort: AbortController | undefined;
+  let sessionBrokerPromise: Promise<void> | undefined;
+  let sessionBrokerRuntime: LocalLeafRuntime | undefined;
+  pi.on('session_start', async () => {
+    if (sessionBrokerProjectId === '' || sessionBrokerPromise !== undefined) return;
+    if (await probeExistingBroker(sessionBrokerProjectId)) return;
+    sessionBrokerAbort = new AbortController();
+    sessionBrokerRuntime = new LocalLeafRuntime({ env });
+    sessionBrokerPromise = startBrokerHost({
+      projectId: sessionBrokerProjectId,
+      mode: 'session',
+      leafClient: sessionBrokerRuntime,
+      signal: sessionBrokerAbort.signal,
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Northstar session broker stopped: ${message}`);
+    });
+  });
+
   pi.on('session_shutdown', async () => {
+    sessionBrokerAbort?.abort();
     clearInterval(chromeRenewalTimer);
     await Promise.allSettled([
       client.close(),
+      ...(sessionBrokerPromise !== undefined ? [sessionBrokerPromise] : []),
+      ...(sessionBrokerRuntime !== undefined ? [sessionBrokerRuntime.dispose()] : []),
       ...(leafClient !== undefined ? [(async () => { shutdownLeafRuntime(leafClient); })()] : []),
       ...(desktop ? [desktop.close()] : []),
       closeBrowserSession(),

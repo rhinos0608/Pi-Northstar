@@ -190,7 +190,7 @@ test('cliToolError omits absent platform/backend and keeps plain Error as tool_e
   assert.doesNotMatch(payload, /http/);
 });
 
-test('CLI help output lists broker serve and jobs status', async () => {
+test('CLI help output lists broker serve and all local job controls', async () => {
   const result = await runCommand(['--help'], {});
   assert.equal(result.ok, true);
   const commands = (result.data as { commands: string[] }).commands;
@@ -198,10 +198,12 @@ test('CLI help output lists broker serve and jobs status', async () => {
     commands.some((cmd) => cmd.includes('northstar broker serve')),
     'help commands must list broker serve',
   );
-  assert.ok(
-    commands.some((cmd) => cmd.includes('northstar jobs status')),
-    'help commands must list jobs status',
-  );
+  for (const subcommand of ['start', 'status', 'result', 'cancel']) {
+    assert.ok(
+      commands.some((cmd) => cmd.includes(`northstar jobs ${subcommand}`)),
+      `help commands must list jobs ${subcommand}`,
+    );
+  }
 
   const brokerHelp = await runCommand(['broker', '--help'], {});
   assert.equal(brokerHelp.ok, true);
@@ -209,7 +211,12 @@ test('CLI help output lists broker serve and jobs status', async () => {
 
   const jobsHelp = await runCommand(['jobs', '--help'], {});
   assert.equal(jobsHelp.ok, true);
-  assert.equal((jobsHelp.data as { commandId: string }).commandId, 'jobs.status');
+  assert.equal((jobsHelp.data as { commandId: string }).commandId, 'jobs');
+  for (const subcommand of ['start', 'status', 'result', 'cancel']) {
+    const help = await runCommand(['jobs', subcommand, '--help'], {});
+    assert.equal(help.ok, true);
+    assert.equal((help.data as { commandId: string }).commandId, `jobs.${subcommand}`);
+  }
 });
 
 test('dispatch routes jobs status with bad args to validation failure without spawning', async () => {

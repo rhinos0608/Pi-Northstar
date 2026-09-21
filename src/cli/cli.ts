@@ -18,8 +18,16 @@ interface CliResult {
 const BROKER_SERVE_USAGE =
   "northstar broker serve --project-id ID [--root-dir DIR] [--json|--agent]";
 
+const JOBS_START_USAGE =
+  "northstar jobs start --project-id ID --model MODEL --prompt TEXT [--request-id ID] [--max-output-tokens N] [--timeout-ms N] [--root-dir DIR] [--json|--agent]";
 const JOBS_STATUS_USAGE =
   "northstar jobs status --project-id ID --request-id ID [--root-dir DIR] [--json|--agent]";
+const JOBS_RESULT_USAGE =
+  "northstar jobs result --project-id ID --request-id ID [--root-dir DIR] [--json|--agent]";
+const JOBS_CANCEL_USAGE =
+  "northstar jobs cancel --project-id ID --request-id ID [--settlement-window-ms N] [--root-dir DIR] [--json|--agent]";
+const JOBS_USAGE =
+  "northstar jobs <start|status|result|cancel> (run 'northstar jobs <command> --help')";
 
 const SOCIAL_SEARCH_USAGE =
   "northstar social search --platform PLATFORM --query QUERY [--post-id ID] [--comment-id ID] [--user USER] [--community COMMUNITY] [--topic TOPIC] [--url URL] [--feed-variant VARIANT] [--sort SORT] [--time-range RANGE] [--include-replies] [--limit N] [--cursor CURSOR] [--json|--agent]";
@@ -205,7 +213,10 @@ function helpResult(): CliResult {
       commands: [
         ...cliSkillInventory(),
         "northstar broker serve --project-id ID [--root-dir DIR] [--json|--agent]",
-        "northstar jobs status --project-id ID --request-id ID [--root-dir DIR] [--json|--agent]",
+        JOBS_START_USAGE,
+        JOBS_STATUS_USAGE,
+        JOBS_RESULT_USAGE,
+        JOBS_CANCEL_USAGE,
         "domains",
         "capabilities",
         "status",
@@ -1808,7 +1819,7 @@ async function searchCommandResult(
 
 async function brokerCommandResult(
   args: string[],
-  _env: Record<string, string | undefined>,
+  env: Record<string, string | undefined>,
 ): Promise<CliResult> {
   const subcommand = args[0];
   if (subcommand === "--help" || subcommand === "-h" || subcommand === undefined) {
@@ -1852,6 +1863,7 @@ async function brokerCommandResult(
     const { renderCommandResult } = await import("../commands/command-render.js");
     const result = await brokerServeCommand({
       projectId,
+      env,
       ...(rootDir !== undefined ? { rootDir } : {}),
     });
     const rendered = renderCommandResult(result as never, parsed.mode);
@@ -1870,58 +1882,108 @@ async function jobsCommandResult(
 ): Promise<CliResult> {
   const subcommand = args[0];
   if (subcommand === "--help" || subcommand === "-h" || subcommand === undefined) {
-    return {
-      ok: true,
-      data: {
-        usage: JOBS_STATUS_USAGE,
-        commandId: "jobs.status",
-      },
-    };
-  }
-  if (subcommand !== "status") {
-    return errorResult("unknown_command", "Usage: northstar jobs <status>");
-  }
-  if (args[1] === "--help" || args[1] === "-h") {
-    return {
-      ok: true,
-      data: {
-        usage: JOBS_STATUS_USAGE,
-        commandId: "jobs.status",
-      },
-    };
+    return { ok: true, data: { usage: JOBS_USAGE, commandId: "jobs" } };
   }
 
+  const usageByCommand: Record<string, string> = {
+    start: JOBS_START_USAGE,
+    status: JOBS_STATUS_USAGE,
+    result: JOBS_RESULT_USAGE,
+    cancel: JOBS_CANCEL_USAGE,
+  };
+  const usage = usageByCommand[subcommand];
+  if (usage === undefined) return errorResult("unknown_command", `Usage: ${JOBS_USAGE}`);
+  if (args[1] === "--help" || args[1] === "-h") {
+    return { ok: true, data: { usage, commandId: `jobs.${subcommand}` } };
+  }
+
+  const values = subcommand === "start"
+    ? ["--project-id", "--model", "--prompt", "--request-id", "--max-output-tokens", "--timeout-ms", "--root-dir"]
+    : subcommand === "cancel"
+      ? ["--project-id", "--request-id", "--settlement-window-ms", "--root-dir"]
+      : ["--project-id", "--request-id", "--root-dir"];
   const parsed = parseCommandFlags(args.slice(1), {
-    usage: JOBS_STATUS_USAGE,
-    values: ["--project-id", "--request-id", "--root-dir"],
+    usage,
+    values,
     maxPositional: 0,
     minPositional: 0,
   });
   if (!parsed.ok) return parsed.error;
 
   const projectId = parsed.values.get("--project-id");
-  if (projectId === undefined) {
-    return errorResult("invalid_usage", "--project-id is required");
-  }
-  const requestId = parsed.values.get("--request-id");
-  if (requestId === undefined) {
-    return errorResult("invalid_usage", "--request-id is required");
-  }
+  if (projectId === undefined) return errorResult("invalid_usage", "--project-id is required");
   const rootDir = parsed.values.get("--root-dir");
+  const integerValue = (flag: string): number | CliResult | undefined => {
+    const raw = parsed.values.get(flag);
+    if (raw === undefined) return undefined;
+    if (!/^\d+$/.test(raw)) return errorResult("invalid_usage", `${flag} requires an integer`);
+    const value = Number(raw);
+    return Number.isSafeInteger(value)
+      ? value
+      : errorResult("invalid_usage", `${flag} requires a safe integer`);
+  };
 
   try {
-    const { jobsStatusCommand } = await import("../commands/jobs-status-handler.js");
     const { renderCommandResult } = await import("../commands/command-render.js");
-    const result = await jobsStatusCommand({
-      projectId,
-      requestId,
-      ...(rootDir !== undefined ? { rootDir } : {}),
-    });
-    const rendered = renderCommandResult(result as never, parsed.mode);
-    if (result.outcome === "failed" || result.outcome === "cancelled") {
-      return { ok: false, data: rendered };
+    let result;
+    if (subcommand === "start") {
+      const modelId = parsed.values.get("--model");
+      const prompt = parsed.values.get("--prompt");
+      if (modelId === undefined) return errorResult("invalid_usage", "--model is required");
+      if (prompt === undefined) return errorResult("invalid_usage", "--prompt is required");
+      const maxOutputTokens = integerValue("--max-output-tokens");
+      if (typeof maxOutputTokens === "object") return maxOutputTokens;
+      const timeoutMs = integerValue("--timeout-ms");
+      if (typeof timeoutMs === "object") return timeoutMs;
+      const { jobsStartCommand } = await import("../commands/jobs-control-handler.js");
+      result = await jobsStartCommand({
+        projectId,
+        modelId,
+        prompt,
+        ...(parsed.values.get("--request-id") !== undefined
+          ? { requestId: parsed.values.get("--request-id")! }
+          : {}),
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(rootDir !== undefined ? { rootDir } : {}),
+      });
+    } else {
+      const requestId = parsed.values.get("--request-id");
+      if (requestId === undefined) return errorResult("invalid_usage", "--request-id is required");
+      if (subcommand === "status") {
+        const { jobsStatusCommand } = await import("../commands/jobs-status-handler.js");
+        result = await jobsStatusCommand({
+          projectId,
+          requestId,
+          ...(rootDir !== undefined ? { rootDir } : {}),
+        });
+      } else if (subcommand === "result") {
+        const { jobsResultCommand } = await import("../commands/jobs-control-handler.js");
+        result = await jobsResultCommand({
+          projectId,
+          requestId,
+          ...(rootDir !== undefined ? { rootDir } : {}),
+        });
+      } else {
+        const settlementWindowMs = integerValue("--settlement-window-ms");
+        if (typeof settlementWindowMs === "object") return settlementWindowMs;
+        const { jobsCancelCommand } = await import("../commands/jobs-control-handler.js");
+        result = await jobsCancelCommand({
+          projectId,
+          requestId,
+          ...(settlementWindowMs !== undefined ? { settlementWindowMs } : {}),
+          ...(rootDir !== undefined ? { rootDir } : {}),
+        });
+      }
     }
-    return { ok: true, data: rendered };
+
+    const rendered = renderCommandResult(result as never, parsed.mode);
+    const unsuccessful =
+      result.outcome === "failed" ||
+      result.outcome === "cancelled" ||
+      result.outcome === "outcome_unknown" ||
+      result.outcome === "stale";
+    return { ok: !unsuccessful, data: rendered };
   } catch (error) {
     return cliToolError(error);
   }
