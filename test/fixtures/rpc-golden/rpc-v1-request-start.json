@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "requestId": "golden-start-1",
+  "method": "start",
+  "params": {
+    "modelId": "provider/model",
+    "prompt": "hello golden",
+    "maxOutputTokens": 1024,
+    "timeoutMs": 60000,
+    "correlation": {
+      "correlationVersion": 1,
+      "owner": "northstar",
+      "correlationId": "golden-corr-1",
+      "queryIndex": 0,
+      "role": "researcher",
+      "stage": "gather",
+      "attempt": 1
+    }
+  }
+}

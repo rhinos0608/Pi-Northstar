@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "kind": "response",
+  "sequence": 1,
+  "reply": {
+    "version": 1,
+    "requestId": "rpc-golden-req-1",
+    "method": "status",
+    "success": true,
+    "data": {
+      "runId": "runtime_goldenabcdef01",
+      "state": "running",
+      "startedAt": 1700000001000,
+      "updatedAt": 1700000002000
+    }
+  }
+}

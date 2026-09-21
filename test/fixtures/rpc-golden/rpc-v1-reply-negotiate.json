@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "requestId": "golden-negotiate-1",
+  "method": "negotiate",
+  "success": true,
+  "data": {
+    "compatible": true,
+    "modelId": "golden-model"
+  }
+}

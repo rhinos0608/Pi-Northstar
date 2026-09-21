@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "kind": "request",
+  "token": "golden.token.sig",
+  "epoch": "golden-epoch-1",
+  "sessionId": "golden-session-1",
+  "sequence": 1,
+  "projectId": "golden-project",
+  "request": {
+    "version": 1,
+    "requestId": "rpc-golden-req-1",
+    "method": "status",
+    "params": { "runId": "runtime_goldenabcdef01" }
+  }
+}

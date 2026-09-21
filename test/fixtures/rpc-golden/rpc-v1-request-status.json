@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "requestId": "golden-status-1",
+  "method": "status",
+  "params": { "runId": "runtime_goldenabcdef01" }
+}

@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "requestId": "golden-result-1",
+  "method": "result",
+  "params": { "runId": "runtime_goldenabcdef01" }
+}

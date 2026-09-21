@@ -21,3 +21,18 @@ __pycache__/
 .pi-subagents/artifacts/
 .subagents/
 .pi/
+
+# Rust (Gate B native broker)
+rust/target/
+**/*.rs.bk
+# Compiled broker binary staged for broker-host resolution (never commit binaries)
+bin/northstar-broker
+bin/northstar-broker.exe
+
+# Signed-installer build outputs (never commit artifacts or signing material)
+*.msi
+*.pkg
+installer/build/
+installer/dist/
+*.p12
+*.pfx

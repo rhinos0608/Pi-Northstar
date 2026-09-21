@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "requestId": "golden-negotiate-1",
+  "method": "negotiate",
+  "params": {
+    "modelId": "provider/model"
+  }
+}
