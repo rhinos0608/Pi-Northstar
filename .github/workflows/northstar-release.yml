@@ -20,13 +20,18 @@ permissions:
 #   - MACOS_CERT_PASSWORD: Password for the .p12 certificate
 #   - NOTARY_APPLE_ID: Apple ID email for xcrun notarytool
 #   - NOTARY_APP_PASSWORD: App-specific password for notarytool
-#   - NOTARY_TEAM_ID: 10-character Apple Developer Team ID
+#   - MACOS_SIGN_IDENTITY_APP: Full Developer ID Application signing identity (e.g. "Developer ID Application: Team Name (TEAMID)")
+#   - MACOS_SIGN_IDENTITY_INSTALLER: Full Developer ID Installer signing identity (e.g. "Developer ID Installer: Team Name (TEAMID)")
+#   - NOTARY_TEAM_ID: 10-character Apple Developer Team ID (notarytool --team-id only)
 #
 # Signing steps run whenever certificate secrets are present (on pushes, pull requests, and tags).
 # Only macOS notarization and stapling (xcrun notarytool) is gated on git release tags (refs/tags/v*).
 
 jobs:
   windows-msi:
+    # The current Rust broker is Unix-socket based. Do not publish an MSI until
+    # the named-pipe/Windows-service implementation exists and is explicitly enabled.
+    if: ${{ vars.NORTHSTAR_ENABLE_WINDOWS_MSI == '1' }}
     name: Build & Package Windows MSI
     runs-on: windows-2022
     timeout-minutes: 20
@@ -58,7 +63,9 @@ jobs:
           if ($env:WINDOWS_CERT_BASE64 -and $env:WINDOWS_CERT_PASSWORD) {
             Write-Host "Decoding signing certificate..."
             [IO.File]::WriteAllBytes("$pwd\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
-            & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /f "$pwd\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 "rust/target/x86_64-pc-windows-msvc/release/northstar-broker.exe"
+            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory | Sort-Object Name -Descending | ForEach-Object { Join-Path $_.FullName "x64\signtool.exe" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $signtool) { throw "signtool.exe not found under Windows Kits 10 bin." }
+            & $signtool sign /f "$pwd\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 "rust/target/x86_64-pc-windows-msvc/release/northstar-broker.exe"
             Remove-Item "$pwd\cert.pfx" -Force
             Write-Host "Binary signed successfully."
           } else {
@@ -85,7 +92,9 @@ jobs:
           if ($env:WINDOWS_CERT_BASE64 -and $env:WINDOWS_CERT_PASSWORD) {
             Write-Host "Signing MSI..."
             [IO.File]::WriteAllBytes("$pwd\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
-            & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /f "$pwd\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 "dist/northstar-broker.msi"
+            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory | Sort-Object Name -Descending | ForEach-Object { Join-Path $_.FullName "x64\signtool.exe" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $signtool) { throw "signtool.exe not found under Windows Kits 10 bin." }
+            & $signtool sign /f "$pwd\cert.pfx" /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 "dist/northstar-broker.msi"
             Remove-Item "$pwd\cert.pfx" -Force
             Write-Host "MSI signed successfully."
           } else {
@@ -150,27 +159,27 @@ jobs:
 
       - name: Sign Binary (if secrets available)
         env:
-          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          MACOS_SIGN_IDENTITY_APP: ${{ secrets.MACOS_SIGN_IDENTITY_APP }}
         run: |
-          if [ "${{ steps.macos-certs.outputs.has_certs }}" = "true" ] && [ -n "$NOTARY_TEAM_ID" ]; then
+          if [ "${{ steps.macos-certs.outputs.has_certs }}" = "true" ] && [ -n "$MACOS_SIGN_IDENTITY_APP" ]; then
             echo "Signing binary with Developer ID Application..."
-            codesign --force --options runtime --entitlements installer/macos/helper.entitlements --sign "Developer ID Application: ($NOTARY_TEAM_ID)" dist/payload/usr/local/bin/northstar-broker
+            codesign --force --options runtime --entitlements installer/macos/helper.entitlements --sign "$MACOS_SIGN_IDENTITY_APP" dist/payload/usr/local/bin/northstar-broker
           else
-            echo "Skipping codesign (missing certs or team ID)."
+            echo "Skipping codesign (missing certs or signing identity)."
           fi
 
       - name: Build Component PKG and Product PKG
         env:
-          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          MACOS_SIGN_IDENTITY_INSTALLER: ${{ secrets.MACOS_SIGN_IDENTITY_INSTALLER }}
         run: |
           VERSION=$(cargo metadata --format-version 1 --manifest-path rust/Cargo.toml | python3 -c "import sys, json; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name'] == 'northstar-broker'))")
           echo "Building PKG for northstar-broker version $VERSION"
           pkgbuild --root dist/payload --scripts dist/scripts --identifier com.pi.northstar.broker --version "$VERSION" dist/northstar-broker-component.pkg
-          sed -i '' "s/version=\"[^\"]*\"/version=\"$VERSION\"/g" installer/macos/Distribution.xml
+          sed -i '' -e "/<pkg-ref /s/version=\"[^\"]*\"/version=\"$VERSION\"/" installer/macos/Distribution.xml
           
-          if [ "${{ steps.macos-certs.outputs.has_certs }}" = "true" ] && [ -n "$NOTARY_TEAM_ID" ]; then
+          if [ "${{ steps.macos-certs.outputs.has_certs }}" = "true" ] && [ -n "$MACOS_SIGN_IDENTITY_INSTALLER" ]; then
             echo "Signing installer with Developer ID Installer..."
-            productbuild --distribution installer/macos/Distribution.xml --package-path dist --sign "Developer ID Installer: ($NOTARY_TEAM_ID)" dist/northstar-broker.pkg
+            productbuild --distribution installer/macos/Distribution.xml --package-path dist --sign "$MACOS_SIGN_IDENTITY_INSTALLER" dist/northstar-broker.pkg
           else
             echo "Building unsigned installer package..."
             productbuild --distribution installer/macos/Distribution.xml --package-path dist dist/northstar-broker.pkg

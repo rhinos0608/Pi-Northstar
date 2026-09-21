@@ -6,6 +6,19 @@ trap 'echo "Error: postinstall failed on line $LINENO" >&2; exit 1' ERR
 
 POOL_USERS=("_northstar_pool_1" "_northstar_pool_2" "_northstar_pool_3" "_northstar_pool_4")
 BASE_UID=451
+POOL_GROUP="_northstar_pool"
+POOL_GID=450
+
+# Dedicated hidden pool group (not staff): isolates workers from default group 20
+if dscl . -read "/Groups/$POOL_GROUP" >/dev/null 2>&1; then
+  echo "Pool group $POOL_GROUP already exists, reusing"
+else
+  echo "Creating pool group: $POOL_GROUP (GID: $POOL_GID)"
+  dscl . -create "/Groups/$POOL_GROUP"
+  dscl . -create "/Groups/$POOL_GROUP" RealName "Northstar Worker Pool"
+  dscl . -create "/Groups/$POOL_GROUP" PrimaryGroupID "$POOL_GID"
+  dscl . -create "/Groups/$POOL_GROUP" IsHidden 1
+fi
 
 for idx in "${!POOL_USERS[@]}"; do
   username="${POOL_USERS[$idx]}"
@@ -13,14 +26,15 @@ for idx in "${!POOL_USERS[@]}"; do
 
   # Skip existing accounts idempotently
   if dscl . -read "/Users/$username" >/dev/null 2>&1; then
-    echo "Account $username already exists, skipping creation"
+    echo "Account $username already exists, enforcing pool group"
+    dscl . -create "/Users/$username" PrimaryGroupID "$POOL_GID"
   else
     echo "Creating isolated pool account: $username (UID: $uid)"
     dscl . -create "/Users/$username"
     dscl . -create "/Users/$username" UserShell /usr/bin/false
     dscl . -create "/Users/$username" RealName "Northstar Worker Pool $idx"
     dscl . -create "/Users/$username" UniqueID "$uid"
-    dscl . -create "/Users/$username" PrimaryGroupID 20
+    dscl . -create "/Users/$username" PrimaryGroupID "$POOL_GID"
     dscl . -create "/Users/$username" NFSHomeDirectory /var/empty
     dscl . -create "/Users/$username" IsHidden 1
   fi

@@ -206,6 +206,7 @@ if (type === 'npm_entry') {
 }
 
 const tmpPath = `${manifestPath}.tmp-${process.pid}-${Date.now()}`;
+manifest.generatedAt = new Date().toISOString();
 try {
   writeFileSync(tmpPath, JSON.stringify(manifest, null, 2) + '\n');
   renameSync(tmpPath, manifestPath);
