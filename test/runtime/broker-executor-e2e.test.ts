@@ -233,6 +233,7 @@ test('broker-executor cross-language end-to-end integration', async (t) => {
       assert.deepEqual(cancelResp.reply.data, {
         settledRunIds: [],
         timedOutRunIds: [],
+        unknownRunIds: ['unknown-run-123'],
       });
     }
 

@@ -10,7 +10,6 @@ export const BROKER_SERVE_COMMAND = 'broker.serve';
 export interface BrokerServeArgs {
   projectId: string;
   rootDir?: string;
-  binaryPath?: string;
 }
 
 export type CommandResult = NorthstarCommandResultV1;
@@ -64,7 +63,6 @@ function buildResult(params: {
 export async function brokerServeCommand(args: {
   projectId: string;
   rootDir?: string;
-  binaryPath?: string;
 }): Promise<CommandResult> {
   let validProjectId: string;
   try {
@@ -85,11 +83,12 @@ export async function brokerServeCommand(args: {
   }
 
   try {
+    // Binary path always resolves via the default path inside startBrokerHost;
+    // caller-supplied binary paths are never accepted here (arbitrary exec risk).
     await startBrokerHost({
       projectId: validProjectId,
       mode: 'serve',
       ...(args.rootDir !== undefined ? { rootDir: args.rootDir } : {}),
-      ...(args.binaryPath !== undefined ? { binaryPath: args.binaryPath } : {}),
     });
 
     return buildResult({

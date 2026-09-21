@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -338,6 +338,90 @@ test('empty name or platform exits nonzero', () => {
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
       );
     });
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('re-enroll with different hash fails without --expect or --force and leaves manifest untouched', () => {
+  const tmpDir = createTempDir('enroll-test-overwrite-guard-');
+  try {
+    const manifestPath = join(tmpDir, 'manifest.json');
+    writeFileSync(manifestPath, makeInitialManifest());
+
+    const file1 = join(tmpDir, 'file1');
+    writeFileSync(file1, 'initial content');
+    const hash1 = createHash('sha256').update('initial content').digest('hex');
+
+    execFileSync(
+      process.execPath,
+      [SCRIPT_PATH, '--manifest', manifestPath, '--name', 'cua-driver', '--platform', 'darwin-arm64', '--file', file1],
+      { encoding: 'utf8' }
+    );
+    const manifestAfterEnroll1 = readFileSync(manifestPath, 'utf8');
+
+    const file2 = join(tmpDir, 'file2');
+    writeFileSync(file2, 'different content');
+    const hash2 = createHash('sha256').update('different content').digest('hex');
+
+    let errorThrown = false;
+    try {
+      execFileSync(
+        process.execPath,
+        [SCRIPT_PATH, '--manifest', manifestPath, '--name', 'cua-driver', '--platform', 'darwin-arm64', '--file', file2],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+    } catch (err: unknown) {
+      errorThrown = true;
+      const execErr = err as { status: number; stderr: string };
+      assert.notEqual(execErr.status, 0);
+      assert.match(execErr.stderr, /Cannot overwrite existing hash/);
+    }
+    assert.equal(errorThrown, true);
+    assert.equal(readFileSync(manifestPath, 'utf8'), manifestAfterEnroll1);
+
+    execFileSync(
+      process.execPath,
+      [SCRIPT_PATH, '--manifest', manifestPath, '--name', 'cua-driver', '--platform', 'darwin-arm64', '--file', file2, '--expect', hash1],
+      { encoding: 'utf8' }
+    );
+    const updatedWithExpect = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    assert.equal(updatedWithExpect.artifacts['cua-driver'].platforms['darwin-arm64'].sha256, hash2);
+
+    const file3 = join(tmpDir, 'file3');
+    writeFileSync(file3, 'forced content');
+    const hash3 = createHash('sha256').update('forced content').digest('hex');
+    execFileSync(
+      process.execPath,
+      [SCRIPT_PATH, '--manifest', manifestPath, '--name', 'cua-driver', '--platform', 'darwin-arm64', '--file', file3, '--force'],
+      { encoding: 'utf8' }
+    );
+    const updatedWithForce = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    assert.equal(updatedWithForce.artifacts['cua-driver'].platforms['darwin-arm64'].sha256, hash3);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('failed enroll leaves manifest bytes identical with no tmp residue', () => {
+  const tmpDir = createTempDir('enroll-test-atomic-');
+  try {
+    const manifestPath = join(tmpDir, 'manifest.json');
+    const initialContent = makeInitialManifest();
+    writeFileSync(manifestPath, initialContent);
+
+    try {
+      execFileSync(
+        process.execPath,
+        [SCRIPT_PATH, '--manifest', manifestPath, '--name', 'cua-driver', '--platform', 'darwin', '--file', join(tmpDir, 'missing.bin')],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+      );
+    } catch {
+      // Expected
+    }
+
+    assert.equal(readFileSync(manifestPath, 'utf8'), initialContent);
+    assert.deepEqual(readdirSync(tmpDir), ['manifest.json']);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

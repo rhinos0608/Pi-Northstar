@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::endpoint::unix::get_peer_identity;
 use crate::frame::BROKER_MAX_FRAME_BYTES;
+use zeroize::Zeroizing;
 
 #[derive(Debug)]
 pub enum ExecutorError {
@@ -79,7 +80,9 @@ impl ExecutorUpstream {
             }
             Err(e) => {
                 // macOS getpeereid fallback on unnamed socket pair or OS error:
-                // check file metadata UID if kernel peer identity fails
+                // check file metadata UID if kernel peer identity fails.
+                // NOTE: Executor socket-file-UID check is documented-weaker than
+                // kernel peer identity (subject to file/symlink replacement TOCTOU).
                 if let Ok(meta) = std::fs::metadata(&self.socket_path) {
                     if meta.uid() != my_euid {
                         return Err(ExecutorError::BeforeDispatch(format!(
@@ -98,31 +101,27 @@ impl ExecutorUpstream {
 
         let mut stream = stream;
         if let Some(ref token_file_path) = self.token_file {
-            let mut token_bytes = std::fs::read(token_file_path).map_err(|e| {
-                ExecutorError::BeforeDispatch(format!(
-                    "failed to read executor token file {:?}: {e}",
-                    token_file_path
-                ))
-            })?;
+            let token_bytes = Zeroizing::new(std::fs::read(token_file_path).map_err(|_| {
+                ExecutorError::BeforeDispatch(
+                    "failed to read executor token file".to_string()
+                )
+            })?);
 
-            let auth_payload = serde_json::json!({
-                "token": String::from_utf8_lossy(&token_bytes).trim().to_string()
-            });
+            let token_str = Zeroizing::new(
+                String::from_utf8_lossy(&token_bytes).trim().to_string()
+            );
 
-            // Zeroize sensitive buffer immediately
-            for b in token_bytes.iter_mut() {
-                *b = 0;
-            }
-            std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-
-            let auth_bytes = match serde_json::to_vec(&auth_payload) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(ExecutorError::BeforeDispatch(format!(
+            let auth_payload = Zeroizing::new(
+                serde_json::to_string(&serde_json::json!({
+                    "token": &*token_str
+                })).map_err(|e| {
+                    ExecutorError::BeforeDispatch(format!(
                         "failed serializing auth frame: {e}"
-                    )));
-                }
-            };
+                    ))
+                })?
+            );
+
+            let auth_bytes = Zeroizing::new(auth_payload.as_bytes().to_vec());
 
             if auth_bytes.len() > BROKER_MAX_FRAME_BYTES {
                 return Err(ExecutorError::BeforeDispatch(
@@ -131,7 +130,7 @@ impl ExecutorUpstream {
             }
 
             let len = auth_bytes.len() as u32;
-            let mut auth_frame = Vec::with_capacity(4 + auth_bytes.len());
+            let mut auth_frame = Zeroizing::new(Vec::with_capacity(4 + auth_bytes.len()));
             auth_frame.extend_from_slice(&len.to_be_bytes());
             auth_frame.extend_from_slice(&auth_bytes);
 

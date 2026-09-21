@@ -382,13 +382,19 @@ fn handle_connection(
                         );
                     }
                     RpcMethod::Start => {
-                        let claim = db_conn.execute(
+                        match db_conn.execute(
                             "INSERT INTO mutation_claims (client_id, request_id) VALUES (?1, ?2)",
                             rusqlite::params![&current_welcome.client_id, &req.request.request_id],
-                        );
-                        if let Err(rusqlite::Error::SqliteFailure(ref e, _)) = claim {
-                            if e.code == rusqlite::ErrorCode::ConstraintViolation {
+                        ) {
+                            Ok(_) => {},
+                            Err(rusqlite::Error::SqliteFailure(e, _))
+                                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                            {
                                 send_error(&mut stream, "duplicate_mutation");
+                                return;
+                            }
+                            Err(_) => {
+                                send_error(&mut stream, "invalid_frame");
                                 return;
                             }
                         }
@@ -456,8 +462,12 @@ fn handle_connection(
                                     }
                                 }
                                 Err(ExecutorError::AfterDispatch(err_msg)) => {
-                                    // Transition job to OutcomeUnknown on AfterDispatch for mutation
-                                    let _ = transition_job(db_conn, &req.request.request_id, JobState::OutcomeUnknown);
+                                    // Attempt OutcomeUnknown transition; on failure keep the same
+                                    // outcome_unknown-conservative error reply below — never success.
+                                    match transition_job(db_conn, &req.request.request_id, JobState::OutcomeUnknown) {
+                                        Ok(()) => {},
+                                        Err(_) => {},
+                                    }
                                     let reply_val = serde_json::json!({
                                         "version": 1,
                                         "requestId": req.request.request_id,
@@ -675,13 +685,19 @@ fn handle_cancel_and_settle(
         settlement_window_ms,
     };
 
-    let claim = db_conn.execute(
+    match db_conn.execute(
         "INSERT INTO mutation_claims (client_id, request_id) VALUES (?1, ?2)",
         rusqlite::params![client_id, &req.request_id],
-    );
-    if let Err(rusqlite::Error::SqliteFailure(ref e, _)) = claim {
-        if e.code == rusqlite::ErrorCode::ConstraintViolation {
+    ) {
+        Ok(_) => {},
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
             send_error(stream, "duplicate_mutation");
+            return;
+        }
+        Err(_) => {
+            send_error(stream, "invalid_frame");
             return;
         }
     }
@@ -701,7 +717,8 @@ fn handle_cancel_and_settle(
         "success": true,
         "data": {
             "settledRunIds": report.settled,
-            "timedOutRunIds": report.timed_out
+            "timedOutRunIds": report.timed_out,
+            "unknownRunIds": report.unknown
         }
     });
 

@@ -201,6 +201,7 @@ fn test_daemon_smoke_lifecycle() {
     assert_eq!(resp_val["reply"]["method"], "cancelAndSettle");
     assert_eq!(resp_val["reply"]["data"]["settledRunIds"], serde_json::json!([]));
     assert_eq!(resp_val["reply"]["data"]["timedOutRunIds"], serde_json::json!([]));
+    assert_eq!(resp_val["reply"]["data"]["unknownRunIds"], serde_json::json!(["runtime_unknown_0001"]));
 
     drop(stream2);
 

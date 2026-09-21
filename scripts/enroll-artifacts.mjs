@@ -8,7 +8,7 @@
  * Pure node:fs + node:crypto only.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 function printUsageAndExit(message) {
@@ -16,7 +16,7 @@ function printUsageAndExit(message) {
     process.stderr.write(`Error: ${message}\n`);
   }
   process.stderr.write(
-    'Usage: enroll-artifacts.mjs --manifest <path> --name <driver> --platform <platform> --file <artifact> [--type native_binary|npm_entry] [--version <v>] [--team-id <id> | --subject <cn>] [--expect <hash>]\n'
+    'Usage: enroll-artifacts.mjs --manifest <path> --name <driver> --platform <platform> --file <artifact> [--type native_binary|npm_entry] [--version <v>] [--team-id <id> | --subject <cn>] [--expect <hash>] [--force]\n'
   );
   process.exit(1);
 }
@@ -27,10 +27,13 @@ function parseArgs(args) {
     const arg = args[i];
     if (arg.startsWith('--')) {
       const key = arg.slice(2);
-      if (i + 1 >= args.length || args[i + 1].startsWith('--')) {
+      if (key === 'force') {
+        parsed[key] = true;
+      } else if (i + 1 >= args.length || args[i + 1].startsWith('--')) {
         printUsageAndExit(`Missing value for argument --${key}`);
+      } else {
+        parsed[key] = args[++i];
       }
-      parsed[key] = args[++i];
     } else {
       printUsageAndExit(`Unexpected positional argument: ${arg}`);
     }
@@ -49,6 +52,7 @@ const version = args.version;
 const teamId = args['team-id'];
 const subject = args.subject;
 const expectHash = args.expect;
+const force = Boolean(args.force);
 
 if (!manifestPath || manifestPath.trim() === '') {
   printUsageAndExit('Missing required --manifest argument');
@@ -112,7 +116,42 @@ try {
 
 const computedSha256 = createHash('sha256').update(fileBuffer).digest('hex');
 
-if (expectHash) {
+// --expect doubles as content check (fresh enroll: must equal computed hash)
+// and overwrite authorization (re-enroll: must equal enrolled old hash).
+// Overwrite mode takes precedence: when the enrolled hash differs, --expect
+// authorizes against the OLD hash, not the new content.
+
+const existingEntry = manifest.artifacts[name] && typeof manifest.artifacts[name] === 'object' && !Array.isArray(manifest.artifacts[name])
+  ? manifest.artifacts[name]
+  : {};
+
+let enrolledHash;
+if (type === 'npm_entry') {
+  if (typeof existingEntry.sha256 === 'string') {
+    enrolledHash = existingEntry.sha256;
+  }
+} else {
+  const existingPlatforms = existingEntry.platforms && typeof existingEntry.platforms === 'object' && !Array.isArray(existingEntry.platforms)
+    ? existingEntry.platforms
+    : {};
+  const existingPlatformEntry = existingPlatforms[platform] && typeof existingPlatforms[platform] === 'object' && !Array.isArray(existingPlatforms[platform])
+    ? existingPlatforms[platform]
+    : {};
+  if (typeof existingPlatformEntry.sha256 === 'string') {
+    enrolledHash = existingPlatformEntry.sha256;
+  }
+}
+
+const overwriting = enrolledHash && enrolledHash.toLowerCase() !== computedSha256.toLowerCase();
+if (overwriting) {
+  const matchesExpected = expectHash && expectHash.toLowerCase() === enrolledHash.toLowerCase();
+  if (!force && !matchesExpected) {
+    process.stderr.write(
+      `Cannot overwrite existing hash for ${name}@${platform} (${enrolledHash}) with ${computedSha256}: pass --expect <old-hash> or --force\n`
+    );
+    process.exit(1);
+  }
+} else if (expectHash) {
   if (computedSha256.toLowerCase() !== expectHash.toLowerCase()) {
     process.stderr.write(
       `SHA-256 mismatch for ${filePath}: computed ${computedSha256}, expected ${expectHash}\n`
@@ -120,10 +159,6 @@ if (expectHash) {
     process.exit(1);
   }
 }
-
-const existingEntry = manifest.artifacts[name] && typeof manifest.artifacts[name] === 'object' && !Array.isArray(manifest.artifacts[name])
-  ? manifest.artifacts[name]
-  : {};
 
 if (type === 'npm_entry') {
   const updatedEntry = {
@@ -170,9 +205,14 @@ if (type === 'npm_entry') {
   manifest.artifacts[name] = updatedEntry;
 }
 
+const tmpPath = `${manifestPath}.tmp-${process.pid}-${Date.now()}`;
 try {
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  writeFileSync(tmpPath, JSON.stringify(manifest, null, 2) + '\n');
+  renameSync(tmpPath, manifestPath);
 } catch (err) {
+  try {
+    unlinkSync(tmpPath);
+  } catch {}
   process.stderr.write(`Failed to write updated manifest to ${manifestPath}: ${err.message}\n`);
   process.exit(1);
 }

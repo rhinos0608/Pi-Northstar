@@ -22,14 +22,27 @@ function lockPath(projectId: string, rootDir?: string): string {
   return `${brokerEndpoint(projectId, rootDir).rootDir}/broker.lock`;
 }
 
-/** Returns true if the pid in the lock record is demonstrably dead. */
-async function isLockStale(record: BrokerLockRecord): Promise<boolean> {
+/**
+ * Returns true if the pid in the lock record is demonstrably dead (ESRCH).
+ * Throws lock_held if process is alive (signal 0 succeeded or EPERM).
+ * Throws lock_io_error if pid is invalid or unexpected error occurs.
+ */
+function assertLockStaleOrHeld(record: BrokerLockRecord): boolean {
+  if (!Number.isSafeInteger(record.pid) || record.pid <= 0) {
+    throw new BrokerLockError('lock_io_error', `Corrupt lock record: invalid pid ${record.pid}`);
+  }
   try {
-    // Signal 0 checks existence without sending; throws if process not found
     process.kill(record.pid, 0);
-    return false; // process exists
-  } catch {
-    return true; // ESRCH: process does not exist
+    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') {
+      return true;
+    }
+    if (code === 'EPERM') {
+      throw new BrokerLockError('lock_held', `Broker process alive (pid ${record.pid}, EPERM)`);
+    }
+    throw new BrokerLockError('lock_io_error', `Process liveness check failed: ${(err as Error).message}`);
   }
 }
 
@@ -48,40 +61,45 @@ export async function acquireBrokerLock(
   const path = lockPath(projectId, rootDir);
   const record: BrokerLockRecord = { pid: process.pid, startedAt: Date.now(), mode };
 
-  try {
-    const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    await handle.writeFile(JSON.stringify(record));
-    await handle.close();
-    return;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-      throw new BrokerLockError('lock_io_error', `Lock file error: ${(err as Error).message}`);
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      await handle.writeFile(JSON.stringify(record));
+      await handle.close();
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new BrokerLockError('lock_io_error', `Lock file error: ${(err as Error).message}`);
+      }
+    }
+
+    // Lock file exists — check if owner is alive
+    let existing: BrokerLockRecord;
+    try {
+      const raw = await readFile(path, 'utf8');
+      existing = JSON.parse(raw) as BrokerLockRecord;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue;
+      }
+      throw new BrokerLockError('lock_io_error', 'Cannot read existing lock file');
+    }
+
+    const isStale = assertLockStaleOrHeld(existing);
+    if (!isStale) {
+      throw new BrokerLockError('lock_held', `Broker already running (pid ${existing.pid}, mode: ${existing.mode})`);
+    }
+
+    // Owner is dead — safe to remove and retry
+    try {
+      await rm(path, { force: true });
+    } catch {
+      throw new BrokerLockError('stale_lock_removal_failed', 'Cannot remove stale lock file');
     }
   }
 
-  // Lock file exists — check if owner is alive
-  let existing: BrokerLockRecord;
-  try {
-    const raw = await readFile(path, 'utf8');
-    existing = JSON.parse(raw) as BrokerLockRecord;
-  } catch {
-    throw new BrokerLockError('lock_io_error', 'Cannot read existing lock file');
-  }
-
-  if (!(await isLockStale(existing))) {
-    throw new BrokerLockError('lock_held', `Broker already running (pid ${existing.pid}, mode: ${existing.mode})`);
-  }
-
-  // Owner is dead — safe to remove and retake
-  try {
-    await rm(path, { force: true });
-  } catch {
-    throw new BrokerLockError('stale_lock_removal_failed', 'Cannot remove stale lock file');
-  }
-
-  const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-  await handle.writeFile(JSON.stringify(record));
-  await handle.close();
+  throw new BrokerLockError('lock_held', 'Failed to acquire broker lock after retries: lock contested');
 }
 
 /** Release the advisory lock. Only removes if current pid owns it. */

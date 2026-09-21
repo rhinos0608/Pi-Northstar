@@ -15,18 +15,15 @@ pub const TOKEN_TTL_SECS: u64 = 60;
 
 type HmacSha256 = Hmac<Sha256>;
 
+use zeroize::ZeroizeOnDrop;
+
 /// In-memory broker authentication authority.
 /// rootSecret is zeroized on Drop via ZeroizeOnDrop from zeroize crate.
+#[derive(ZeroizeOnDrop)]
 pub struct BrokerAuth {
+    #[zeroize(skip)]
     pub epoch: String,
     root_secret: [u8; 32],
-}
-
-impl Drop for BrokerAuth {
-    fn drop(&mut self) {
-        // Best-effort zeroize: overwrite secret bytes before release
-        for b in self.root_secret.iter_mut() { *b = 0; }
-    }
 }
 
 impl BrokerAuth {
