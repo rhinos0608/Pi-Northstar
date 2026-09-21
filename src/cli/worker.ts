@@ -33,7 +33,12 @@ async function main(): Promise<void> {
       output({ ok: true, data: result });
     } catch (error) {
       const commandResult = extractCommandResult(error);
-      if (commandResult) output({ ok: true, data: error });
+      if (commandResult) {
+        // Thrown canonical failures keep validated result under
+        // data.details.northstarCommand; nonzero exit marks failure.
+        // Raw Error never serializes (JSON.stringify(Error) is '{}').
+        output({ ok: false, error: { code: commandResult.error?.code ?? 'command_failed', message: commandResult.error?.message ?? 'Command failed.' }, data: { details: { northstarCommand: commandResult } } }, 1);
+      }
       else output({ ok: false, error: { code: 'command_result_invalid', message: 'Command result invalid.' } }, 1);
     }
   } catch {

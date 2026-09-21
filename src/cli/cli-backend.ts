@@ -13,6 +13,7 @@ import {
 import { retrieveWebAccessCorpus } from '../web/access/web-access-retrieve.js';
 import { runWebAccessCachedSourceCheck } from '../web/access/web-access-cached-source-check.js';
 import { formatWebAccessSourceCheck } from '../web/access/web-access-presentation.js';
+import { validateCommandResult } from '../commands/command-result.js';
 import { textResult } from '../core/tool-output.js';
 import { getProcessLocalBridgeToken } from '../chrome/chrome-profile-adapter.js';
 import { appendUserToolBinsToPath } from '../process/python-child-env.js';
@@ -78,6 +79,20 @@ function cliAbortError(): Error {
   return error;
 }
 
+/** Rebuild native-shaped thrown failure: validated commandResult rides
+ *  non-enumerable (mirrors handler attach), message stays readable. */
+function cliBackendError(envelope: CliEnvelope): Error {
+  const error = new Error(envelope.error?.message ?? 'CLI backend failed');
+  const candidate = (envelope.data as { details?: { northstarCommand?: unknown } } | undefined)?.details?.northstarCommand;
+  if (candidate !== undefined) {
+    const validation = validateCommandResult(candidate);
+    if (validation.ok && validation.result !== undefined) {
+      Object.defineProperty(error, 'commandResult', { value: validation.result, enumerable: false });
+    }
+  }
+  return error;
+}
+
 export class CliSearchBackend implements SearchBackend {
   private readonly corpus: WebAccessContentStore = createWebAccessContentStore();
   constructor(
@@ -95,7 +110,7 @@ export class CliSearchBackend implements SearchBackend {
     }
     const commandId = mapCliToolToCommandId(name, args);
     const envelope = await this.run(name, commandId, args, options.signal, options.timeout);
-    if (!envelope.ok) throw new Error(envelope.error?.message ?? 'CLI backend failed');
+    if (!envelope.ok) throw cliBackendError(envelope);
     if (!envelope.data) throw new Error('CLI backend returned no data.');
     return populateCliCorpus(this.corpus, name, envelope.data);
   }

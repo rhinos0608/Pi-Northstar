@@ -32,11 +32,11 @@ test('CliSearchBackend child process works from a foreign cwd', async () => {
     process.chdir(dir);
     // 'fetch' maps to the canonical fetch.read command. An invalid URL is
     // rejected deterministically inside the child handler with no network.
-    // Resolving with the handler's invalid_input code (instead of a mapping
+    // Rejecting with the handler's invalid_input commandResult (instead of a mapping
     // or spawn error) proves the absolute worker entrypoint resolved and
     // executed while the cwd was foreign.
-    const result = await backend.callTool('fetch', { url: 'notaurl' }, { timeout: 60_000 });
-    assert.equal(result.code, 'invalid_input');
+    const error = await backend.callTool('fetch', { url: 'notaurl' }, { timeout: 60_000 }).then(() => { throw new Error('expected fetch to reject'); }, (caught) => caught);
+    assert.equal((error as { commandResult?: { error?: { code?: string } } }).commandResult?.error?.code, 'invalid_input');
   } finally {
     process.chdir(originalCwd);
     await backend.close();

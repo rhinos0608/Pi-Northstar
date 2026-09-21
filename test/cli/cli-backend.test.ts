@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appendCliStdout, buildCliEnvironment, createCliStdoutAccumulator, mapCliToolToCommandId } from '../../src/cli/cli-backend.js';
 import { buildPythonChildEnvironment } from '../../src/process/python-child-env.js';
@@ -45,9 +45,9 @@ test('parent maps supported tools to canonical command ids and rejects unsupport
 
 test('compiled worker accepts closed canonical request and preserves handler result', async () => {
   const result = await runCompiledWorker({ commandId: 'fetch.read', args: {} });
-  assert.equal(result.code, 0);
-  assert.equal(result.output.ok, true);
-  assert.equal((result.output.data as Record<string, unknown>).code, 'invalid_input');
+  assert.equal(result.code, 1);
+  assert.equal(result.output.ok, false);
+  assert.equal((result.output.data as { details: { northstarCommand: { error: { code: string } } } }).details.northstarCommand.error.code, 'invalid_input');
 });
 
 test('compiled worker rejects unexpected request keys', async () => {
@@ -76,7 +76,7 @@ const DIFFBOT_KEYS = [
 
 test('buildCliEnvironment appends the standard user tool bin after PATH for social CLI discovery', () => {
   const env = buildCliEnvironment({ PATH: '/usr/bin:/bin', HOME: '/Users/test' }, 'social');
-  assert.equal(env.PATH, '/usr/bin:/bin:/Users/test/.local/bin');
+  assert.equal(env.PATH, ['/usr/bin:/bin', join('/Users/test', '.local', 'bin')].join(delimiter));
 });
 
 test('buildCliEnvironment drops NODE_OPTIONS (CLI child sets --import tsx explicitly)', () => {

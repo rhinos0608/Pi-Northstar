@@ -15,6 +15,52 @@ interface CliResult {
   };
 }
 
+const BROKER_SERVE_USAGE =
+  "northstar broker serve --project-id ID [--root-dir DIR] [--json|--agent]";
+
+const JOBS_STATUS_USAGE =
+  "northstar jobs status --project-id ID --request-id ID [--root-dir DIR] [--json|--agent]";
+
+const SOCIAL_SEARCH_USAGE =
+  "northstar social search --platform PLATFORM --query QUERY [--post-id ID] [--comment-id ID] [--user USER] [--community COMMUNITY] [--topic TOPIC] [--url URL] [--feed-variant VARIANT] [--sort SORT] [--time-range RANGE] [--include-replies] [--limit N] [--cursor CURSOR] [--json|--agent]";
+const SOCIAL_READ_USAGE =
+  "northstar social read --platform PLATFORM --action get_post|get_thread|get_comments|get_profile|get_community|get_feed|get_followers|get_user_posts|get_trending|get_community_posts [--query QUERY] [--post-id ID] [--comment-id ID] [--user USER] [--community COMMUNITY] [--topic TOPIC] [--url URL] [--feed-variant VARIANT] [--sort SORT] [--time-range RANGE] [--include-replies] [--limit N] [--cursor CURSOR] [--json|--agent]";
+
+const SOCIAL_VALUE_FLAGS: Readonly<Record<string, string>> = {
+  "--platform": "platform",
+  "--action": "action",
+  "--query": "query",
+  "--post-id": "postId",
+  "--comment-id": "commentId",
+  "--user": "user",
+  "--community": "community",
+  "--topic": "topic",
+  "--url": "url",
+  "--feed-variant": "feedVariant",
+  "--sort": "sort",
+  "--time-range": "timeRange",
+  "--cursor": "cursor",
+};
+
+const MEDIA_SEARCH_USAGE =
+  "northstar media search --platform youtube|bilibili --query QUERY [--limit N] [--cursor CURSOR] [--json|--agent]";
+const MEDIA_HOT_USAGE =
+  "northstar media hot --platform youtube|bilibili [--limit N] [--cursor CURSOR] [--json|--agent]";
+const MEDIA_DETAILS_USAGE =
+  "northstar media details --platform youtube|bilibili [--id ID] [--url URL] [--limit N] [--cursor CURSOR] [--json|--agent]";
+const MEDIA_TRANSCRIPT_USAGE =
+  "northstar media transcript --platform youtube|bilibili [--id ID] [--url URL] [--limit N] [--cursor CURSOR] [--json|--agent]";
+const MEDIA_FEED_USAGE =
+  "northstar media feed --url URL [--platform rss] [--limit N] [--cursor CURSOR] [--json|--agent]";
+
+const MEDIA_VALUE_FLAGS: Readonly<Record<string, string>> = {
+  "--platform": "platform",
+  "--id": "id",
+  "--url": "url",
+  "--query": "query",
+  "--cursor": "cursor",
+};
+
 if (isMainModule()) {
   try {
     const result = await runCommand(
@@ -1105,27 +1151,6 @@ async function githubTrendingCommand(
   }, parsed.mode);
 }
 
-const SOCIAL_SEARCH_USAGE =
-  "northstar social search --platform PLATFORM --query QUERY [--post-id ID] [--comment-id ID] [--user USER] [--community COMMUNITY] [--topic TOPIC] [--url URL] [--feed-variant VARIANT] [--sort SORT] [--time-range RANGE] [--include-replies] [--limit N] [--cursor CURSOR] [--json|--agent]";
-const SOCIAL_READ_USAGE =
-  "northstar social read --platform PLATFORM --action get_post|get_thread|get_comments|get_profile|get_community|get_feed|get_followers|get_user_posts|get_trending|get_community_posts [--query QUERY] [--post-id ID] [--comment-id ID] [--user USER] [--community COMMUNITY] [--topic TOPIC] [--url URL] [--feed-variant VARIANT] [--sort SORT] [--time-range RANGE] [--include-replies] [--limit N] [--cursor CURSOR] [--json|--agent]";
-
-const SOCIAL_VALUE_FLAGS: Readonly<Record<string, string>> = {
-  "--platform": "platform",
-  "--action": "action",
-  "--query": "query",
-  "--post-id": "postId",
-  "--comment-id": "commentId",
-  "--user": "user",
-  "--community": "community",
-  "--topic": "topic",
-  "--url": "url",
-  "--feed-variant": "feedVariant",
-  "--sort": "sort",
-  "--time-range": "timeRange",
-  "--cursor": "cursor",
-};
-
 async function socialCommandResult(
   args: string[],
   env: Record<string, string | undefined>,
@@ -1266,25 +1291,6 @@ async function socialCommandResult(
     return cliToolError(error);
   }
 }
-
-const MEDIA_SEARCH_USAGE =
-  "northstar media search --platform youtube|bilibili --query QUERY [--limit N] [--cursor CURSOR] [--json|--agent]";
-const MEDIA_HOT_USAGE =
-  "northstar media hot --platform youtube|bilibili [--limit N] [--cursor CURSOR] [--json|--agent]";
-const MEDIA_DETAILS_USAGE =
-  "northstar media details --platform youtube|bilibili [--id ID] [--url URL] [--limit N] [--cursor CURSOR] [--json|--agent]";
-const MEDIA_TRANSCRIPT_USAGE =
-  "northstar media transcript --platform youtube|bilibili [--id ID] [--url URL] [--limit N] [--cursor CURSOR] [--json|--agent]";
-const MEDIA_FEED_USAGE =
-  "northstar media feed --url URL [--platform rss] [--limit N] [--cursor CURSOR] [--json|--agent]";
-
-const MEDIA_VALUE_FLAGS: Readonly<Record<string, string>> = {
-  "--platform": "platform",
-  "--id": "id",
-  "--url": "url",
-  "--query": "query",
-  "--cursor": "cursor",
-};
 
 async function mediaCommandResult(
   args: string[],
@@ -2168,9 +2174,6 @@ async function searchCommandResult(
   }
 }
 
-const BROKER_SERVE_USAGE =
-  "northstar broker serve --project-id ID [--root-dir DIR] [--json|--agent]";
-
 async function brokerCommandResult(
   args: string[],
   _env: Record<string, string | undefined>,
@@ -2228,9 +2231,6 @@ async function brokerCommandResult(
     return cliToolError(error);
   }
 }
-
-const JOBS_STATUS_USAGE =
-  "northstar jobs status --project-id ID --request-id ID [--root-dir DIR] [--json|--agent]";
 
 async function jobsCommandResult(
   args: string[],
