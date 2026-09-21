@@ -256,7 +256,7 @@ function socialBody(
     url: requiredFields.has('url')
       ? Type.String({ minLength: 1, description: 'Canonical platform URL (selectors derived from closed path shapes).' })
       : Type.Optional(Type.String({ minLength: 1, description: 'Canonical platform URL (selectors derived from closed path shapes).' })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: SOCIAL_MAX_LIMIT, description: 'Max items. Over-cap clamps with warning at runtime.' })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: SOCIAL_MAX_LIMIT, description: 'Max items 1..100. Migrated actions (search + six reads) reject over-cap values; legacy unmigrated actions may still clamp with warning.' })),
     cursor: Type.Optional(Type.String({ maxLength: MAX_SOCIAL_CURSOR_LENGTH, description: 'Opaque pagination cursor.' })),
     ...socialAuxFields(auxSpecFor(platform, action)),
   };

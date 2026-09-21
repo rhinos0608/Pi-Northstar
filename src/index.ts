@@ -1,12 +1,12 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { createSearchBackend, resultToText, type SearchBackend } from './backend.js';
+import { createSearchBackend, resultToText, type BackendCallResult, type SearchBackend } from './backend.js';
 import { normalizeProviderPayload } from './core/payload.js';
 import { registerGitHubTool } from './github/github.js';
 import { callSetupTool, ensureFirstStartBootstrap } from './setup/bootstrap.js';
 import { loadSearchMcpEnvironment, resolveSparqlConfig } from './setup/local-config.js';
 import { PROVIDER_DESCRIPTORS } from './setup/providers.js';
-import { CHANNEL_CAPABILITIES, assertPublicToolBudget } from './capabilities.js';
+import { CHANNEL_CAPABILITIES, PUBLIC_TOOL_NAMES, assertPublicToolBudget, parsePublicToolAllowlist } from './capabilities.js';
 import { guardText } from './core/tool-output.js';
 import { validateBrowserRequest } from './browser/browser-policy.js';
 import { isExternalToolName, wrapUntrustedText } from './core/untrusted-content.js';
@@ -49,6 +49,9 @@ import { desktopEnabled } from './desktop/desktop-policy.js';
 import { getAgentJobSnapshot } from './web/agent/agent-jobs.js';
 import { setLeafRuntimeProvider, shutdownLeafRuntime } from './web/agent/agent-rpc.js';
 import { LeafRuntimeClient } from './runtime/leaf-runtime-client.js';
+import { createCommandContext } from './commands/command-context.js';
+import { commandHandler } from './commands/command-registry.js';
+import { validateCommandResult, type NorthstarCommandResultV1 } from './commands/command-result.js';
 
 const reachFamilies = ['social', 'media', 'web', 'dev', 'research', 'browser'] as const;
 const setupActions = ['auto', 'status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies', 'login'] as const;
@@ -124,6 +127,42 @@ export function classifySearchFailure(error: unknown): { retryable: boolean; cod
     return { retryable: false, code: 'invalid_response' };
   }
   return { retryable: true, code: 'upstream_error' };
+}
+
+/** Authoritative ledger failure from a canonical command error record.
+ *  Only timeout/response_too_large/invalid_response keep exact ledger codes;
+ *  every other code (auth, rate-limit, upstream, ...) maps to upstream_error
+ *  while the authoritative retryable bit is retained verbatim. */
+export function ledgerFailureFromCommandError(error: unknown): { retryable: boolean; code: LedgerFailureCode } {
+  const record = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : undefined;
+  const code = record?.code === 'timeout' ? 'timeout'
+    : record?.code === 'response_too_large' ? 'response_too_large'
+      : record?.code === 'invalid_response' ? 'invalid_response' : 'upstream_error';
+  return { code, retryable: record?.retryable === true };
+}
+
+/** Shape-safe commandResult carried by a thrown canonical-handler error
+ *  (non-enumerable `commandResult` attached by the handler). Undefined when
+ *  the thrown value carries no usable command result — the message heuristic
+ *  stays the fallback only in that case. */
+export function thrownCommandResult(error: unknown): NorthstarCommandResultV1 | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const candidate = (error as { commandResult?: unknown }).commandResult;
+  if (candidate === undefined) return undefined;
+  const validation = validateCommandResult(candidate);
+  if (!validation.ok || validation.result === undefined) return undefined;
+  return validation.result;
+}
+
+/** Thrown failure is an abort/cancel signal: caller signal first, then the
+ *  authoritative validated outcome (cancelled cancels; failed records failure),
+ *  with the AbortError name heuristic only when no valid result exists. */
+function isThrownAbort(error: unknown, command: NorthstarCommandResultV1 | undefined, signal: AbortSignal | undefined): boolean {
+  if (signal?.aborted) return true;
+  if (command !== undefined) return command.outcome === 'cancelled';
+  if (error instanceof Error && error.name === 'AbortError') return true;
+  if (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError') return true;
+  return false;
 }
 
 function abortLedgerError(): Error {
@@ -223,6 +262,7 @@ interface RunLedgeredSearchParams {
   key: string;
   params: Record<string, unknown>;
   signal: AbortSignal | undefined;
+  toolCallId: string;
 }
 
 async function runLedgeredSearch({
@@ -232,6 +272,7 @@ async function runLedgeredSearch({
   key,
   params,
   signal,
+  toolCallId,
 }: RunLedgeredSearchParams): Promise<AgentToolResult<unknown>> {
   let route;
   try {
@@ -249,12 +290,29 @@ async function runLedgeredSearch({
     return result;
   }
   try {
-    const result = await callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
-    ledger.completeSuccess(key, result);
+    const result = await callPiSearchHandler(client, route.tool, route.args, signal, route.timeout, env, toolCallId);
+    const resultDetails = isRecord(result.details) ? result.details : undefined;
+    const command = (isRecord(resultDetails?.details) ? resultDetails.details.northstarCommand : resultDetails?.northstarCommand);
+    if (isRecord(command) && (command.outcome === 'failed' || command.outcome === 'cancelled')) {
+      if (command.outcome === 'cancelled' || signal?.aborted) {
+        ledger.cancel(key);
+      } else {
+        const error = isRecord(command.error) ? command.error : undefined;
+        ledger.completeFailure(key, ledgerFailureFromCommandError(error));
+      }
+    } else {
+      ledger.completeSuccess(key, result);
+    }
     return result;
   } catch (error) {
-    if (signal?.aborted) ledger.cancel(key);
-    else ledger.completeFailure(key, classifySearchFailure(error));
+    const command = thrownCommandResult(error);
+    if (isThrownAbort(error, command, signal)) {
+      ledger.cancel(key);
+    } else if (command !== undefined && command.outcome === 'failed') {
+      ledger.completeFailure(key, ledgerFailureFromCommandError(command.error));
+    } else {
+      ledger.completeFailure(key, classifySearchFailure(error));
+    }
     throw error;
   }
 }
@@ -266,7 +324,7 @@ export function createWebSearchExecute(
   env: Record<string, string | undefined>,
   ledger: WebSearchLedger = new WebSearchLedger(),
 ): (toolCallId: string, params: unknown, signal: AbortSignal | undefined) => Promise<AgentToolResult<unknown>> {
-  return async (_toolCallId, params, signal) => {
+  return async (toolCallId, params, signal) => {
     const current = (params ?? {}) as Record<string, unknown>;
     const queries = Array.isArray(current.queries)
       ? current.queries.filter((entry): entry is string => typeof entry === 'string')
@@ -278,7 +336,7 @@ export function createWebSearchExecute(
     if (queries.length === 0 || typeof current.cursor === 'string') {
       const route = buildSearchRoute(current);
       if (route.tool === 'agent_job') return agentJobPointerResult(route);
-      return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
+      return callPiSearchHandler(client, route.tool, route.args, signal, route.timeout, env, toolCallId);
     }
     const options = searchLedgerOptions(current);
     const begun = ledger.begin(queries, options, signal);
@@ -304,7 +362,7 @@ export function createWebSearchExecute(
         if (signal?.aborted) throw abortLedgerError();
         const next = ledger.begin(queries, options, signal);
         if (next.status === 'run') {
-          return runLedgeredSearch({ client, env, ledger, key: next.key, params: current, signal });
+          return runLedgeredSearch({ client, env, ledger, key: next.key, params: current, signal, toolCallId });
         }
         if (next.status === 'coalesced') {
           pending = next.promise;
@@ -319,19 +377,109 @@ export function createWebSearchExecute(
       // Livelock cap hit: fail closed without inventing a false suppression.
       throw new LedgerCoalesceError();
     }
-    return runLedgeredSearch({ client, env, ledger, key: begun.key, params: current, signal });
+    return runLedgeredSearch({ client, env, ledger, key: begun.key, params: current, signal, toolCallId });
   };
 }
 
+/** Session-scoped Pi fetch dispatch: buildFetchRoute validates the public
+ *  5-branch union first (reject-on-overflow preserved), then the canonical
+ *  fetch.read handler executes with surface 'pi' and the tool-call invocation
+ *  id. Test-only context deps (lookup/fetchPageText) ride the command context;
+ *  production leaves them absent. Never touches SearchBackend/MCP/native
+ *  dispatcher by construction. */
+export interface FetchExecuteDeps {
+  lookup?: import('./commands/command-context.js').CommandContext['lookup'];
+  fetchPageText?: import('./commands/command-context.js').CommandContext['fetchPageText'];
+}
+
+export function createFetchExecute(
+  env: Record<string, string | undefined>,
+  deps: FetchExecuteDeps = {},
+): (toolCallId: string, params: unknown, signal: AbortSignal | undefined) => Promise<AgentToolResult<unknown>> {
+  return async (toolCallId, params, signal) => {
+    const current = (((params as { request?: unknown }).request ?? params) ?? {}) as Record<string, unknown>;
+    const route = buildFetchRoute(current as unknown as FetchRouteParams);
+    const context = createCommandContext({
+      surface: 'pi',
+      env,
+      invocationId: toolCallId,
+      ...(signal !== undefined ? { signal } : {}),
+      ...(deps.lookup !== undefined ? { lookup: deps.lookup } : {}),
+      ...(deps.fetchPageText !== undefined ? { fetchPageText: deps.fetchPageText } : {}),
+    });
+    const result = await commandHandler<Record<string, unknown>, BackendCallResult>('fetch.read').execute(route.args, context);
+    return {
+      content: [{ type: 'text', text: guardText(resultToText(result), { env }) }],
+      details: result,
+    };
+  };
+}
+
+/** Resolve the validated merged operator env with probe gating.
+ * Step 1 loads merged config/env with login-shell fallback disabled so the
+ * allowlist decision never triggers a credential probe. Step 2 parses and
+ * validates the allowlist (malformed rejects here, before any client, tool,
+ * or service initialization). Step 3 enables the login-shell fallback only
+ * for a valid non-empty allowlist; blank/unset/malformed allowlists cause
+ * zero probes. Explicit process blanks override .env values because the
+ * validated merged env (not raw process.env) feeds the allowlist. */
+export function resolveExtensionEnv(
+  baseEnv: Record<string, string | undefined>,
+  loadEnv: (env: Record<string, string | undefined>, options?: { allowLoginShellFallback?: boolean }) => Record<string, string | undefined> = loadSearchMcpEnvironment,
+): { env: Record<string, string | undefined>; allowedTools: Set<string> } {
+  const noProbeEnv = loadEnv(baseEnv, { allowLoginShellFallback: false });
+  const allowedTools = new Set<string>(parsePublicToolAllowlist(noProbeEnv));
+  if (allowedTools.size === 0) return { env: noProbeEnv, allowedTools };
+  return { env: loadEnv(baseEnv, { allowLoginShellFallback: true }), allowedTools };
+}
+
+/** Injectable backend factory: malformed allowlists reject in
+ *  resolveExtensionEnv before this runs, so only validated sets arrive. */
+export type SearchBackendFactory = (env: Record<string, string | undefined>) => SearchBackend;
+
+/** Inert zero-tool backend: performs no corpus/process/service
+ *  initialization and throws if somehow called. close stays safe. */
+function inertSearchBackend(): SearchBackend {
+  return {
+    callTool: async () => {
+      throw new Error('search backend unavailable: no native tools authorized by PI_SEARCH_NATIVE_TOOLS');
+    },
+    close: async () => {},
+  };
+}
+
+/** Authorized backend resolution: empty allowlists never touch the factory
+ *  (zero corpus/process/service init); non-empty allowlists call it once. */
+export function resolveSearchBackend(
+  env: Record<string, string | undefined>,
+  allowedTools: ReadonlySet<string>,
+  factory: SearchBackendFactory = createSearchBackend,
+): SearchBackend {
+  if (allowedTools.size === 0) return inertSearchBackend();
+  return factory(env);
+}
+
 export default function (pi: ExtensionAPI): void {
-  const env = loadSearchMcpEnvironment(process.env, { allowLoginShellFallback: true });
-  const client = createSearchBackend(env);
-  const desktop = desktopEnabled(env) ? new DesktopService(undefined, env, () => Promise.resolve(false)) : undefined;
+  // Authorization before credential probing: the allowlist is parsed from the
+  // merged env with fallback disabled, so blank/unset/malformed allowlists
+  // cause zero login-shell probes and malformed values reject before any
+  // backend, tool, or service initialization. Credentials never imply
+  // authorization: the code-owned allowlist gates native exposure.
+  const { env, allowedTools } = resolveExtensionEnv(process.env);
+  // Backend and desktop are created only after allowlist validation, using the
+  // final probed-or-unprobed merged env.
+  const client = resolveSearchBackend(env, allowedTools);
+  // Deferred desktop init: avoid constructing DesktopService unless desktop is
+  // both allowlisted and configured.
+  const desktop = allowedTools.has('desktop') && desktopEnabled(env) ? new DesktopService(undefined, env, () => Promise.resolve(false)) : undefined;
   // Public surface budget (max nine tools): fail closed on silent growth.
   // Wraps before any registrar below so github/expansion tools count too.
+  // Canonical public tools not allowlisted are silently skipped; slash commands
+  // (registerCommand) are never gated by this wrapper.
   const registeredToolNames: string[] = [];
   const innerRegisterTool = pi.registerTool.bind(pi);
   pi.registerTool = ((tool: { name: string }) => {
+    if ((PUBLIC_TOOL_NAMES as readonly string[]).includes(tool.name) && !allowedTools.has(tool.name as (typeof PUBLIC_TOOL_NAMES)[number])) return;
     registeredToolNames.push(tool.name);
     assertPublicToolBudget(registeredToolNames);
     (innerRegisterTool as (tool: unknown) => void)(tool);
@@ -423,8 +571,7 @@ export default function (pi: ExtensionAPI): void {
       ]),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const route = buildFetchRoute(((params as { request?: FetchRouteParams }).request ?? params) as FetchRouteParams);
-      return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
+      return createFetchExecute(env)(_toolCallId, params, signal);
     },
   });
 
@@ -474,6 +621,28 @@ export default function (pi: ExtensionAPI): void {
       },
     });
   }
+}
+
+async function callPiSearchHandler(
+  client: SearchBackend,
+  name: string,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  timeout: number | undefined,
+  env: Record<string, string | undefined>,
+  toolCallId: string,
+): Promise<AgentToolResult<unknown>> {
+  const commandId = name === 'search' || name === 'web_search' ? 'search.web' : name === 'research' ? 'research.search' : undefined;
+  if (commandId === undefined) return callSearchMcpTool(client, name, args, signal, timeout, env);
+  const context = createCommandContext({
+    surface: 'pi', env, invocationId: toolCallId,
+    ...(signal !== undefined ? { signal } : {}),
+  });
+  const result = await commandHandler<Record<string, unknown>, BackendCallResult>(commandId).execute(args, context);
+  return {
+    content: [{ type: 'text', text: guardText(resultToText(result), { env }) }],
+    details: result,
+  };
 }
 
 async function callSearchMcpTool(

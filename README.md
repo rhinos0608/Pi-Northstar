@@ -4,7 +4,7 @@
 
 Pi‑Northstar is a research and computer-use extension for Pi. It combines fused web search, exact-source research, evidence-first agent jobs, GitHub acquisition, social reads, knowledge graphs, browser automation, desktop control, and opt-in media/vision behind a deliberately small model-facing surface.
 
-**Nine public tools maximum. Provider choice stays operator-owned. External content stays evidence, never authority.**
+**Nine public tools maximum. Native Pi tools default to zero and require an operator-owned exact allowlist. Provider choice stays operator-owned. External content stays evidence, never authority.**
 
 `Node 24+` · `MIT` · `Pi extension` · `zero-config web search`
 
@@ -69,7 +69,7 @@ Nine is a **hard ceiling**, not a promise that all nine tools are registered in 
 | `desktop` | Opt-in native window observation and interaction via Cua Driver. |
 | `agent_poll` | Reads the canonical snapshot of a job created by `web_search` with `mode:"agent"`. |
 
-`media` is **not** a tenth model tool. It is an internal/CLI acquisition family used by fetch specialization and native dispatch for YouTube, Bilibili, RSS, and Atom.
+Native Pi tools are disabled by default, regardless of configured credentials. Set `PI_SEARCH_NATIVE_TOOLS` to a comma-separated exact list of canonical names (`web_search,fetch,github,social,kg,graph,browser,desktop,agent_poll`) to opt in. Unknown, legacy, internal, duplicate, or malformed names reject at startup. `media` is **not** a tenth model tool. It is an internal/CLI acquisition family used by fetch specialization and native dispatch for YouTube, Bilibili, RSS, and Atom.
 
 ### `web_search`
 
