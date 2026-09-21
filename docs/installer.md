@@ -48,7 +48,8 @@ cat /var/log/northstar/broker.err
 ```
 
 ### Signature Verification Commands
-Verify the `.pkg` installer signature and notarization before running:
+Verify the `.pkg` installer signature and notarization before running.
+Note: Digital code signing runs on CI builds whenever certificate secrets are present; only Apple notarization submission and stapling are tag-gated (requiring git release tag `v*` and notary secrets).
 ```bash
 # Verify installer signature
 pkgutil --check-signature northstar-broker.pkg
@@ -71,10 +72,16 @@ sudo launchctl bootout system/com.pi.northstar.broker 2>/dev/null || sudo launch
 sudo rm -f /Library/LaunchDaemons/com.pi.northstar.broker.plist
 sudo rm -f /usr/local/bin/northstar-broker
 
-# 3. Delete isolated dscl pool accounts (UIDs 451-454)
+# 3. Delete isolated dscl pool accounts (UIDs 451-454) and clean HiddenUsersList
+LOGINWINDOW_PLIST="/Library/Preferences/com.apple.loginwindow"
 for i in 1 2 3 4; do
   sudo dscl . -delete /Users/_northstar_pool_$i 2>/dev/null || true
 done
+# Remove pool accounts from loginwindow HiddenUsersList
+# If only Northstar accounts are present in HiddenUsersList, delete key:
+#   sudo defaults delete "$LOGINWINDOW_PLIST" HiddenUsersList
+# Or filter individually via plutil/PlistBuddy/defaults:
+sudo plutil -replace HiddenUsersList -xml "$(sudo defaults read "$LOGINWINDOW_PLIST" HiddenUsersList 2>/dev/null | grep -v '_northstar_pool_' | plutil -convert xml1 - -o - 2>/dev/null || echo '<array/>')" "$LOGINWINDOW_PLIST" 2>/dev/null || sudo defaults delete "$LOGINWINDOW_PLIST" HiddenUsersList 2>/dev/null || true
 
 # 4. Optional: Remove log directory
 sudo rm -rf /var/log/northstar

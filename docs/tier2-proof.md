@@ -29,59 +29,59 @@
 #### Linux Exact Command Sequence (systemd .deb / .rpm)
 ```bash
 # 1. Install package non-interactively
-sudo dpkg -i dist/northstar-worker-service_amd64.deb || sudo apt-get install -f -y
-# (For RHEL/Fedora: sudo rpm -ivh dist/northstar-worker-service.x86_64.rpm)
+sudo dpkg -i dist/northstar-broker_amd64.deb || sudo apt-get install -f -y
+# (For RHEL/Fedora: sudo rpm -ivh dist/northstar-broker.x86_64.rpm)
 
 # 2. Assert systemd unit installed and active
-sudo systemctl is-enabled northstar-worker-service.service
-sudo systemctl status northstar-worker-service.service
+sudo systemctl is-enabled northstar-broker.service
+sudo systemctl status northstar-broker.service
 
 # 3. Assert binary permissions (root-owned, non-world-writable)
-test "$(stat -c '%u:%g:%a' /usr/local/bin/northstar-worker-service)" = "0:0:755"
+test "$(stat -c '%u:%g:%a' /usr/local/bin/northstar-broker)" = "0:0:755"
 
 # 4. Uninstall cleanly
-sudo dpkg -r northstar-worker-service
-sudo systemctl status northstar-worker-service.service && exit 1 || true
+sudo dpkg -r northstar-broker
+sudo systemctl status northstar-broker.service && exit 1 || true
 ```
 
 #### macOS Exact Command Sequence (.pkg installer)
 ```bash
 # 1. Install component package to target root
-sudo installer -pkg dist/northstar-worker-service.pkg -target /
+sudo installer -pkg dist/northstar-broker.pkg -target /
 
 # 2. Assert launchd daemon is registered and loaded
-sudo launchctl list | grep com.pi.northstar.worker-service
+sudo launchctl list | grep com.pi.northstar.broker
 
 # 3. Assert binary permissions
-test "$(stat -f '%u:%g:%Op' /Library/PrivilegedHelperTools/northstar-worker-service)" = "0:0:755"
+test "$(stat -f '%u:%g:%Op' /usr/local/bin/northstar-broker)" = "0:0:755"
 
-# 4. Assert worker user pool accounts exist (UIDs 451-458)
-dscl . -read /Users/_northstar_pool_0 UniqueID | grep -q "451"
+# 4. Assert worker user pool accounts exist (UIDs 451-454)
+dscl . -read /Users/_northstar_pool_1 UniqueID | grep -q "451"
 
 # 5. Uninstall cleanly
-sudo launchctl bootout system/com.pi.northstar.worker-service
-sudo rm -f /Library/LaunchDaemons/com.pi.northstar.worker-service.plist
-sudo rm -f /Library/PrivilegedHelperTools/northstar-worker-service
+sudo launchctl bootout system/com.pi.northstar.broker
+sudo rm -f /Library/LaunchDaemons/com.pi.northstar.broker.plist
+sudo rm -f /usr/local/bin/northstar-broker
 ```
 
 #### Windows Exact Command Sequence (.msi installer)
 ```powershell
 # 1. Install MSI silently with logging
-Start-Process msiexec.exe -Wait -ArgumentList "/i dist\northstar-worker-service.msi /qn /l*v msi_install.log"
+Start-Process msiexec.exe -Wait -ArgumentList "/i dist\northstar-broker.msi /qn /l*v msi_install.log"
 
 # 2. Assert Windows service installed and running
-$svc = Get-Service -Name "NorthstarWorkerService"
+$svc = Get-Service -Name "NorthstarBroker"
 if ($svc.Status -ne "Running") { throw "Service not running: $($svc.Status)" }
 
 # 3. Assert installed files located in Program Files and ACL protected
-$path = "${env:ProgramFiles}\Pi-Northstar\northstar-worker-service.exe"
+$path = "${env:ProgramFiles}\Northstar\northstar-broker.exe"
 $acl = Get-Acl -Path $path
 if ($acl.Owner -notmatch "Builtin\\Administrators|NT SERVICE|SYSTEM") {
     throw "Insecure owner: $($acl.Owner)"
 }
 
 # 4. Uninstall cleanly
-Start-Process msiexec.exe -Wait -ArgumentList "/x dist\northstar-worker-service.msi /qn"
+Start-Process msiexec.exe -Wait -ArgumentList "/x dist\northstar-broker.msi /qn"
 ```
 
 - **Pass Criteria:**
@@ -132,15 +132,15 @@ rm -rf "$JOB_A_DIR"
 
 #### macOS (Static Pool Account Isolation)
 ```bash
-# 1. Create canary file owned by pool user 0 (UID 451)
+# 1. Create canary file owned by pool user 1 (UID 451)
 CANARY_DIR="/tmp/northstar-job-a-canary"
-sudo -u _northstar_pool_0 mkdir -m 700 "$CANARY_DIR"
-sudo -u _northstar_pool_0 sh -c "echo CANARY_DATA > $CANARY_DIR/secret.txt"
+sudo -u _northstar_pool_1 mkdir -m 700 "$CANARY_DIR"
+sudo -u _northstar_pool_1 sh -c "echo CANARY_DATA > $CANARY_DIR/secret.txt"
 
 # 2. Run background jobs under separate pool accounts
-sudo -u _northstar_pool_0 sleep 5 &
-PID_A=$!
 sudo -u _northstar_pool_1 sleep 5 &
+PID_A=$!
+sudo -u _northstar_pool_2 sleep 5 &
 PID_B=$!
 
 # 3. Assert UIDs differ via ps
@@ -150,8 +150,8 @@ UID_B=$(ps -o uid= -p $PID_B | tr -d ' ')
 [ "$UID_A" = "451" ] || { echo "FAIL: Unexpected UID_A: $UID_A"; exit 1; }
 [ "$UID_B" = "452" ] || { echo "FAIL: Unexpected UID_B: $UID_B"; exit 1; }
 
-# 4. Attempt cross-read from _northstar_pool_1 -> MUST FAIL
-sudo -u _northstar_pool_1 cat "$CANARY_DIR/secret.txt" 2>/dev/null && exit 1 || true
+# 4. Attempt cross-read from _northstar_pool_2 -> MUST FAIL
+sudo -u _northstar_pool_2 cat "$CANARY_DIR/secret.txt" 2>/dev/null && exit 1 || true
 
 # Cleanup
 sudo rm -rf "$CANARY_DIR"
@@ -219,7 +219,7 @@ gcc -O2 /tmp/double_fork.c -o /tmp/double_fork_escape
 # 2. Run escape binary under isolated worker UID (e.g. Linux DynamicUser or macOS pool user)
 if [ "$(uname)" = "Darwin" ]; then
     TEST_UID=451
-    sudo -u _northstar_pool_0 /tmp/double_fork_escape
+    sudo -u _northstar_pool_1 /tmp/double_fork_escape
 else
     # Linux DynamicUser transient unit
     systemd-run --unit=northstar-escape-test -p DynamicUser=yes /tmp/double_fork_escape

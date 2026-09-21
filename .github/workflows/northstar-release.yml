@@ -19,8 +19,8 @@ on:
 #   - NOTARY_APP_PASSWORD: App-specific password for notarytool
 #   - NOTARY_TEAM_ID: 10-character Apple Developer Team ID
 #
-# Signing steps are gated on secrets presence so unsigned CI workflows still build and upload unsigned artifacts.
-# Signed releases are produced only when secrets are present and a git release tag is being built.
+# Signing steps run whenever certificate secrets are present (on pushes, pull requests, and tags).
+# Only macOS notarization and stapling (xcrun notarytool) is gated on git release tags (refs/tags/v*).
 
 jobs:
   windows-msi:
@@ -160,7 +160,10 @@ jobs:
         env:
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
         run: |
-          pkgbuild --root dist/payload --scripts dist/scripts --identifier com.pi.northstar.broker --version 0.1.0 dist/northstar-broker-component.pkg
+          VERSION=$(cargo metadata --format-version 1 --manifest-path rust/Cargo.toml | python3 -c "import sys, json; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name'] == 'northstar-broker'))")
+          echo "Building PKG for northstar-broker version $VERSION"
+          pkgbuild --root dist/payload --scripts dist/scripts --identifier com.pi.northstar.broker --version "$VERSION" dist/northstar-broker-component.pkg
+          sed -i '' "s/version=\"[^\"]*\"/version=\"$VERSION\"/g" installer/macos/Distribution.xml
           
           if [ "${{ steps.macos-certs.outputs.has_certs }}" = "true" ] && [ -n "$NOTARY_TEAM_ID" ]; then
             echo "Signing installer with Developer ID Installer..."
