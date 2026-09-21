@@ -64,6 +64,8 @@ export async function runCommand(
   if (commandName !== undefined && cliDomains().includes(commandName)) {
     if (commandName === "research")
       return researchCommandResult(argv.slice(1), env);
+    if (commandName === "broker") return brokerCommandResult(argv.slice(1), env);
+    if (commandName === "jobs") return jobsCommandResult(argv.slice(1), env);
     if (commandName === "social")
       return socialCommandResult(argv.slice(1), env);
     if (commandName === "media") return mediaCommandResult(argv.slice(1), env);
@@ -74,6 +76,8 @@ export async function runCommand(
       return searchCommandResult(argv.slice(1), env);
     return githubCommandResult(argv.slice(1), env);
   }
+  if (commandName === "broker") return brokerCommandResult(argv.slice(1), env);
+  if (commandName === "jobs") return jobsCommandResult(argv.slice(1), env);
   if (commandName === "call")
     return errorResult("unsupported_command", "call is private worker transport");
 
@@ -154,6 +158,8 @@ function helpResult(): CliResult {
       usage: "northstar <command>",
       commands: [
         ...cliSkillInventory(),
+        "northstar broker serve --project-id ID [--root-dir DIR] [--json|--agent]",
+        "northstar jobs status --project-id ID --request-id ID [--root-dir DIR] [--json|--agent]",
         "domains",
         "capabilities",
         "status",
@@ -2158,6 +2164,133 @@ async function searchCommandResult(
         data: renderCommandResult(commandResult as never, mode),
       };
     }
+    return cliToolError(error);
+  }
+}
+
+const BROKER_SERVE_USAGE =
+  "northstar broker serve --project-id ID [--root-dir DIR] [--json|--agent]";
+
+async function brokerCommandResult(
+  args: string[],
+  _env: Record<string, string | undefined>,
+): Promise<CliResult> {
+  const subcommand = args[0];
+  if (subcommand === "--help" || subcommand === "-h" || subcommand === undefined) {
+    return {
+      ok: true,
+      data: {
+        usage: BROKER_SERVE_USAGE,
+        commandId: "broker.serve",
+      },
+    };
+  }
+  if (subcommand !== "serve") {
+    return errorResult("unknown_command", "Usage: northstar broker <serve>");
+  }
+  if (args[1] === "--help" || args[1] === "-h") {
+    return {
+      ok: true,
+      data: {
+        usage: BROKER_SERVE_USAGE,
+        commandId: "broker.serve",
+      },
+    };
+  }
+
+  const parsed = parseCommandFlags(args.slice(1), {
+    usage: BROKER_SERVE_USAGE,
+    values: ["--project-id", "--root-dir"],
+    maxPositional: 0,
+    minPositional: 0,
+  });
+  if (!parsed.ok) return parsed.error;
+
+  const projectId = parsed.values.get("--project-id");
+  if (projectId === undefined) {
+    return errorResult("invalid_usage", "--project-id is required");
+  }
+  const rootDir = parsed.values.get("--root-dir");
+
+  try {
+    const { brokerServeCommand } = await import("../commands/broker-serve-handler.js");
+    const { renderCommandResult } = await import("../commands/command-render.js");
+    const result = await brokerServeCommand({
+      projectId,
+      ...(rootDir !== undefined ? { rootDir } : {}),
+    });
+    const rendered = renderCommandResult(result as never, parsed.mode);
+    if (result.outcome === "failed" || result.outcome === "cancelled") {
+      return { ok: false, data: rendered };
+    }
+    return { ok: true, data: rendered };
+  } catch (error) {
+    return cliToolError(error);
+  }
+}
+
+const JOBS_STATUS_USAGE =
+  "northstar jobs status --project-id ID --request-id ID [--root-dir DIR] [--json|--agent]";
+
+async function jobsCommandResult(
+  args: string[],
+  _env: Record<string, string | undefined>,
+): Promise<CliResult> {
+  const subcommand = args[0];
+  if (subcommand === "--help" || subcommand === "-h" || subcommand === undefined) {
+    return {
+      ok: true,
+      data: {
+        usage: JOBS_STATUS_USAGE,
+        commandId: "jobs.status",
+      },
+    };
+  }
+  if (subcommand !== "status") {
+    return errorResult("unknown_command", "Usage: northstar jobs <status>");
+  }
+  if (args[1] === "--help" || args[1] === "-h") {
+    return {
+      ok: true,
+      data: {
+        usage: JOBS_STATUS_USAGE,
+        commandId: "jobs.status",
+      },
+    };
+  }
+
+  const parsed = parseCommandFlags(args.slice(1), {
+    usage: JOBS_STATUS_USAGE,
+    values: ["--project-id", "--request-id", "--root-dir"],
+    maxPositional: 0,
+    minPositional: 0,
+  });
+  if (!parsed.ok) return parsed.error;
+
+  const projectId = parsed.values.get("--project-id");
+  if (projectId === undefined) {
+    return errorResult("invalid_usage", "--project-id is required");
+  }
+  const requestId = parsed.values.get("--request-id");
+  if (requestId === undefined) {
+    return errorResult("invalid_usage", "--request-id is required");
+  }
+  const rootDir = parsed.values.get("--root-dir");
+
+  try {
+    const { jobsStatusCommand } = await import("../commands/jobs-status-handler.js");
+    const { renderCommandResult } = await import("../commands/command-render.js");
+    const result = await jobsStatusCommand({
+      projectId,
+      requestId,
+      ...(rootDir !== undefined ? { rootDir } : {}),
+    });
+    const rendered = renderCommandResult(result as never, parsed.mode);
+    if (result.outcome === "failed" || result.outcome === "cancelled") {
+      return { ok: false, data: rendered };
+    }
+    return { ok: true, data: rendered };
+  } catch (error) {
     return cliToolError(error);
   }
 }

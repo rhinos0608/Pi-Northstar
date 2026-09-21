@@ -189,3 +189,45 @@ test('cliToolError omits absent platform/backend and keeps plain Error as tool_e
   const payload = JSON.stringify(cliToolError(new SocialError('not_found', 'missing', {})));
   assert.doesNotMatch(payload, /http/);
 });
+
+test('CLI help output lists broker serve and jobs status', async () => {
+  const result = await runCommand(['--help'], {});
+  assert.equal(result.ok, true);
+  const commands = (result.data as { commands: string[] }).commands;
+  assert.ok(
+    commands.some((cmd) => cmd.includes('northstar broker serve')),
+    'help commands must list broker serve',
+  );
+  assert.ok(
+    commands.some((cmd) => cmd.includes('northstar jobs status')),
+    'help commands must list jobs status',
+  );
+
+  const brokerHelp = await runCommand(['broker', '--help'], {});
+  assert.equal(brokerHelp.ok, true);
+  assert.equal((brokerHelp.data as { commandId: string }).commandId, 'broker.serve');
+
+  const jobsHelp = await runCommand(['jobs', '--help'], {});
+  assert.equal(jobsHelp.ok, true);
+  assert.equal((jobsHelp.data as { commandId: string }).commandId, 'jobs.status');
+});
+
+test('dispatch routes jobs status with bad args to validation failure without spawning', async () => {
+  const missingArgs = await runCommand(['jobs', 'status'], {});
+  assert.equal(missingArgs.ok, false);
+  assert.equal(missingArgs.error?.code, 'invalid_usage');
+
+  const invalidReq = await runCommand(['jobs', 'status', '--project-id', 'p1', '--request-id', 'bad$char', '--json'], {});
+  assert.equal(invalidReq.ok, false);
+  const parsed = JSON.parse(invalidReq.data as string) as { outcome: string; error?: { code: string } };
+  assert.equal(parsed.outcome, 'failed');
+  assert.equal(parsed.error?.code, 'invalid_input');
+});
+
+test('broker serve with invalid projectId fails without touching the host', async () => {
+  const result = await runCommand(['broker', 'serve', '--project-id', '../escape', '--json'], {});
+  assert.equal(result.ok, false);
+  const parsed = JSON.parse(result.data as string) as { outcome: string; error?: { code: string } };
+  assert.equal(parsed.outcome, 'failed');
+  assert.equal(parsed.error?.code, 'invalid_input');
+});
