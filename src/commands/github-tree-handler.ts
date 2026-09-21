@@ -1,4 +1,4 @@
-import { createGithubCommandHandler } from './github-commits-handler.js';
+import { createGithubCommandHandler } from './github-handler-factory.js';
 
 export const GITHUB_TREE_COMMAND = 'github.tree';
 
