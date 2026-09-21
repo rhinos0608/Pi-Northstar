@@ -216,7 +216,7 @@ test('README tool examples validate against registered schemas (no drift)', () =
   const multiQuery = buildFetchRoute({ urls: ['https://example.com'], query: 'How does React concurrent rendering work?' });
   assert.equal(multiQuery.tool, 'fetch');
   assert.throws(() => buildFetchRoute({ mode: 'crawl', query: 'pricing tiers' } as never));
-  // graph stays flat (no envelope); pin the README forms.
+  // Builder stays flat (request union); registration wraps it as {request}: pin the README forms.
   const graph = buildGraphParameters();
   assert.equal(Value.Check(graph, { action: 'query', language: 'dql', query: 'type:Organization name:"Acme"' }), true);
   assert.equal(Value.Check(graph, { action: 'schema', language: 'dql', view: 'types' }), true);

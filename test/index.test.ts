@@ -240,12 +240,13 @@ test('buildFetchRoute claim-check names offending slice fields', () => {
 });
 
 type WebSearchBranch = { properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string };
-type WebSearchSchema = { anyOf?: WebSearchBranch[]; description?: string };
+type WebSearchSchema = { properties?: { request?: { anyOf?: WebSearchBranch[] } }; anyOf?: WebSearchBranch[]; description?: string };
 
 async function captureWebSearchUnion(): Promise<{ schema: WebSearchSchema; branches: WebSearchBranch[] }> {
   const defs = await captureAllTools();
-  const schema = defs.web_search!.parameters as WebSearchSchema;
-  return { schema, branches: schema.anyOf ?? [] };
+  const parameters = defs.web_search!.parameters as WebSearchSchema;
+  const schema = (parameters.properties?.request ?? parameters) as WebSearchSchema;
+  return { schema, branches: requestBranches(defs.web_search!.parameters) as WebSearchBranch[] };
 }
 
 function findWebSearchBranch(branches: WebSearchBranch[], kind: 'single' | 'batch' | 'agent'): WebSearchBranch | undefined {
@@ -302,10 +303,10 @@ test('web_search schema research-visible limit cap', async () => {
   }
   assert.ok(captured, 'web_search tool must be registered');
   const schema = captured!.parameters as {
-    anyOf?: Array<{ properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string }>;
+    properties?: { request?: { anyOf?: Array<{ properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string }> } };
     description?: string;
   };
-  const branches = schema.anyOf ?? [];
+  const branches = schema.properties?.request?.anyOf ?? [];
   assert.equal(branches.length, 5);
   for (const branch of branches) {
     const isAgent = (branch.properties.mode as { const?: string } | undefined)?.const === 'agent';
@@ -441,10 +442,10 @@ test('social strict schema stays canonical-only', async () => {
 
   assert.ok(defs.social, 'social tool must be registered');
 
-  // Strict bare-union social schema (no request wrapper): one branch per
+  // Strict social schema ({request: branch union}): one branch per
   // advertised platform/action with explicit selector alternatives.
   const socialBranches = requestBranches(defs.social.parameters);
-  assert.ok(socialBranches.length > 0, 'social schema must be a top-level branch union');
+  assert.ok(socialBranches.length > 0, 'social schema must expose request branches');
   const socialProps = branchProperties(defs.social.parameters);
   for (const key of ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']) assert.ok(key in socialProps, `social schema must expose ${key}`);
   const socialPlatforms = [...new Set(socialBranches.map((branch) => branch.properties?.platform?.const).filter(Boolean))];
@@ -801,10 +802,10 @@ test('kg description requires user authorization before sensitive text submissio
 test('web_search strict union exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
   const defs = await captureAllTools();
   const webSchema = defs.web_search!.parameters as {
-    anyOf?: Array<{ properties?: Record<string, { properties?: Record<string, unknown> }> }>;
+    properties?: { request?: { anyOf?: Array<{ properties?: Record<string, { properties?: Record<string, unknown> }> }> } };
     description?: string;
   };
-  const branches = webSchema.anyOf ?? [];
+  const branches = webSchema.properties?.request?.anyOf ?? [];
   assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
   const byBranch = (predicate: (props: Record<string, unknown>) => boolean): Record<string, { properties?: Record<string, unknown> }> => {
     const found = branches.find((branch) => predicate((branch.properties ?? {}) as Record<string, unknown>));
@@ -1049,7 +1050,7 @@ test('graph tool registered with strict action/language branches', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.graph, 'graph tool must be registered');
   const branches = requestBranches(defs.graph.parameters);
-  assert.ok(branches.length > 0, 'graph schema must be a top-level branch union');
+  assert.ok(branches.length > 0, 'graph schema must expose request branches');
   const props = branchProperties(defs.graph.parameters);
   assert.deepEqual([...new Set(branches.map((b) => b.properties?.action?.const))].sort(), ['probe', 'query', 'schema']);
   assert.deepEqual([...new Set(branches.map((b) => b.properties?.language?.const))].sort(), ['dql', 'sparql']);
@@ -1101,15 +1102,36 @@ test('graph description states native language, provenance, probe countability, 
 
 const EXPECTED_WEB_SEARCH_BRANCHES = 5;
 
-test('graph registration adopts strict schemas; kg and fetch wrappers unchanged', async () => {
+test('graph registration adopts strict schemas; all union tools wrapped as {request}', async () => {
   const defs = await captureAllTools();
-  assert.deepEqual(Object.keys(defs.kg!.parameters.properties as object).sort(), ['request']);
-  assert.equal((defs.graph!.parameters as { anyOf?: unknown[] }).anyOf?.length, 12, 'graph schema must be the 12-branch strict union');
-  assert.equal((defs.web_search!.parameters as { anyOf?: unknown[] }).anyOf?.length, EXPECTED_WEB_SEARCH_BRANCHES);
-  assert.deepEqual(Object.keys((defs.fetch!.parameters as { properties?: object }).properties ?? {}).sort(), ['request']);
+  for (const toolName of ['kg', 'fetch', 'graph', 'web_search', 'social'] as const) {
+    assert.ok(defs[toolName], `${toolName} tool must be registered`);
+    assert.deepEqual(Object.keys((defs[toolName]!.parameters as { properties: object }).properties).sort(), ['request'], `${toolName} parameters must be Type.Object({request})`);
+    assert.equal((defs[toolName]!.parameters as { type?: string }).type, 'object', `${toolName} parameters must be type object`);
+  }
+  if (defs.browser) {
+    assert.deepEqual(Object.keys((defs.browser!.parameters as { properties: object }).properties).sort(), ['request'], 'browser parameters must be Type.Object({request})');
+    assert.equal((defs.browser!.parameters as { type?: string }).type, 'object', 'browser parameters must be type object');
+  }
+  assert.equal(requestBranches(defs.graph!.parameters).length, 12, 'graph schema must be the 12-branch strict union');
+  assert.equal(requestBranches(defs.web_search!.parameters).length, EXPECTED_WEB_SEARCH_BRANCHES);
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
   assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');
+});
+
+test('desktop registration wraps branches as {request} when automation is opted in', async () => {
+  const previousDesktop = process.env.PI_SEARCH_DESKTOP_AUTOMATION;
+  process.env.PI_SEARCH_DESKTOP_AUTOMATION = '1';
+  try {
+    const defs = await captureAllTools();
+    assert.ok(defs.desktop, 'desktop tool must be registered when opted in');
+    assert.deepEqual(Object.keys((defs.desktop!.parameters as { properties: object }).properties).sort(), ['request']);
+    assert.equal((defs.desktop!.parameters as { type?: string }).type, 'object');
+  } finally {
+    if (previousDesktop === undefined) delete process.env.PI_SEARCH_DESKTOP_AUTOMATION;
+    else process.env.PI_SEARCH_DESKTOP_AUTOMATION = previousDesktop;
+  }
 });
 
 test('tool_result hook fences graph output as external evidence', async () => {
