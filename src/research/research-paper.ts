@@ -109,7 +109,10 @@ export function resolvePaperIdentity(
       return { ok: false, message: `Could not extract arXiv ID from URL "${trimmed}".` };
     }
 
-    if (host === 'pubmed.ncbi.nlm.nih.gov' || (host.endsWith('ncbi.nlm.nih.gov') && pathname.includes('pubmed'))) {
+    if (
+      host === 'pubmed.ncbi.nlm.nih.gov' ||
+      ((host === 'ncbi.nlm.nih.gov' || host.endsWith('.ncbi.nlm.nih.gov')) && pathname.includes('pubmed'))
+    ) {
       const match = /(?:\/pubmed)?\/(\d+)/.exec(pathname);
       if (match) return { ok: true, identity: { source: 'pubmed', id: match[1]! } };
       return { ok: false, message: `Could not extract PubMed ID from URL "${trimmed}".` };
