@@ -8,6 +8,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 # Required CI Secrets for Code Signing & Notarization:
 # Windows:
 #   - WINDOWS_CERT_BASE64: Base64-encoded PFX certificate for Authenticode code signing
