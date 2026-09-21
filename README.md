@@ -100,7 +100,7 @@ Provider selection is also operator-owned. The model does not receive provider f
 | Surface | Keyless behavior | What credentials or setup add |
 | --- | --- | --- |
 | Web search | DuckDuckGo works with no configuration | Tavily, Exa, Brave, Diffbot, Firecrawl, Jina and other vendor backends; SearXNG/Ollama can use operator endpoints |
-| Web fetch | native page reader, PDF/media/RSS specialization; Scrapling when locally installed | Firecrawl/Jina external processing when explicitly enabled |
+| Web fetch | native page reader; local PDF text; direct-image metadata; media/RSS specialization; Scrapling when locally installed | optional image/video vision through a configured OpenAI-compatible or Gemini route; Firecrawl/Jina external processing when explicitly enabled |
 | Research | Semantic Scholar, OpenAlex, PubMed, Stack Overflow, DataCite, ROR, GDELT, Wikipedia, Wikidata, arXiv, Crossref, Hacker News | optional source keys raise quotas |
 | GitHub | public REST reads | `GITHUB_TOKEN` / `GH_TOKEN` for private content and better limits |
 | RSS / Atom | full feed reads | none |
@@ -109,7 +109,7 @@ Provider selection is also operator-owned. The model does not receive provider f
 | SPARQL graph | no API key is required, but an operator `GRAPH_SPARQL_ENDPOINT` is required | optional `GRAPH_SPARQL_TOKEN` bearer auth |
 | Browser | isolated local browser path when its dependency is available | user-Chrome companion requires pairing plus explicit `/chrome authorize` |
 | Desktop | no API key | `PI_SEARCH_DESKTOP_AUTOMATION=1` plus the installed Cua Driver |
-| Vision | a local OpenAI-compatible endpoint may be keyless | cloud OpenAI-compatible/Gemini routes require explicit destination config and credentials/project auth |
+| Vision | a loopback OpenAI-compatible endpoint can be keyless; vision features still require their exact fetch opt-in | cloud OpenAI-compatible/Gemini routes require explicit destination config and credentials/project auth |
 
 ### Keyed or login-backed surfaces
 
@@ -129,16 +129,52 @@ Some optional routes send content to third parties:
 
 - `DIFFBOT_TOKEN` enables paid Diffbot endpoints.
 - Firecrawl and Jina process requested page content on their services.
-- Cloud vision sends admitted image/PDF/video bytes and derived text to the configured destination.
+- Cloud OpenAI-compatible or Gemini vision can receive admitted image/video bytes and derived text only through explicitly enabled vision paths.
+- Normal PDF fetch stays local today. Sparse/scanned pages are detected and warned; the reserved PDF cloud-render flag remains fail-closed until a page renderer exists.
 - Private/authenticated GitHub material cannot reach cloud vision unless `PI_VISION_PRIVATE_GITHUB_TRANSFER=1` is also set.
 
 See `.env.example` before enabling those routes.
+
+## Multimodal fetch
+
+Multimodal work stays behind `fetch` and internal acquisition rather than growing the public Pi tool vocabulary.
+
+| Asset | Default path | Optional vision path |
+| --- | --- | --- |
+| PDF | `.pdf` URLs and `application/pdf` responses are extracted locally with `unpdf`; normal fetch is bounded to 10 MiB, 50 pages, and 50,000 characters with page citations and sparse-page warnings | none on the normal fetch path today; `PI_VISION_PDF_CLOUD_RENDER=1` is reserved but fails closed until a page-image renderer exists |
+| Image | PNG/JPEG/GIF/WebP bytes are magic-sniffed and returned as bounded metadata | exact `PI_VISION_FETCH_DESCRIBE=1` plus OpenAI-compatible or Gemini produces a separate description in result details |
+| YouTube | metadata/transcript evidence uses the media path; the transcript has its separate unofficial keyless adapter | exact `PI_VISION_FETCH_VIDEO_FRAMES=1` plus OpenAI-compatible or Gemini can add anonymous keyframe evidence; configured vision can also synthesize admitted evidence |
+
+### Vision destinations
+
+**OpenAI-compatible** vision accepts an operator-selected HTTP(S) base URL plus exact model IDs. Loopback servers such as Ollama, LM Studio, or vLLM can run keyless with `PI_VISION_OPENAI_COMPAT_BASE_URL` + `PI_VISION_OPENAI_COMPAT_MODEL`; `PI_VISION_OPENAI_COMPAT_API_KEY` is optional for endpoints that need it. A loopback endpoint keeps the vision call local; a remote base URL sends the admitted asset to that operator-selected service.
+
+**Gemini** requires exact `PI_VISION_GEMINI_ENABLED=1`. Developer API mode uses `GEMINI_API_KEY` or `GOOGLE_GENAI_API_KEY`. Vertex mode additionally uses `GOOGLE_GENAI_USE_VERTEXAI=1`, a project (`GOOGLE_VERTEX_PROJECT` or `GOOGLE_CLOUD_PROJECT`), `GOOGLE_CLOUD_LOCATION`, and ADC. `PI_VISION_GEMINI_MODEL` selects the exact model; otherwise the current transport default is `gemini-2.0-flash`.
+
+`PI_VISION_GEMINI_WEB_ENABLED=1` enables a separate last-resort Gemini Web transport seam, but the current fetch image and video analyzers do not select it. One configured destination never authorizes another.
+
+Fetch-time YouTube frames are the narrow exception to the normal media rule around `yt-dlp`: with the exact frames opt-in, Northstar may use `yt-dlp` + `ffmpeg` internally for anonymous frame extraction. That child path strips cookies, account credentials, proxy configuration, and user config. YouTube search/hot/details/transcript do not use `yt-dlp`.
 
 ## Browser, desktop, and setup authority
 
 `/reach-status`, `/reach-setup`, and `/chrome` are **user slash commands**, not model tools. Cookie import and login never happen at startup or because an environment variable happens to exist. They require explicit operator actions such as `/reach-setup import_cookies ...`, `/reach-setup login ...`, or `/chrome authorize`.
 
 Browser navigation enforces URL/origin policy and treats remote content as untrusted evidence. Desktop mutation requires fresh observed state; sensitive keyboard input requires human confirmation. Social write capability is deny-by-default and no provider is currently allowlisted for writes.
+
+## Leaf runtime integration
+
+Northstar has two leaf-execution paths with different jobs and authority boundaries:
+
+| Path | Runtime | Configuration | Structured output |
+| --- | --- | --- | --- |
+| adaptive agent steering | co-installed `pi-subagents` over `subagents:runtime:v1` | exact `PI_NORTHSTAR_LEAF_MODEL=provider/model` | negotiated; current producer advertises `structured-v1` |
+| local broker jobs | `src/runtime/local-leaf-runtime.ts` over the Pi AI model registry | `northstar jobs start --model provider/model` | text-only in the current same-user development runtime |
+
+For the co-installed path, the producer contract in `../pi-subagents/src/api/runtime-rpc.ts` is ground truth; `src/runtime/runtime-rpc-protocol.ts` is Northstar's self-contained consumer mirror. The event protocol exposes `negotiate`, `start`, `status`, `result`, and `cancelAndSettle`. Model IDs are exact `provider/model` strings and thinking suffixes are rejected.
+
+A fresh negotiation is capability discovery, not authorization. The current `pi-subagents` bridge advertises text + JSON output, `structured-v1` schema support, and correlation v2 after a successful exact-model negotiation. Northstar attaches an `outputSchema` only when `structured-v1` was negotiated; otherwise it asks for text JSON and parses/validates locally. Domain validators remain authoritative in both cases. The event bus is trusted co-installed extension plumbing, and correlation metadata is never authentication.
+
+If `PI_NORTHSTAR_LEAF_MODEL` is unset, negotiation fails, the sibling bridge is disabled/unavailable, or a staged leaf call fails, adaptive research degrades to the deterministic/evidence-only path instead of inventing model output. Exact `PI_NORTHSTAR_AGENT_STEERING=0` disables staged model steering even when a leaf runtime is available.
 
 ## Stateful broker
 
@@ -184,7 +220,7 @@ For changes to contracts, credentials, provider routing, browser/desktop mutatio
 - `SKILL.md`: compact agent router for choosing the right Northstar surface.
 - `skills/*/SKILL.md`: per-domain CLI contracts and syntax.
 - `.env.example`: primary configuration catalogue and privacy-sensitive opt-ins.
-- `architecture.md`: target architecture and authority model.
-- `plan.md`: staged redesign/release plan. Treat it as planning state, not stronger truth than reachable code.
+- `docs/architecture.md`: target architecture and authority model.
+- `docs/roadmap-ledger.md` and `docs/plans/`: staged redesign/release state. Treat planning prose as weaker truth than reachable code.
 - `docs/adr/`: focused architecture/security decisions.
 - `docs/tier2-proof.md`: privileged broker/release proof plan.

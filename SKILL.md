@@ -1,6 +1,6 @@
 ---
 name: pi-northstar
-description: Route current-evidence and repository tasks through Pi-Northstar. Use for web discovery/read, academic research, GitHub, social/community reads, knowledge/graph lookup, browser or desktop interaction, and agent-job polling. Media is CLI/internal acquisition, not a registered Pi tool.
+description: Route current-evidence and repository tasks through Pi-Northstar. Use for web discovery/read (including PDF/image/video specialization), academic research, GitHub, social/community reads, knowledge/graph lookup, browser or desktop interaction, and agent-job polling. Media is CLI/internal acquisition, not a registered Pi tool.
 ---
 
 # Pi-Northstar
@@ -24,6 +24,7 @@ Use this root skill to choose the right surface. Then read the matching `skills/
 | broad current web discovery | `web_search` | `northstar search` → `skills/search/SKILL.md` |
 | academic/public-data discovery | `web_search` research category | `northstar research ...` → `skills/research/SKILL.md` |
 | read a known URL / sitemap / cached corpus | `fetch` | `northstar fetch` → `skills/fetch/SKILL.md` |
+| PDF/image/video URL understanding | `fetch` specialization | `northstar fetch` → `skills/fetch/SKILL.md` |
 | repository/code/release/issue facts | `github` | `northstar github ...` → `skills/github/SKILL.md` |
 | platform-native discussion/profile reads | `social` | `northstar social ...` → `skills/social/SKILL.md` |
 | structured entity search/enrichment | `kg` | `northstar kg ...` → `skills/kg/SKILL.md` |
@@ -37,13 +38,17 @@ Use this root skill to choose the right surface. Then read the matching `skills/
 
 Use `web_search` first when you need candidate sources. Plain search fuses configured provider rankings deterministically. Provider selection is environment-only; do not ask for or invent a provider flag.
 
-`mode:"agent"` creates a parent-owned adaptive job for multi-step research. Poll only the returned job with `agent_poll`. Unknown, expired, or foreign job identifiers fail closed rather than enumerating jobs.
+`mode:"agent"` creates a parent-owned adaptive job for multi-step research. Poll only the returned job with `agent_poll`. Unknown, expired, or foreign job identifiers fail closed rather than enumerating jobs. When exact `PI_NORTHSTAR_LEAF_MODEL=provider/model` is configured, staged steering can negotiate the co-installed `pi-subagents` `subagents:runtime:v1` bridge; failure or exact `PI_NORTHSTAR_AGENT_STEERING=0` keeps the deterministic/evidence-only path.
 
 For academic literature and public-data sources, use the research category in Pi or the dedicated CLI domain. The research registry covers 12 source-specific adapters and does not substitute generic web on source failure.
 
 ### Fetch
 
-Use `fetch` after discovery or when a URL is already known. It owns URL reads, same-origin sitemap discovery, and no-network operations over a prior `responseId`.
+Use `fetch` after discovery or when a URL is already known. It owns URL reads, same-origin sitemap discovery, no-network operations over a prior `responseId`, and URL-specialized PDF/image/media handling.
+
+- PDF fetch is local-first through `unpdf` and never silently invokes cloud vision. Sparse/scanned pages warn; the PDF cloud-render flag is currently fail-closed because no page renderer ships.
+- Direct image URLs return verified metadata by default. Exact `PI_VISION_FETCH_DESCRIBE=1` plus configured OpenAI-compatible or Gemini vision can add a separate generated description.
+- YouTube fetch can add anonymous keyframes only with exact `PI_VISION_FETCH_VIDEO_FRAMES=1` plus OpenAI-compatible or Gemini vision. That internal frame path may use credentialless `yt-dlp` + `ffmpeg`; the media transcript path does not.
 
 A `responseId` is a cache/provenance handle, not authority to reacquire a URL. Authenticated fetch profiles are narrower than public fetch and must not fall through to external rendering.
 
@@ -55,7 +60,7 @@ Use `github` instead of web snippets for repository facts. Public reads work ano
 
 `social` is read-only in practice. Use canonical platform/actions and let capability/status decide whether a local session is usable. Never post, like, comment, follow, download, archive, or perform destructive/bulk account actions through this surface.
 
-`media` is not a registered Pi model tool. Use `northstar media ...`, or let `fetch` specialize recognized media/feed URLs. YouTube search/hot require the official API key; details and transcript have separate keyless degraded paths. Do not substitute `yt-dlp`.
+`media` is not a registered Pi model tool. Use `northstar media ...`, or let `fetch` specialize recognized media/feed URLs. YouTube search/hot require the official API key; details and transcript have separate keyless degraded paths. `yt-dlp` is never a media action or transcript backend; it is used only by the separately gated anonymous fetch-time keyframe path.
 
 ### KG and graph
 
@@ -74,7 +79,7 @@ Use `desktop` only for OS-window work the web surfaces cannot reach. Observe fir
 Northstar can do useful work without API keys:
 
 - DuckDuckGo web search.
-- Native URL reading plus PDF/media/RSS specialization.
+- Native URL reading, local PDF text extraction, direct-image metadata, and media/RSS specialization.
 - All 12 research sources at anonymous quotas.
 - Public GitHub reads.
 - RSS/Atom.
@@ -92,8 +97,9 @@ Important privacy-sensitive routes:
 
 - `DIFFBOT_TOKEN`: sends eligible search/KG/graph requests to paid Diffbot services.
 - Firecrawl/Jina page processing: requires explicit external-fetch enablement and provider selection.
-- Cloud vision: sends admitted image/PDF/video bytes plus derived text to the configured destination.
-- Private/authenticated GitHub to cloud vision: additionally requires exact `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`.
+- Fetch-time image/video vision: exact feature opt-in plus an explicitly configured OpenAI-compatible or Gemini destination. Loopback OpenAI-compatible endpoints can stay local; cloud destinations receive admitted bytes/derived text.
+- PDF fetch: local `unpdf` only today; sparse-page cloud rendering is reserved/fail-closed until a renderer exists.
+- Private/authenticated GitHub to an eligible cloud vision destination: additionally requires exact `PI_VISION_PRIVATE_GITHUB_TRANSFER=1`.
 
 Do not infer consent from the presence of a key. Sensitive selectors such as email/phone should only be submitted when the user is authorized to share them.
 
@@ -129,6 +135,6 @@ Startup and bare auto-setup must not import browser cookies or create authentica
 - Knowledge graph: `skills/kg/SKILL.md`
 - Graph query: `skills/graph/SKILL.md`
 
-For operator configuration, read `.env.example`. For engineering/security changes, read `AGENTS.md`. For architecture and staged broker/release work, use `architecture.md`, `plan.md`, and the relevant ADRs.
+For operator configuration, read `.env.example`. For engineering/security changes, read `AGENTS.md`. For architecture and staged broker/release work, use `docs/architecture.md`, `docs/roadmap-ledger.md`, `docs/plans/`, and the relevant ADRs.
 
 Keep this router compact. New providers and CLI verbs should normally update their canonical registry/domain skill rather than expanding root model context.

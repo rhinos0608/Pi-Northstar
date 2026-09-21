@@ -21,7 +21,11 @@ northstar fetch URL [--query QUERY] [--top-k N] [--max-chars N] [--site-map] [--
 - `--site-map`: Discovers same-origin URLs from sitemap.
 - `--max-pages N`: Integer 1..25 bounding sitemap discovery pages.
 
-Specialized readers are automatically selected by URL pattern in fixed precedence: PDF, GitHub, media, and RSS/Atom feeds, falling back to the standard readable page reader. Authenticated hosts matching configured cookie profiles bypass external processing and require HTTPS with same-origin redirects.
+Specialized readers are automatically selected before the standard readable page path. PDF, GitHub, media, and RSS/Atom keep their evidence class; matching direct image URLs are separately sniffed before plain-page fallback. Authenticated hosts matching configured cookie profiles bypass external processing and require HTTPS with same-origin redirects.
+
+- **PDF:** normal fetch extracts text locally with `unpdf` (10 MiB, 50 pages, 50,000 characters) and preserves page-aware citations. Sparse/scanned pages warn. `PI_VISION_PDF_CLOUD_RENDER=1` is reserved but currently fail-closed because no page-image renderer ships; normal PDF fetch never silently invokes cloud vision.
+- **Image:** PNG/JPEG/GIF/WebP URLs return sniff-verified metadata by default. Exact `PI_VISION_FETCH_DESCRIBE=1` plus a configured OpenAI-compatible or Gemini tier may add a separate generated description; generated text is not merged into source content.
+- **YouTube fetch:** exact `PI_VISION_FETCH_VIDEO_FRAMES=1` plus OpenAI-compatible or Gemini may add anonymous keyframe evidence. This internal path may use credentialless `yt-dlp` + `ffmpeg`; YouTube transcript remains the separate media adapter and does not use `yt-dlp`.
 
 ### Cached Retrieval (No Network)
 

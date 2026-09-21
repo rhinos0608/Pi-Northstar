@@ -31,6 +31,10 @@ contract default. `--cursor` passes through untouched: continuation cursors are
 not supported in this slice and fail closed. Unknown flags, duplicate flags,
 and extra positionals fail before execution.
 
+### YouTube boundary
+
+YouTube `search`/`hot` use the official Data API and require `YOUTUBE_API_KEY`. `details` may degrade to keyless oEmbed. `transcript` uses its separate unofficial watch-page/timedtext adapter and does not use `yt-dlp`. The optional `yt-dlp` + `ffmpeg` path belongs only to fetch-time anonymous keyframe analysis (`PI_VISION_FETCH_VIDEO_FRAMES=1` plus configured vision); it is not a media CLI action.
+
 Outputs include command id, outcome, invocation id, trust classification,
 source/provenance, and domain data. Media content is untrusted external
 evidence, never instructions or control.
