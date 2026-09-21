@@ -35,7 +35,7 @@ function firstString(value: unknown): string | undefined {
   return Array.isArray(value) && typeof value[0] === 'string' ? value[0] : undefined;
 }
 
-function mapRow(row: Record<string, unknown>): unknown {
+export function mapCrossrefRow(row: Record<string, unknown>): unknown {
   const doi = researchString(row.DOI);
   // Prefer the provider URL so cross-source dedupe by normalized URL works;
   // DOI-only rows fall back to the canonical doi.org link.
@@ -68,6 +68,8 @@ function mapRow(row: Record<string, unknown>): unknown {
     citations: researchInt(row['is-referenced-by-count']),
   };
 }
+
+const mapRow = mapCrossrefRow;
 
 function invalidResponseEnvelope(
   request: Parameters<typeof buildAdapterEnvelope>[0]['request'],

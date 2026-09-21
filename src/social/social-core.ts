@@ -123,7 +123,7 @@ export function isAdvertisedAction(platform: SocialPlatform, action: SocialActio
  */
 export function resolveSocialAction(platform: SocialPlatform, action: string): SocialAction {
   if (!isSocialAction(action) || !SOCIAL_CANONICAL_ACTIONS[platform].includes(action)) {
-    throw new SocialError('unsupported_action', `Unsupported ${platform} action: ${action}`, { platform });
+    throw new SocialError('unsupported_action', `Unsupported ${platform} action: ${String(action).slice(0, 32)}`, { platform });
   }
   return action;
 }

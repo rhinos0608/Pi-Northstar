@@ -34,10 +34,25 @@ export const OPENALEX_SOURCE = 'openalex';
 export const OPENALEX_BACKEND = 'openalex-api';
 export const OPENALEX_ENDPOINT = 'https://api.openalex.org/works';
 
-const OPENALEX_ID_PREFIX = 'https://openalex.org/';
+export const OPENALEX_ID_PREFIX = 'https://openalex.org/';
 
-function shortId(value: string): string {
+export function shortId(value: string): string {
   return value.startsWith(OPENALEX_ID_PREFIX) ? value.slice(OPENALEX_ID_PREFIX.length) : value;
+}
+
+export function reconstructAbstract(invertedIndex: unknown): string | undefined {
+  if (!invertedIndex || typeof invertedIndex !== 'object' || Array.isArray(invertedIndex)) return undefined;
+  const words: [number, string][] = [];
+  for (const [word, positions] of Object.entries(invertedIndex as Record<string, unknown>)) {
+    if (Array.isArray(positions)) {
+      for (const pos of positions) {
+        if (typeof pos === 'number' && Number.isInteger(pos) && pos >= 0) words.push([pos, word]);
+      }
+    }
+  }
+  if (words.length === 0) return undefined;
+  words.sort((a, b) => a[0] - b[0]);
+  return words.map((w) => w[1]).join(' ');
 }
 
 async function resolveOpenAlexId(
@@ -61,7 +76,7 @@ async function resolveOpenAlexId(
   return id ? { found: true, id: shortId(id) } : { found: false };
 }
 
-function mapRow(row: Record<string, unknown>): unknown {
+export function mapOpenAlexRow(row: Record<string, unknown>): unknown {
   const rawDoi = researchString(row.doi);
   const doi = rawDoi ? rawDoi.replace(/^https?:\/\/doi\.org\//i, '') : undefined;
   const id = researchString(row.id);
@@ -79,10 +94,15 @@ function mapRow(row: Record<string, unknown>): unknown {
     .filter((entry): entry is { name: string; id?: string } => entry !== null);
   const primaryLocation = researchRecord(row.primary_location);
   const sourceRecord = researchRecord(primaryLocation?.source);
+  const abstract = typeof row.abstract === 'string'
+    ? row.abstract
+    : reconstructAbstract(row.abstract_inverted_index);
   return {
     id: id ?? doi,
     title: researchString(row.display_name) ?? researchString(row.title) ?? '',
     url,
+    snippet: abstract,
+    ...(abstract !== undefined ? { abstract } : {}),
     authors,
     year: row.publication_year,
     venue: researchString(sourceRecord?.display_name),
@@ -90,6 +110,8 @@ function mapRow(row: Record<string, unknown>): unknown {
     citations: typeof row.cited_by_count === 'number' ? row.cited_by_count : undefined,
   };
 }
+
+const mapRow = mapOpenAlexRow;
 
 export async function searchOpenAlex(
   request: ResearchAdapterRequest,

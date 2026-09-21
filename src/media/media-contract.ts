@@ -199,16 +199,30 @@ function cleanSelector(value: unknown): string | undefined {
  * limit. Rejection errors never echo the rejected value. Throws SocialError
  * before any backend dispatch.
  */
+const MEDIA_REQUEST_INPUT_FIELDS: ReadonlySet<string> = new Set([
+  'channel', 'action', 'query', 'id', 'url', 'limit',
+]);
+
 export function validateMediaRequest(input: MediaRequestInput): {
   request: MediaRequest;
   warnings: string[];
 } {
   const warnings: string[] = [];
 
-  if (!isMediaChannel(input.channel)) {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw mediaError('invalid_request', 'request must be an object');
+  }
+  for (const key of Object.keys(input)) {
+    if (!MEDIA_REQUEST_INPUT_FIELDS.has(key)) {
+      throw mediaError('invalid_request', `unknown request field: ${key.slice(0, 32)}`);
+    }
+  }
+
+  const rawInput = input as MediaRequestInput;
+  if (!isMediaChannel(rawInput.channel)) {
     throw mediaError('invalid_request', `Unsupported media channel: ${String(input.channel).slice(0, 32)}`);
   }
-  const channel: MediaChannel = input.channel;
+  const channel: MediaChannel = rawInput.channel;
   const action = resolveMediaAction(channel, input.action);
 
   // Positional-bound selectors pass through requireCliPositional: blank or
