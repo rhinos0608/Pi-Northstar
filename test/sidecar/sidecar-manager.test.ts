@@ -468,7 +468,9 @@ test('auto-restarts on unexpected process exit', async () => {
   assert.equal(spawnRecords.length, 1);
   currentChild!.emit('exit', 1, null);
   await waitFor(() => spawnRecords.length >= 2);
+  await waitFor(() => mgr.health().status === 'running');
   assert.equal(mgr.health().status, 'running');
+  await mgr.stop();
 });
 
 // ---------------------------------------------------------------------------
