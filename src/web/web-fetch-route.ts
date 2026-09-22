@@ -1,9 +1,17 @@
-import { DEFAULT_WEB_READ_MAX_CHARS } from './web-contract.js';
+import { DEFAULT_WEB_READ_MAX_CHARS, isFetchMode, type FetchMode } from './web-contract.js';
+import { requireAnswerPrompt } from './page-query.js';
 
-// Mode-free 5-branch fetch union (clean break, no discriminants).
+// Five-branch fetch union with read modes on the URL branches.
+// Single/multi accept an optional read mode: readable (default: readability
+// extract via the canonical path), raw (raw HTTP text body: direct HTTP,
+// no readability/Jina/Diffbot/specializers; executor gates text/*+json/xml,
+// 5MB cap, utf-8 default, preserves non-2xx bodies+status, skips data-URI
+// sanitize; SSRF/DNS guards stay on), answer (nested-model Q&A: prompt
+// required, full raw extract kept in the responseId store for provenance).
 // Every branch validates its own required fields explicitly; legacy
-// discriminants (mode/action/source/searchQuery/followLinks/maxDepth) and
-// filesystem paths reject before any dispatch.
+// discriminants (action/source/searchQuery/followLinks/maxDepth) and
+// filesystem paths reject before any public Pi dispatch. Local video remains a
+// separate operator/native command seam and is not model-addressable here.
 
 export interface FetchSingleParams {
   /** Single URL, optional query/topK for the read-query path. */
@@ -11,6 +19,10 @@ export interface FetchSingleParams {
   query?: string;
   topK?: number;
   maxChars?: number;
+  /** Read mode: readable (default), raw (exact HTTP), answer (page Q&A). */
+  mode?: FetchMode;
+  /** Answer-mode question (required iff mode is answer, forbidden otherwise). */
+  prompt?: string;
 }
 
 export interface FetchMultiParams {
@@ -19,6 +31,10 @@ export interface FetchMultiParams {
   query?: string;
   topK?: number;
   maxChars?: number;
+  /** Read mode: readable (default), raw (exact HTTP), answer (page Q&A). */
+  mode?: FetchMode;
+  /** Answer-mode question (required iff mode is answer, forbidden otherwise). */
+  prompt?: string;
 }
 
 export interface FetchSitemapParams {
@@ -66,7 +82,8 @@ function buildSourceCheckFetchRoute(params: FetchSourceCheckParams): FetchRoute 
   return { tool: 'fetch', args: { action: 'source_check', responseId: params.responseId, claims: params.claims, ...(params.sourceIds !== undefined ? { sourceIds: params.sourceIds } : {}) }, timeout: 60_000 };
 }
 
-function buildReadQueryFetchRoute(params: { url: string; query?: string; topK?: number; maxChars?: number }): FetchRoute {
+function buildReadQueryFetchRoute(params: { url: string; query?: string; topK?: number; maxChars?: number; mode?: FetchMode; prompt?: string }): FetchRoute {
+  const answer = params.mode === 'answer';
   return {
     tool: 'fetch',
     args: {
@@ -74,13 +91,17 @@ function buildReadQueryFetchRoute(params: { url: string; query?: string; topK?: 
       ...(params.query !== undefined ? { query: params.query } : {}),
       ...(params.topK !== undefined ? { topK: params.topK } : {}),
       ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}),
+      ...(params.mode !== undefined ? { mode: params.mode } : {}),
+      ...(params.prompt !== undefined ? { prompt: params.prompt } : {}),
     },
-    timeout: 120_000,
+    // Answer fans out to a nested model call after the page read.
+    timeout: answer ? 180_000 : 120_000,
   };
 }
 
-function buildMultiFetchRoute(params: { urls: string[]; query?: string; topK?: number; maxChars?: number }): FetchRoute {
-  return { tool: 'fetch', args: { urls: params.urls, ...(params.query !== undefined ? { query: params.query } : {}), ...(params.topK !== undefined ? { topK: params.topK } : {}), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }, timeout: 120_000 };
+function buildMultiFetchRoute(params: { urls: string[]; query?: string; topK?: number; maxChars?: number; mode?: FetchMode; prompt?: string }): FetchRoute {
+  const answer = params.mode === 'answer';
+  return { tool: 'fetch', args: { urls: params.urls, ...(params.query !== undefined ? { query: params.query } : {}), ...(params.topK !== undefined ? { topK: params.topK } : {}), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}), ...(params.mode !== undefined ? { mode: params.mode } : {}), ...(params.prompt !== undefined ? { prompt: params.prompt } : {}) }, timeout: answer ? 180_000 : 120_000 };
 }
 
 function buildSitemapFetchRoute(params: FetchSitemapParams): FetchRoute {
@@ -102,7 +123,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-const FETCH_LEGACY_KEYS = ['mode', 'action', 'source', 'searchQuery', 'followLinks', 'maxDepth'] as const;
+const FETCH_LEGACY_KEYS = ['action', 'source', 'searchQuery', 'followLinks', 'maxDepth'] as const;
 
 function requireNonEmptyString(record: Record<string, unknown>, key: string, message: string): string {
   const value: unknown = record[key];
@@ -161,6 +182,54 @@ function requireLimit(record: Record<string, unknown>): number | undefined {
     throw new Error('limit must be an integer 1..50000');
   }
   return value;
+}
+
+/** Read mode for the URL branches. Absent means readable. */
+function requireFetchMode(record: Record<string, unknown>): FetchMode | undefined {
+  const value: unknown = record['mode'];
+  if (value === undefined) return undefined;
+  if (!isFetchMode(value)) throw new Error('fetch mode must be one of readable|raw|answer');
+  return value;
+}
+
+/**
+ * Mutual-exclusion guards for the read modes (reject, never silently drop):
+ * answer requires prompt and forbids the read-query rankers (query/topK:
+ * prompt is the question); raw bypasses readability and forbids query/topK plus
+ * prompt; non-answer modes forbid prompt. Per-call answerModel is removed:
+ * any answerModel value rejects on every branch (unknown-key check fires
+ * first; this guard stays as defense-in-depth). There are no other
+ * auth/model fields on fetch: answer auth resolves server-side
+ * (ModelRuntime auth.json, never .env keys). Returns validated mode/prompt
+ * to forward.
+ */
+export function requireReadModeFields(
+  record: Record<string, unknown>,
+  branch: string,
+  makeError: (message: string) => Error = (message) => new Error(message),
+): { mode?: FetchMode; prompt?: string } {
+  const mode = requireFetchMode(record);
+  if (record['answerModel'] !== undefined) throw makeError(`fetch ${branch} rejects 'answerModel': quick-investigate reuses the session model; per-call override removed`);
+  const hasPrompt = record['prompt'] !== undefined;
+  const hasQuery = record['query'] !== undefined;
+  const hasTopK = record['topK'] !== undefined;
+  const hasMaxChars = record['maxChars'] !== undefined;
+  if (mode === 'answer') {
+    if (hasQuery) throw makeError(`fetch ${branch} answer rejects 'query': prompt is the question`);
+    if (hasTopK) throw makeError(`fetch ${branch} answer rejects 'topK': prompt is the question`);
+    if (hasMaxChars) throw makeError(`fetch ${branch} answer rejects 'maxChars': answer mode budgets evidence from the active model context`);
+    const prompt = requireAnswerPrompt(record['prompt']);
+    return { mode, prompt };
+  }
+  if (mode === 'raw') {
+    if (hasQuery) throw makeError(`fetch ${branch} raw rejects 'query': raw returns the admitted HTTP text body directly`);
+    if (hasTopK) throw makeError(`fetch ${branch} raw rejects 'topK': raw returns the admitted HTTP text body directly`);
+    if (hasMaxChars) throw makeError(`fetch ${branch} raw rejects 'maxChars': raw uses the fixed byte ceiling before UTF-8 decoding`);
+    if (hasPrompt) throw makeError(`fetch ${branch} raw rejects 'prompt': prompt needs mode:"answer"`);
+    return { mode };
+  }
+  if (hasPrompt) throw makeError(`fetch ${branch} rejects 'prompt': prompt needs mode:"answer"`);
+  return mode === undefined ? {} : { mode };
 }
 
 /** Key-presence check: an empty/non-string url key still counts as present,
@@ -288,7 +357,7 @@ export function buildFetchRoute(params: FetchRouteParams | Record<string, unknow
   }
   if (hasUrls(record)) {
     if (hasUrlKey(record)) throw new Error('fetch accepts either url or urls[1..8], not both');
-    rejectUnknownKeys(record, ['urls', 'query', 'topK', 'maxChars'], 'multi');
+    rejectUnknownKeys(record, ['urls', 'query', 'topK', 'maxChars', 'mode', 'prompt'], 'multi');
     const urls = requireUrls(record);
     for (const url of urls) {
       if (!/^https?:\/\//i.test(url)) {
@@ -298,24 +367,28 @@ export function buildFetchRoute(params: FetchRouteParams | Record<string, unknow
     const query = optionalString(record, 'query');
     const topK = requireTopK(record);
     const maxChars = requireMaxChars(record);
+    const readMode = requireReadModeFields(record, 'multi');
     return buildMultiFetchRoute({
       urls,
       ...(query !== undefined ? { query } : {}),
       ...(topK !== undefined ? { topK } : {}),
       ...(maxChars !== undefined ? { maxChars } : {}),
+      ...readMode,
     });
   }
   if (hasUrlKey(record)) {
-    rejectUnknownKeys(record, ['url', 'query', 'topK', 'maxChars'], 'read');
+    rejectUnknownKeys(record, ['url', 'query', 'topK', 'maxChars', 'mode', 'prompt'], 'read');
     const url = requireHttpUrl(record, 'url', 'fetch requires url or urls[1..8]');
     const query = optionalString(record, 'query');
     const topK = requireTopK(record);
     const maxChars = requireMaxChars(record);
+    const readMode = requireReadModeFields(record, 'url');
     return buildReadQueryFetchRoute({
       url,
       ...(query !== undefined ? { query } : {}),
       ...(topK !== undefined ? { topK } : {}),
       ...(maxChars !== undefined ? { maxChars } : {}),
+      ...readMode,
     });
   }
   throw new Error('fetch requires one of: url, urls[1..8], siteMap:true with url, responseId, or responseId with claims[1..20]');

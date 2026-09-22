@@ -36,6 +36,25 @@ test('fetch.read: argument parser enforces 5-branch union and rejects unknown fi
   assert.throws(() => parseFetchReadArgs({ url: 'ftp://example.com' }), /HTTP\(S\) or GitHub asset URL/);
 });
 
+test('fetch.read: native local-video seam permits readable or answer, never raw', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'fetch-read-local-video-'));
+  const file = join(dir, 'clip.mp4');
+  writeFileSync(file, Buffer.alloc(32));
+
+  assert.deepEqual(parseFetchReadArgs({ url: file }), { action: 'read', url: file });
+  assert.deepEqual(
+    parseFetchReadArgs({ url: file, mode: 'answer', prompt: 'What happens in this video?' }),
+    { action: 'read', url: file, mode: 'answer', prompt: 'What happens in this video?' },
+  );
+  assert.throws(
+    () => parseFetchReadArgs({ url: file, mode: 'raw' }),
+    /local video does not support raw mode/,
+  );
+});
+
 test('fetch.read: out-of-range bounds are rejected instead of clamped', () => {
   assert.throws(() => parseFetchReadArgs({ url: 'https://example.com', maxChars: 0 }), /maxChars/);
   assert.throws(() => parseFetchReadArgs({ url: 'https://example.com', maxChars: 60000 }), /maxChars must be an integer 1\.\.50000/);

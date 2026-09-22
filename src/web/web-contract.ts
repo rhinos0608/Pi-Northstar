@@ -13,7 +13,7 @@
 // Reject-on-out-of-range choice: schema-visible caps (search limit, research
 // limit, topK, maxPages, maxChars, query length) throw invalid_request instead
 // of silent clamping. Silent clamping hides caller bugs and makes pagination
-// accounting lie; the media/social contracts clamp, but web callers span
+// accounting lie; some media adapters still clamp, while social and web reject schema-visible overflow. Web callers span
 // external backends where an unasked-for smaller limit changes billing and
 // result composition. Every rejection names the cap.
 //
@@ -48,6 +48,28 @@ export function isWebAction(value: unknown): value is WebAction {
 function isWebEntityKind(value: unknown): value is WebEntityKind {
   return typeof value === 'string' && WEB_ENTITY_KINDS.has(value);
 }
+
+export const FETCH_MODES = ['readable', 'raw', 'answer'] as const;
+
+export type FetchMode = (typeof FETCH_MODES)[number];
+
+export function isFetchMode(value: unknown): value is FetchMode {
+  return typeof value === 'string' && (FETCH_MODES as readonly string[]).includes(value);
+}
+
+// ── Fetch read-mode bounds ──
+// Single source of truth for the fetch read/answer/raw vocabulary owned by
+// web-fetch-route.ts. The executor (fetch.read handler, never this contract)
+// enforces the runtime halves: raw content-type gate + 5MB cap, answer token
+// budget + ModelRuntime auth.
+
+/** Exact-HTTP raw ceiling: executor aborts and fails closed above this. */
+export const FETCH_RAW_MAX_BYTES = 5_000_000;
+
+/** Nested-model Q&A prompt bound (chars). Over-cap rejects, never truncates. */
+export const FETCH_ANSWER_PROMPT_MAX_CHARS = 8000;
+
+// FETCH_ANSWER_MODEL_MAX_CHARS removed: per-call answerModel override rejected (requireAnswerModel).
 
 // ── Errors ──
 // SocialError is platform-generic; the web channel rides in an untyped slot.

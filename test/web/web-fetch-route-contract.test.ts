@@ -52,19 +52,47 @@ test('claim-check branch rejects offset/limit/findText naming the field', () => 
   assert.throws(() => buildFetchRoute({ responseId: 'r1', claims: [] }), /claims\[1\.\.20\]/);
 });
 
-test('legacy discriminants reject', () => {
-  for (const key of ['mode', 'action', 'source', 'searchQuery', 'followLinks', 'maxDepth'] as const) {
+test('legacy discriminants reject; mode is now read vocabulary', () => {
+  for (const key of ['action', 'source', 'searchQuery', 'followLinks', 'maxDepth'] as const) {
     assert.throws(() => buildFetchRoute({ [key]: 'x', url: 'https://example.com/' } as never), new RegExp(`no longer accepts '${key}'`));
   }
-  assert.throws(() => buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com/' }, query: 'q' } as never), /no longer accepts 'mode'/);
-  assert.throws(() => buildFetchRoute({ mode: 'read', url: 'https://example.com/' } as never), /no longer accepts 'mode'/);
+  // mode readable|raw|answer routes; unknown modes fail closed.
+  assert.equal(buildFetchRoute({ mode: 'readable', url: 'https://example.com/' }).args.mode, 'readable');
+  assert.equal(buildFetchRoute({ mode: 'raw', url: 'https://example.com/' }).args.mode, 'raw');
+  assert.equal(
+    buildFetchRoute({ mode: 'answer', url: 'https://example.com/', prompt: 'what?' }).args.mode,
+    'answer',
+  );
+  assert.throws(() => buildFetchRoute({ mode: 'crawl', url: 'https://example.com/' } as never), /must be one of/);
+  assert.throws(() => buildFetchRoute({ mode: 'read', url: 'https://example.com/' } as never), /must be one of/);
+  assert.throws(
+    () => buildFetchRoute({ mode: 'batch_read', urls: ['https://example.com/a'] } as never),
+    /must be one of/,
+  );
+  assert.throws(
+    () => buildFetchRoute({ url: 'https://example.com/a', mode: 'raw', maxChars: 100 }),
+    /raw rejects 'maxChars'/,
+  );
+  assert.throws(
+    () => buildFetchRoute({ url: 'https://example.com/a', mode: 'answer', prompt: 'what?', maxChars: 100 }),
+    /answer rejects 'maxChars'/,
+  );
 });
 
-test('filesystem paths and non-http schemes reject', () => {
+test('filesystem paths and non-http schemes reject on the public fetch route', () => {
   assert.throws(() => buildFetchRoute({ url: '/etc/passwd' }), /HTTP\(S\) or GitHub asset URL/);
   assert.throws(() => buildFetchRoute({ url: 'file:///etc/passwd' }), /HTTP\(S\) or GitHub asset URL/);
   assert.throws(() => buildFetchRoute({ urls: ['https://example.com/a', './relative'] } as never), /HTTP\(S\) or GitHub asset URL/);
   assert.throws(() => buildFetchRoute({ url: 'https://example.com/', unknownField: 1 } as never), /rejects field 'unknownField'/);
+
+  assert.throws(
+    () => buildFetchRoute({ url: '/tmp/operator-clip.mp4' }),
+    /HTTP\(S\) or GitHub asset URL/,
+  );
+  assert.throws(
+    () => buildFetchRoute({ url: 'file:///tmp/operator-clip.webm', mode: 'readable' }),
+    /HTTP\(S\) or GitHub asset URL/,
+  );
 });
 
 test('url+urls together and empty input reject', () => {

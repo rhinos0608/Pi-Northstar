@@ -7,6 +7,8 @@ import {
   validateCommandResult,
 } from './command-result.js';
 import type { CommandContext } from './command-context.js';
+import { isLocalVideoFile } from '../media-vision/video-local.js';
+import { requireReadModeFields } from '../web/web-fetch-route.js';
 
 export const FETCH_READ_COMMAND = 'fetch.read';
 
@@ -17,6 +19,8 @@ const ALLOWED_FIELDS: ReadonlySet<string> = new Set([
   'query',
   'topK',
   'maxChars',
+  'mode',
+  'prompt',
   'siteMap',
   'maxPages',
   'responseId',
@@ -39,6 +43,13 @@ function errorCode(error: unknown): string {
 
 function isHttpUrl(url: string): boolean {
   return /^https?:\/\//i.test(url);
+}
+
+function requireHandlerReadModeFields(
+  args: Record<string, unknown>,
+  branch: string,
+): { mode?: string; prompt?: string } {
+  return requireReadModeFields(args, branch, invalidInput);
 }
 
 function requireSourceIds(value: unknown): string[] {
@@ -88,7 +99,7 @@ export function parseFetchReadArgs(args: Record<string, unknown>): Record<string
         throw invalidInput('claims must contain non-empty strings');
       }
     }
-    for (const forbidden of ['offset', 'limit', 'findText', 'url', 'urls', 'siteMap', 'maxPages', 'topK', 'maxChars'] as const) {
+    for (const forbidden of ['offset', 'limit', 'findText', 'url', 'urls', 'siteMap', 'maxPages', 'topK', 'maxChars', 'mode', 'prompt'] as const) {
       if (args[forbidden] !== undefined) {
         throw invalidInput(`source_check rejects '${forbidden}': claim-check serves cached claims only`);
       }
@@ -112,7 +123,7 @@ export function parseFetchReadArgs(args: Record<string, unknown>): Record<string
     if (typeof args.responseId !== 'string' || args.responseId.trim() === '') {
       throw invalidInput('retrieve requires responseId');
     }
-    for (const forbidden of ['url', 'urls', 'siteMap', 'maxPages', 'topK', 'maxChars', 'claims'] as const) {
+    for (const forbidden of ['url', 'urls', 'siteMap', 'maxPages', 'topK', 'maxChars', 'claims', 'mode', 'prompt'] as const) {
       if (args[forbidden] !== undefined) {
         throw invalidInput(`retrieve rejects '${forbidden}': retrieve serves cached corpus only`);
       }
@@ -199,6 +210,9 @@ export function parseFetchReadArgs(args: Record<string, unknown>): Record<string
       }
     }
     const parsed: Record<string, unknown> = { urls: cleanedUrls };
+    const multiMode = requireHandlerReadModeFields(args, 'multi');
+    if (multiMode.mode !== undefined) parsed.mode = multiMode.mode;
+    if (multiMode.prompt !== undefined) parsed.prompt = multiMode.prompt;
     if (args.query !== undefined) {
       if (typeof args.query !== 'string') throw invalidInput('query must be a string');
       if (args.query.trim() !== '') parsed.query = args.query.trim();
@@ -223,8 +237,13 @@ export function parseFetchReadArgs(args: Record<string, unknown>): Record<string
     if (action !== undefined && action !== 'read') {
       throw invalidInput(`fetch read rejects action '${action}'`);
     }
-    if (typeof args.url !== 'string' || !isHttpUrl(args.url.trim())) {
-      throw invalidInput("fetch url must be an HTTP(S) or GitHub asset URL, got unsupported scheme or filesystem path in 'url'");
+    if (typeof args.url !== 'string' || args.url.trim() === '') {
+      throw invalidInput("fetch url must be an HTTP(S) or GitHub asset URL, or supported local video path");
+    }
+    const trimmedUrl = args.url.trim();
+    const localVideo = !isHttpUrl(trimmedUrl) && isLocalVideoFile(trimmedUrl);
+    if (!isHttpUrl(trimmedUrl) && !localVideo) {
+      throw invalidInput("fetch url must be an HTTP(S) or GitHub asset URL, or supported existing local video path");
     }
     for (const forbidden of ['urls', 'siteMap', 'maxPages', 'responseId', 'claims', 'sourceIds', 'offset', 'limit', 'findText'] as const) {
       if (args[forbidden] !== undefined) {
@@ -233,8 +252,19 @@ export function parseFetchReadArgs(args: Record<string, unknown>): Record<string
     }
     const parsed: Record<string, unknown> = {
       action: 'read',
-      url: (args.url as string).trim(),
+      url: trimmedUrl,
     };
+    const singleMode = requireHandlerReadModeFields(args, 'url');
+    if (localVideo) {
+      if (args.query !== undefined || args.topK !== undefined || args.maxChars !== undefined) {
+        throw invalidInput('fetch local video accepts url plus optional readable/answer mode');
+      }
+      if (singleMode.mode === 'raw') {
+        throw invalidInput('fetch local video does not support raw mode');
+      }
+    }
+    if (singleMode.mode !== undefined) parsed.mode = singleMode.mode;
+    if (singleMode.prompt !== undefined) parsed.prompt = singleMode.prompt;
     if (args.query !== undefined) {
       if (typeof args.query !== 'string') throw invalidInput('query must be a string');
       if (args.query.trim() !== '') parsed.query = args.query.trim();
@@ -483,6 +513,9 @@ export async function executeFetchRead(args: Record<string, unknown>, context: C
     if (context.signal !== undefined) options.signal = context.signal;
     if (context.lookup !== undefined) options.lookup = context.lookup;
     if (context.fetchPageText !== undefined) options.fetchPageText = context.fetchPageText;
+    if (context.probeCall !== undefined) options.probeCall = context.probeCall;
+    if (context.probeEmbed !== undefined) options.probeEmbed = context.probeEmbed;
+    if (context.answerContextTokens !== undefined) options.answerContextTokens = context.answerContextTokens;
 
     let result = await dispatchFetch(validatedArgs, options);
     // Recheck abort: per-URL isolation may have swallowed an in-flight abort
