@@ -41,16 +41,16 @@
 
   var state = {
     grant: null, // { sessionKey, grantId, leaseExpiresAt }
-    pairingSecret: null, // out-of-band pairing secret provisioned by the operator; sent on every bridge request
+    pairingSecret: null, // pre-seeded or bridge-minted pairing secret; sent on every steady-state bridge request
     bridgeToken: null, // session token paired via POST /register (pinned origin + pairing secret)
     lastRegisterAttempt: 0, // epoch ms of last POST /register attempt
     owned: null, // { tabId, frozenHostname, sessionKey, grantId }
     polling: false,
   };
-  // Re-pair interval when unpaired or the token goes stale (bridge restart
-  // rotates the session token; a token-mismatch route rejection clears the
-  // token so the next loop iteration re-registers promptly).
-  var REGISTER_RETRY_MS = 60_000;
+  // Re-pair interval when unpaired or the token goes stale. The disconnected
+  // poll path already retries loopback every ~2s, so matching that cadence
+  // avoids a 60s first-use stall without introducing a new polling rhythm.
+  var REGISTER_RETRY_MS = 2_000;
   /** Throw when the operation was cancelled (timeout) or the grant is gone.
    *  Checked before every browser mutation so nothing mutates after timeout
    *  or revocation. */
@@ -247,10 +247,10 @@
     } catch (e) {}
     return state.pairingSecret;
   }
-  /** Pair the bridge session token via POST /register (pinned origin +
-   *  pairing secret; Origin alone never pairs).
-   *  Best-effort: pollLoop retries while unpaired; commands fail closed
-   *  against a foreign token once paired. Never logged. */
+  /** Pair the bridge session token via POST /register. Steady-state requires
+   *  pinned origin + pairing secret; the explicit /chrome-authorize window may
+   *  mint the first secret. Best-effort: pollLoop retries while unpaired;
+   *  commands fail closed against a foreign token once paired. Never logged. */
   async function registerCompanion(fetchImpl, chrome, inst, opts) {
     state.lastRegisterAttempt = now();
     var record = inst || null;
@@ -297,6 +297,15 @@
       });
       if (!res.ok) return null;
       var body = await res.json();
+      // Zero-config TOFU bootstrap: the user-armed bridge may mint the pairing
+      // secret on the first successful register. Persist it in session storage
+      // before polling so every steady-state request is secret-gated.
+      if (body && isNonEmptyString(body.pairingSecret)) {
+        // A newly started zero-config bridge mints a new secret. Replace any
+        // stale session-storage secret returned from the previous Pi bridge so
+        // the next /next and /result requests authenticate to this owner.
+        setPairingSecret(body.pairingSecret);
+      }
       if (body && isNonEmptyString(body.bridgeToken)) {
         state.bridgeToken = body.bridgeToken;
         return body.bridgeToken;
@@ -585,6 +594,140 @@
     return found.nodeId;
   }
 
+  async function markSemanticTarget(chrome, tabId, req, marker) {
+    var results = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      world: 'ISOLATED',
+      func: function (locator, query, name, index, exact, markerValue) {
+        var attr = 'data-pi-atlas-semantic-target';
+        var all = Array.from((globalThis.document && globalThis.document.querySelectorAll('*')) || []);
+        for (var ci = 0; ci < all.length; ci++) {
+          try { all[ci].removeAttribute(attr); } catch (e) {}
+        }
+        function norm(v) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); }
+        function matches(value, expected) {
+          var left = norm(value).toLowerCase();
+          var right = norm(expected).toLowerCase();
+          return exact === true ? left === right : left.indexOf(right) !== -1;
+        }
+        function roleOf(el) {
+          var explicit = el.getAttribute && el.getAttribute('role');
+          if (explicit) return norm(explicit).toLowerCase();
+          var tag = String(el.tagName || '').toLowerCase();
+          var type = norm(el.getAttribute && el.getAttribute('type')).toLowerCase();
+          if (tag === 'textarea' || (tag === 'input' && ['text', 'search', 'email', 'url', 'tel', 'password', ''].indexOf(type) !== -1)) return 'textbox';
+          if (el.getAttribute && el.getAttribute('contenteditable') === 'true') return 'textbox';
+          if (tag === 'button' || (tag === 'input' && ['button', 'submit', 'reset'].indexOf(type) !== -1)) return 'button';
+          if (tag === 'a' && el.getAttribute && el.getAttribute('href')) return 'link';
+          if (tag === 'input' && type === 'checkbox') return 'checkbox';
+          if (tag === 'input' && type === 'radio') return 'radio';
+          if (tag === 'select') return 'combobox';
+          return '';
+        }
+        function accessibleName(el) {
+          var aria = el.getAttribute && el.getAttribute('aria-label');
+          if (aria) return aria;
+          var labelledBy = el.getAttribute && el.getAttribute('aria-labelledby');
+          if (labelledBy && globalThis.document) {
+            var parts = labelledBy.split(/\s+/).map(function (id) {
+              var n = globalThis.document.getElementById(id);
+              return n ? norm(n.textContent || '') : '';
+            }).filter(Boolean);
+            if (parts.length) return parts.join(' ');
+          }
+          try {
+            if (el.labels && el.labels.length) {
+              return Array.from(el.labels).map(function (label) { return norm(label.textContent || ''); }).filter(Boolean).join(' ');
+            }
+          } catch (e) {}
+          return (el.getAttribute && (el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('placeholder'))) || norm(el.innerText || el.textContent || '');
+        }
+        var candidates = [];
+        try {
+          if (locator === 'role') {
+            candidates = all.filter(function (el) {
+              return roleOf(el) === norm(query).toLowerCase() && (!name || matches(accessibleName(el), name));
+            });
+          } else if (locator === 'text') {
+            candidates = all.filter(function (el) { return matches(el.innerText || el.textContent || '', query); });
+          } else if (locator === 'label') {
+            candidates = all.filter(function (el) {
+              try {
+                return el.labels && Array.from(el.labels).some(function (label) { return matches(label.textContent || '', query); });
+              } catch (e) { return false; }
+            });
+          } else if (locator === 'placeholder') {
+            candidates = all.filter(function (el) { return matches(el.getAttribute && el.getAttribute('placeholder'), query); });
+          } else if (locator === 'alt') {
+            candidates = all.filter(function (el) { return matches(el.getAttribute && el.getAttribute('alt'), query); });
+          } else if (locator === 'title') {
+            candidates = all.filter(function (el) { return matches(el.getAttribute && el.getAttribute('title'), query); });
+          } else if (locator === 'testid') {
+            candidates = all.filter(function (el) {
+              return matches(el.getAttribute && (el.getAttribute('data-testid') || el.getAttribute('data-test-id')), query);
+            });
+          } else if (locator === 'first' || locator === 'last' || locator === 'nth') {
+            var selected = Array.from(globalThis.document.querySelectorAll(query));
+            if (locator === 'first') candidates = selected.slice(0, 1);
+            else if (locator === 'last') candidates = selected.slice(-1);
+            else candidates = typeof index === 'number' && index >= 0 && index < selected.length ? [selected[index]] : [];
+          }
+        } catch (e) {
+          candidates = [];
+        }
+        var target = candidates[0];
+        if (!target) return false;
+        try {
+          target.setAttribute(attr, markerValue);
+          return true;
+        } catch (e) {
+          return false;
+        }
+      },
+      args: [req.locator, req.query, req.name || '', typeof req.index === 'number' ? req.index : null, req.exact === true, marker],
+    });
+    return Boolean(results && results[0] && results[0].result === true);
+  }
+
+  async function inspectSemanticTarget(chrome, tabId, marker) {
+    var results = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      world: 'ISOLATED',
+      func: function (markerValue) {
+        var attr = 'data-pi-atlas-semantic-target';
+        var nodes = Array.from((globalThis.document && globalThis.document.querySelectorAll('[' + attr + ']')) || []);
+        var target = nodes.find(function (node) { return node.getAttribute(attr) === markerValue; });
+        if (!target) return { found: false, checked: false, text: '' };
+        var ariaChecked = target.getAttribute && target.getAttribute('aria-checked');
+        var checked = target.checked === true || ariaChecked === 'true';
+        var value = typeof target.value === 'string' ? target.value : '';
+        var text = String(target.innerText || target.textContent || value || '').replace(/\s+/g, ' ').trim();
+        return { found: true, checked: checked, text: text };
+      },
+      args: [marker],
+    });
+    var state = results && results[0] && results[0].result;
+    if (!state || state.found !== true) throw new Error('chrome_invalid_result: semantic target disappeared');
+    return state;
+  }
+
+  async function clearSemanticTarget(chrome, tabId, marker) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        world: 'ISOLATED',
+        func: function (markerValue) {
+          var attr = 'data-pi-atlas-semantic-target';
+          var nodes = Array.from((globalThis.document && globalThis.document.querySelectorAll('[' + attr + ']')) || []);
+          for (var i = 0; i < nodes.length; i++) {
+            if (nodes[i].getAttribute(attr) === markerValue) nodes[i].removeAttribute(attr);
+          }
+        },
+        args: [marker],
+      });
+    } catch (e) {}
+  }
+
   async function clickNode(chrome, tabId, nodeId) {
     var box = await cdpSend(chrome, tabId, 'DOM.getBoxModel', { nodeId: nodeId });
     var quad = box && box.model && (box.model.content || box.model.border);
@@ -597,6 +740,15 @@
 
   async function focusNode(chrome, tabId, nodeId) {
     await cdpSend(chrome, tabId, 'DOM.focus', { nodeId: nodeId });
+  }
+
+  async function hoverNode(chrome, tabId, nodeId) {
+    var box = await cdpSend(chrome, tabId, 'DOM.getBoxModel', { nodeId: nodeId });
+    var quad = box && box.model && (box.model.content || box.model.border);
+    if (!Array.isArray(quad) || quad.length < 2) throw new Error('chrome_invalid_result: element has no geometry');
+    var x = Math.round((quad[0] + quad[2]) / 2);
+    var y = Math.round((quad[1] + quad[5]) / 2);
+    await cdpSend(chrome, tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: x, y: y, button: 'none' });
   }
 
   /** Execute one closed-union operation against the owned tab only. */
@@ -794,29 +946,63 @@
         if (!isNonEmptyString(req.locator) || !isNonEmptyString(req.query) || !isNonEmptyString(req.verb)) {
           throw new Error('chrome_invalid_request: semantic_action needs locator/query/verb');
         }
-        await debuggerAttach(chrome, tabId);
+        var marker = 'atlas-' + String(cmd.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80) + '-' + String(Date.now());
+        var marked = false;
+        var attached = false;
         try {
-          var semNode = await queryNode(chrome, tabId, req.locator);
+          throwIfCancelled(signal);
+          marked = await markSemanticTarget(chrome, tabId, req, marker);
+          if (!marked) throw new Error('chrome_invalid_result: semantic target not found');
+          throwIfCancelled(signal);
+          var targetState = await inspectSemanticTarget(chrome, tabId, marker);
           var verb = String(req.verb).toLowerCase();
-          if (verb === 'click' || verb === 'press') {
+          if (verb === 'text') {
+            return { semantic: 'text', text: String(targetState.text || '') };
+          }
+          await debuggerAttach(chrome, tabId);
+          attached = true;
+          throwIfCancelled(signal);
+          var semNode = await queryNode(chrome, tabId, '[data-pi-atlas-semantic-target="' + marker + '"]');
+          throwIfCancelled(signal);
+          if (verb === 'click') {
             await clickNode(chrome, tabId, semNode);
             return { semantic: 'clicked' };
           }
-          if (verb === 'type' || verb === 'fill' || verb === 'input') {
-            if (typeof req.value !== 'string' || req.value.length === 0) {
-              throw new Error('chrome_invalid_request: semantic type needs value');
-            }
-            await focusNode(chrome, tabId, semNode);
-            await cdpSend(chrome, tabId, 'Input.insertText', { text: req.value });
-            return { semantic: 'typed' };
+          if (verb === 'check') {
+            if (targetState.checked !== true) await clickNode(chrome, tabId, semNode);
+            return { semantic: 'checked' };
           }
-          if (verb === 'scroll') {
-            await cdpSend(chrome, tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: 100, y: 100, deltaX: 0, deltaY: 300 });
-            return { semantic: 'scrolled' };
+          if (verb === 'hover') {
+            await hoverNode(chrome, tabId, semNode);
+            return { semantic: 'hovered' };
+          }
+          if (verb === 'fill') {
+            if (typeof req.value !== 'string') {
+              throw new Error('chrome_invalid_request: semantic fill needs value');
+            }
+            throwIfCancelled(signal);
+            await focusNode(chrome, tabId, semNode);
+            throwIfCancelled(signal);
+            var platformInfo = null;
+            try {
+              if (chrome.runtime && typeof chrome.runtime.getPlatformInfo === 'function') {
+                platformInfo = await chrome.runtime.getPlatformInfo();
+              }
+            } catch (e) {}
+            var selectModifier = platformInfo && platformInfo.os === 'mac' ? 4 : 2;
+            await cdpSend(chrome, tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', modifiers: selectModifier, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
+            await cdpSend(chrome, tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', modifiers: selectModifier, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
+            throwIfCancelled(signal);
+            await cdpSend(chrome, tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+            await cdpSend(chrome, tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+            throwIfCancelled(signal);
+            if (req.value.length > 0) await cdpSend(chrome, tabId, 'Input.insertText', { text: req.value });
+            return { semantic: 'filled' };
           }
           throw new Error('chrome_invalid_request: unsupported semantic verb ' + String(req.verb).slice(0, 32));
         } finally {
-          await debuggerDetachBestEffort(chrome, tabId);
+          if (attached) await debuggerDetachBestEffort(chrome, tabId);
+          if (marked) await clearSemanticTarget(chrome, tabId, marker);
         }
       }
       default:

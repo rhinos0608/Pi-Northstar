@@ -559,6 +559,289 @@ test('GET /next rejects a malformed bare instanceId instead of tracking it', asy
   }
 });
 
+test('zero-config bridge bootstraps exactly one paired companion, then requires the minted secret', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ port });
+  try {
+    await server.start();
+    server.armPairingBootstrap();
+    assert.equal(server.pinnedOrigin, null);
+
+    const prePinPoll = await rawRequest(port, '/next?timeoutMs=0', {
+      headers: { origin: EXTENSION_ORIGIN },
+    });
+    assert.equal(prePinPoll.status, 403, 'polling stays closed before TOFU registration');
+
+    const registration = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-tofu-0001',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: null,
+      }),
+    });
+    assert.equal(registration.status, 200);
+    const paired = JSON.parse(registration.text) as { bridgeToken: string; pairingSecret: string };
+    assert.equal(paired.bridgeToken, server.bridgeToken);
+    assert.equal(paired.pairingSecret, server.pairingSecret);
+    assert.equal(server.pinnedOrigin, EXTENSION_ORIGIN);
+    assert.equal(server.liveInstanceCount, 1);
+
+    const secondWithoutSecret = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-tofu-0002',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: null,
+      }),
+    });
+    assert.equal(secondWithoutSecret.status, 403, 'bootstrap closes after first successful registration');
+
+    const steadyPoll = await rawRequest(port, '/next?timeoutMs=0', {
+      headers: { origin: EXTENSION_ORIGIN, 'x-pairing-secret': paired.pairingSecret },
+    });
+    assert.equal(steadyPoll.status, 204);
+
+    const foreign = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'chrome-extension://differentextensionid1234567890' },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-tofu-0003',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: paired.pairingSecret,
+      }),
+    });
+    assert.equal(foreign.status, 403, 'post-bootstrap origin pin remains authoritative');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('user-armed bootstrap replaces a stale zero-config secret after a Pi bridge restart', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ port });
+  try {
+    await server.start();
+    server.armPairingBootstrap();
+
+    const staleSecret = 'stale-secret-from-prior-pi-bridge';
+    const registration = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-restart-001',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: staleSecret,
+      }),
+    });
+    assert.equal(registration.status, 200, 'explicit authorize window repairs stale browser-session pairing');
+    const body = JSON.parse(registration.text) as { pairingSecret?: string; bridgeToken?: string };
+    assert.equal(body.pairingSecret, server.pairingSecret);
+    assert.notEqual(body.pairingSecret, staleSecret);
+    assert.equal(body.bridgeToken, server.bridgeToken);
+    assert.equal(server.pinnedOrigin, EXTENSION_ORIGIN);
+
+    const stalePoll = await rawRequest(port, '/next?timeoutMs=0', {
+      headers: { origin: EXTENSION_ORIGIN, 'x-pairing-secret': staleSecret },
+    });
+    assert.equal(stalePoll.status, 403, 'stale secret stops working as soon as repair completes');
+
+    const repairedPoll = await rawRequest(port, '/next?timeoutMs=0', {
+      headers: { origin: EXTENSION_ORIGIN, 'x-pairing-secret': body.pairingSecret! },
+    });
+    assert.equal(repairedPoll.status, 204);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('configured pairing secret without extension ID authenticates then pins without echoing the secret', async () => {
+  const port = await freePort();
+  const pairing = 'configured-pairing-code-123';
+  const server = new ChromeBridgeServer({ port, pairingSecret: pairing });
+  try {
+    await server.start();
+    assert.equal(server.pinnedOrigin, null);
+    const registration = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-config-001',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: pairing,
+      }),
+    });
+    assert.equal(registration.status, 200);
+    const body = JSON.parse(registration.text) as Record<string, unknown>;
+    assert.equal(body.pairingSecret, undefined, 'configured pairing material is never echoed');
+    assert.equal(server.pinnedOrigin, EXTENSION_ORIGIN);
+    const steadyPoll = await rawRequest(port, '/next?timeoutMs=0', {
+      headers: { origin: EXTENSION_ORIGIN, 'x-pairing-secret': pairing },
+    });
+    assert.equal(steadyPoll.status, 204);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('disarming an unused pairing bootstrap closes registration again', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ port });
+  try {
+    await server.start();
+    server.armPairingBootstrap();
+    server.disarmPairingBootstrap();
+
+    const registration = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-disarmed-01',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: null,
+      }),
+    });
+    assert.equal(registration.status, 403);
+    assert.equal(server.pinnedOrigin, null);
+    assert.equal(server.liveInstanceCount, 0);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('pairing bootstrap can be re-armed after an unused attempt and remains origin-pinned', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ port });
+  try {
+    await server.start();
+
+    server.armPairingBootstrap();
+    server.disarmPairingBootstrap();
+
+    server.armPairingBootstrap();
+    const registration = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-rearm-001',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: null,
+      }),
+    });
+    assert.equal(registration.status, 200);
+    const paired = JSON.parse(registration.text) as { pairingSecret: string };
+    assert.equal(paired.pairingSecret, server.pairingSecret);
+    assert.equal(server.pinnedOrigin, EXTENSION_ORIGIN);
+
+    server.armPairingBootstrap();
+    const foreign = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'chrome-extension://differentextensionid1234567890' },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-rearm-002',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: null,
+      }),
+    });
+    assert.equal(foreign.status, 403, 're-arming never widens the pinned origin');
+
+    const sameOrigin = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-rearm-003',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: null,
+      }),
+    });
+    assert.equal(sameOrigin.status, 200, 'same pinned companion can recover session-scoped pairing');
+    const recovered = JSON.parse(sameOrigin.text) as { pairingSecret: string };
+    assert.equal(recovered.pairingSecret, paired.pairingSecret);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('explicit bootstrap can provision a configured stable pairing secret to a fresh companion', async () => {
+  const port = await freePort();
+  const pairing = 'configured-pairing-code-456';
+  const server = new ChromeBridgeServer({ port, pairingSecret: pairing });
+  try {
+    await server.start();
+    server.armPairingBootstrap();
+    const registration = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({
+        protocol: 1,
+        instanceId: 'inst-config-bootstrap-01',
+        family: 'chromium',
+        version: '1.0.0',
+        caps: '',
+        pairingSecret: null,
+      }),
+    });
+    assert.equal(registration.status, 200);
+    const body = JSON.parse(registration.text) as { pairingSecret?: string; bridgeToken?: string };
+    assert.equal(body.pairingSecret, pairing, 'fresh companion receives the stable secret only inside the armed user flow');
+    assert.equal(body.bridgeToken, server.bridgeToken);
+    const steadyPoll = await rawRequest(port, '/next?timeoutMs=0', {
+      headers: { origin: EXTENSION_ORIGIN, 'x-pairing-secret': pairing },
+    });
+    assert.equal(steadyPoll.status, 204);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('malformed zero-config registration cannot consume the TOFU pin', async () => {
+  const port = await freePort();
+  const server = new ChromeBridgeServer({ port });
+  try {
+    await server.start();
+    server.armPairingBootstrap();
+    const malformed = await rawRequest(port, '/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: EXTENSION_ORIGIN },
+      body: JSON.stringify({ protocol: 1, family: 'chromium', version: '1.0.0', pairingSecret: null }),
+    });
+    assert.equal(malformed.status, 400);
+    assert.equal(server.pinnedOrigin, null);
+    assert.equal(server.liveInstanceCount, 0);
+  } finally {
+    await server.stop();
+  }
+});
+
 test('forged-Origin registration without pairing secret yields no usable token', async () => {
   const port = await freePort();
   const server = new ChromeBridgeServer({ extensionId: EXTENSION_ID, port });

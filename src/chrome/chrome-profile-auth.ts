@@ -33,7 +33,7 @@ export type ChromeTtlSpec =
   | { kind: 'minutes'; minutes: number }
   | { kind: 'indefinite' };
 
-/** Parse `/chrome authorize` TTL args: undefined/'' = 15m, 'Nm', 'indefinite'. */
+/** Parse `/chrome-authorize` TTL args: undefined/'' = 15m, 'Nm', 'indefinite'. */
 export function parseChromeAuthorizeArg(arg: string | undefined): ChromeTtlSpec {
   if (arg === undefined || arg.trim() === '') return { kind: 'default' };
   const trimmed = arg.trim().toLowerCase();

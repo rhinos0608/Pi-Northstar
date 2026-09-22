@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { CHROME_BRIDGE_HOST } from '../../src/chrome/chrome-profile-bridge.js';
 import { ensureChromeBridgeServer, stopChromeBridgeServer } from '../../src/index.js';
 
-const ENV = { PI_SEARCH_CHROME_EXTENSION_ID: 'abcdefghijklmnopqrstuvwxyzabcdef' };
+const ENV = { PI_SEARCH_CHROME_EXTENSION_ID: 'abcdefghijklmnopqrstuvwxyzabcdef', PI_SEARCH_CHROME_PAIRING_SECRET: 'start-race-pairing-secret' };
 
 async function freePort(): Promise<number> {
   const probe = http.createServer();
@@ -34,6 +34,21 @@ test('concurrent ensureChromeBridgeServer calls share a single server', async ()
     assert.equal(first, second, 'concurrent ensure calls must return the same owner');
     const sequential = await ensureChromeBridgeServer(ENV, { port });
     assert.equal(sequential, first, 'post-start ensure must return the cached owner');
+  } finally {
+    await stopChromeBridgeServer();
+  }
+});
+
+test('unconfigured bridge requires explicit pairing authority before it binds', async () => {
+  const port = await freePort();
+  await assert.rejects(
+    () => ensureChromeBridgeServer({}, { port }),
+    /pairing is not armed/,
+  );
+  try {
+    const server = await ensureChromeBridgeServer({}, { port, allowPairingBootstrap: true });
+    assert.equal(server.isShared, false, 'explicit user pairing path owns the fresh bind');
+    assert.deepEqual(server.listInstances(), []);
   } finally {
     await stopChromeBridgeServer();
   }

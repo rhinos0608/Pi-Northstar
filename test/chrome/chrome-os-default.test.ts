@@ -35,6 +35,42 @@ test('chromium default detected from fixed query output', () => {
   assert.ok(out.evidence.length <= OS_DEFAULT_EVIDENCE_MAX_CHARS);
 });
 
+test('macOS LaunchServices parsing ignores installed non-default browsers', () => {
+  const launchServices = `(
+    {
+      LSHandlerRoleAll = "com.brave.Browser";
+      LSHandlerContentType = "public.html";
+    },
+    {
+      LSHandlerRoleAll = "com.apple.Safari";
+      LSHandlerURLScheme = http;
+    },
+    {
+      LSHandlerRoleAll = "com.google.Chrome";
+      LSHandlerURLScheme = ftp;
+    }
+  )`;
+  const out = detectOsDefault({ platform: 'darwin', run: () => launchServices });
+  assert.equal(out?.family, 'safari');
+  assert.equal(out?.isChromium, false);
+});
+
+test('macOS default-family parser recognizes Arc bundle id and prefers http over https fallback', () => {
+  const launchServices = `(
+    {
+      LSHandlerRoleAll = "com.google.Chrome";
+      LSHandlerURLScheme = https;
+    },
+    {
+      LSHandlerRoleAll = "company.thebrowser.Browser";
+      LSHandlerURLScheme = http;
+    }
+  )`;
+  const out = detectOsDefault({ platform: 'darwin', run: () => launchServices });
+  assert.equal(out?.family, 'arc');
+  assert.equal(out?.isChromium, true);
+});
+
 test('non-chromium default flagged; unknown misses return null', () => {
   const safari = detectOsDefault({ platform: 'darwin', run: () => 'com.apple.safari' });
   assert.ok(safari !== null && safari.family === 'safari' && !safari.isChromium);

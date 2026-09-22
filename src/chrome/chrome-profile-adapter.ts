@@ -429,11 +429,11 @@ export class ChromeProfileAdapter {
 
     // Pi-side lock before any bridge dispatch.
     if (!this.auth.canExecute()) {
-      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome authorize first');
+      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome-authorize first');
     }
     const grant = this.auth.currentGrant();
     if (grant === null) {
-      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome authorize first');
+      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome-authorize first');
     }
     if (this.bridge === null) {
       return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge unavailable', true);
@@ -463,7 +463,7 @@ export class ChromeProfileAdapter {
     const grantGrantId = grant.grantId;
     const stamp = this.commandStamp();
     if (stamp === null) {
-      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome authorize first');
+      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome-authorize first');
     }
     const command: ChromeBridgeCommand = {
       protocol: 1,
@@ -518,11 +518,11 @@ export class ChromeProfileAdapter {
   /** Renew the companion lease (send-first: local lease renews only on companion ack). */
   async renewLease(options?: ChromeProfileExecuteOptions): Promise<BackendCallResult> {
     if (!this.auth.canExecute()) {
-      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome authorize first');
+      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome-authorize first');
     }
     const grant = this.auth.currentGrant();
     if (grant === null) {
-      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome authorize first');
+      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome-authorize first');
     }
     if (this.bridge === null) {
       return chromeErrorResult('chrome_extension_unavailable', 'user-chrome bridge unavailable', true);
@@ -530,7 +530,7 @@ export class ChromeProfileAdapter {
     const leaseExpiresAt = this.now() + CHROME_LEASE_MAX_MS;
     const stamp = this.commandStamp();
     if (stamp === null) {
-      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome authorize first');
+      return chromeErrorResult('chrome_locked', 'user-chrome control locked; run /chrome-authorize first');
     }
     const command: ChromeBridgeCommand = {
       protocol: 1,

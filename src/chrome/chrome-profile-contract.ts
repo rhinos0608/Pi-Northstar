@@ -6,7 +6,7 @@
 //
 // Invariants:
 // - One backend-neutral public `browser` tool; no context/backend model
-//   input. `/chrome authorize` selects the privileged backend at runtime;
+//   input. `/chrome-authorize` selects the privileged backend at runtime;
 //   revoke/expiry returns to isolated.
 // - Bridge binds literal 127.0.0.1:17319 (never pi-chrome 17318).
 // - Closed operation union only: no raw CDP, no free-form command, no eval.
@@ -46,7 +46,7 @@ export const CHROME_DNR_DENY_RULE_ID = CHROME_DNR_RULE_BASE;
 export const CHROME_DNR_ALLOW_RULE_ID = CHROME_DNR_RULE_BASE + 1;
 
 // FINAL contract: one backend-neutral `browser` tool with no context/backend
-// model input. `/chrome authorize` selects the privileged backend at runtime.
+// model input. `/chrome-authorize` selects the privileged backend at runtime.
 // No BrowserContext vocabulary ships here.
 
 export type ChromeAuthorizationState =

@@ -105,14 +105,46 @@ function normalizeToken(output: string): string {
 
 function matchFamily(token: string): OsDefaultFamily | null {
   if (token.includes('brave')) return 'brave';
-  if (token.includes('edg') || token.includes('edge')) return 'edge';
-  if (token.includes('arc-company') || /(^|[^a-z])arc([^a-z]|$)/.test(token)) return 'arc';
+  if (token.includes('microsoft.edge') || token.includes('msedge') || token.includes('edge')) return 'edge';
+  // Arc's macOS bundle id is company.thebrowser.Browser and therefore does
+  // not contain the product name at all.
+  if (token.includes('company.thebrowser') || /(^|[^a-z])arc([^a-z]|$)/.test(token)) return 'arc';
   if (token.includes('vivaldi')) return 'vivaldi';
   if (token.includes('chromium') && !token.includes('chrome')) return 'chromium';
   if (token.includes('chrome')) return 'chrome';
-  if (token.includes('safari') || token.includes('apple')) return 'safari';
+  if (token.includes('safari')) return 'safari';
   if (token.includes('firefox') || token.includes('mozilla')) return 'firefox';
   return null;
+}
+
+/**
+ * `defaults read ... LSHandlers` returns every registered LaunchServices
+ * handler, not just the default browser. On macOS, inspect only the dictionary
+ * whose URL scheme is http (https as a fallback) and classify its role bundle
+ * id. Never scan unrelated handler dictionaries, otherwise merely installing
+ * Brave/Chrome/Edge can be mistaken for making it the default.
+ */
+function matchDarwinLaunchServices(output: string): OsDefaultFamily | null {
+  const blocks = [...output.matchAll(/\{([\s\S]*?)\}/g)].map((match) => match[1] ?? '');
+  if (blocks.length === 0) return matchFamily(normalizeToken(output));
+
+  const roleForScheme = (scheme: 'http' | 'https'): string | null => {
+    for (const block of blocks) {
+      const schemeMatch = block.match(/LSHandlerURLScheme\s*=\s*"?([^";\s]+)"?\s*;/i);
+      if (schemeMatch?.[1]?.toLowerCase() !== scheme) continue;
+      const roleMatch = block.match(/LSHandlerRole(?:All|Viewer)\s*=\s*"?([^";\s]+)"?\s*;/i);
+      if (roleMatch?.[1]) return roleMatch[1];
+    }
+    return null;
+  };
+
+  const handler = roleForScheme('http') ?? roleForScheme('https');
+  return handler === null ? null : matchFamily(normalizeToken(handler));
+}
+
+function matchFamilyForQuery(label: string, output: string): OsDefaultFamily | null {
+  if (label === 'darwin:default-http-handler') return matchDarwinLaunchServices(output);
+  return matchFamily(normalizeToken(output));
 }
 
 function boundEvidence(label: string, family: OsDefaultFamily): string {
@@ -145,8 +177,7 @@ export function detectOsDefault(deps?: DetectOsDefaultDeps): OsDefaultDetection 
       continue;
     }
     if (raw === null || raw.length === 0) continue;
-    const token = normalizeToken(raw);
-    const family = matchFamily(token);
+    const family = matchFamilyForQuery(query.label, raw);
     if (family === null) continue;
     return { family, isChromium: isChromiumFamily(family), evidence: boundEvidence(query.label, family) };
   }

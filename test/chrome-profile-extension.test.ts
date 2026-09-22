@@ -81,6 +81,24 @@ function fakeChrome() {
       executeScript: async (opts: Record<string, unknown>) => {
         calls.push(`scripting ${JSON.stringify(opts).slice(0, 120)}`);
         const func = opts.func as ((...a: unknown[]) => unknown) | undefined;
+        const args = Array.isArray(opts.args) ? opts.args : [];
+        if (typeof func === 'function' && args.length >= 6 && typeof args[0] === 'string') {
+          return [{ result: true }];
+        }
+        if (
+          typeof func === 'function' &&
+          args.length === 1 &&
+          typeof args[0] === 'string' &&
+          String(args[0]).startsWith('atlas-') &&
+          String(func).includes('found: false')
+        ) {
+          calls.push('semantic.inspect');
+          return [{ result: { found: true, checked: false, text: 'Semantic target text' } }];
+        }
+        if (typeof func === 'function' && args.length === 1 && typeof args[0] === 'string' && String(args[0]).startsWith('atlas-')) {
+          calls.push('semantic.clear');
+          return [{ result: undefined }];
+        }
         if (typeof func === 'function') return [{ result: '# Atlas snapshot\n@e1 button "Continue"' }];
         return [{}];
       },
@@ -257,6 +275,98 @@ test('companion: navigate installs DNR before tab update; close removes only own
   assert.equal(chrome.calls.some((s) => s.includes('tabs.remove 11')), false, 'never unknown tab');
 });
 
+test('companion: semantic action resolves locator semantics before CDP fill/click', async () => {
+  const chrome = fakeChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  (c.onAuthorize as unknown as (cmd: unknown) => unknown)({ protocol: 1, id: '1', sessionKey: 's1', grantId: 'g1', kind: 'authorize', leaseExpiresAt: Date.now() + 60_000 });
+  const dispatch = c.dispatchOperation as unknown as (ch: unknown, cmd: unknown) => Promise<unknown>;
+  await dispatch(chrome, { protocol: 1, id: 'n', sessionKey: 's1', grantId: 'g1', kind: 'execute', operation: { kind: 'navigate', url: 'https://example.com/', frozenHostname: 'example.com' } });
+  chrome.calls.length = 0;
+
+  const filled = await dispatch(chrome, {
+    protocol: 1, id: 'sem-fill', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'semantic_action', request: { locator: 'role', query: 'textbox', verb: 'fill', value: 'hello' } },
+  }) as Record<string, unknown>;
+  assert.equal(filled.semantic, 'filled');
+  assert.ok(chrome.calls.some((entry) => entry.startsWith('scripting ')), 'semantic locator resolved in isolated world');
+  assert.ok(chrome.calls.includes('cdp DOM.querySelector'), 'resolved target is rebound to a CDP node');
+  assert.ok(chrome.calls.includes('cdp Input.insertText'), 'fill uses native input after semantic resolution');
+
+  chrome.calls.length = 0;
+  const cleared = await dispatch(chrome, {
+    protocol: 1, id: 'sem-clear', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'semantic_action', request: { locator: 'role', query: 'textbox', verb: 'fill', value: '' } },
+  }) as Record<string, unknown>;
+  assert.equal(cleared.semantic, 'filled');
+  assert.equal(chrome.calls.includes('cdp Input.insertText'), false, 'empty fill must not insert replacement text');
+  assert.ok(
+    chrome.calls.filter((entry) => entry === 'cdp Input.dispatchKeyEvent').length >= 4,
+    'empty fill must select existing text then delete it',
+  );
+
+  chrome.calls.length = 0;
+  const checked = await dispatch(chrome, {
+    protocol: 1, id: 'sem-check', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'semantic_action', request: { locator: 'role', query: 'checkbox', verb: 'check' } },
+  }) as Record<string, unknown>;
+  assert.equal(checked.semantic, 'checked');
+  assert.ok(chrome.calls.includes('cdp Input.dispatchMouseEvent'), 'unchecked semantic target is clicked exactly through the native path');
+
+  chrome.calls.length = 0;
+  const hovered = await dispatch(chrome, {
+    protocol: 1, id: 'sem-hover', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'semantic_action', request: { locator: 'role', query: 'button', verb: 'hover' } },
+  }) as Record<string, unknown>;
+  assert.equal(hovered.semantic, 'hovered');
+  assert.ok(chrome.calls.includes('cdp DOM.getBoxModel'));
+  assert.ok(chrome.calls.includes('cdp Input.dispatchMouseEvent'));
+
+  chrome.calls.length = 0;
+  const text = await dispatch(chrome, {
+    protocol: 1, id: 'sem-text', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'semantic_action', request: { locator: 'role', query: 'button', verb: 'text' } },
+  }) as Record<string, unknown>;
+  assert.equal(text.semantic, 'text');
+  assert.equal(text.text, 'Semantic target text');
+
+  chrome.calls.length = 0;
+  const clicked = await dispatch(chrome, {
+    protocol: 1, id: 'sem-click', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'semantic_action', request: { locator: 'role', query: 'button', name: 'Send message', verb: 'click' } },
+  }) as Record<string, unknown>;
+  assert.equal(clicked.semantic, 'clicked');
+  assert.ok(chrome.calls.includes('cdp DOM.getBoxModel'));
+  assert.ok(chrome.calls.includes('cdp Input.dispatchMouseEvent'));
+});
+
+test('companion: semantic marker is cleared when debugger attach fails', async () => {
+  const chrome = fakeChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  (c.onAuthorize as unknown as (cmd: unknown) => unknown)({ protocol: 1, id: '1', sessionKey: 's1', grantId: 'g1', kind: 'authorize', leaseExpiresAt: Date.now() + 60_000 });
+  const dispatch = c.dispatchOperation as unknown as (ch: unknown, cmd: unknown) => Promise<unknown>;
+  await dispatch(chrome, { protocol: 1, id: 'n', sessionKey: 's1', grantId: 'g1', kind: 'execute', operation: { kind: 'navigate', url: 'https://example.com/', frozenHostname: 'example.com' } });
+  chrome.calls.length = 0;
+
+  chrome.debugger.attach = (_target: unknown, _version: unknown, cb: () => void) => {
+    const runtime = chrome.runtime as unknown as { lastError: { message: string } | undefined };
+    runtime.lastError = { message: 'already attached' };
+    cb();
+    runtime.lastError = undefined;
+  };
+
+  await assert.rejects(
+    dispatch(chrome, {
+      protocol: 1, id: 'sem-attach-fail', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+      operation: { kind: 'semantic_action', request: { locator: 'role', query: 'textbox', verb: 'fill', value: 'hello' } },
+    }),
+    /debugger attach failed/,
+  );
+  assert.ok(
+    chrome.calls.includes('semantic.clear'),
+    'semantic target must be cleared when debugger attach fails',
+  );
+});
+
 test('companion: revoke purges locally and detaches; sentinel secrets never echoed', async () => {
   const chrome = fakeChrome();
   const c = loadCompanion(chrome as unknown as Record<string, unknown>);
@@ -332,6 +442,45 @@ test('companion: poll loop starts, heartbeats, and idles without busy-loop', asy
   const instKey = c.INSTANCE_KEY as unknown as string;
   const inst = (await (chrome as unknown as { storage: { session: { get: (k: string) => Promise<Record<string, unknown>> } } }).storage.session.get(instKey))[instKey] as Record<string, unknown>;
   assert.ok(inst && typeof inst.lastSeen === 'number', 'poll loop heartbeats instance');
+});
+
+test('companion: zero-config register stores bridge-minted pairing secret before polling', async () => {
+  const { chrome, store } = sessionChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  const inst = { instanceId: 'inst-bootstrap-01', family: 'chromium', version: '1.0.0' };
+  const fetchImpl = async () => ({
+    ok: true,
+    json: async () => ({ bridgeToken: 'bootstrap-token', pairingSecret: 'bridge-minted-secret-123' }),
+  });
+  const token = await (c.registerCompanion as unknown as (f: unknown, ch: unknown, i: unknown) => Promise<string | null>)(fetchImpl, chrome, inst);
+  assert.equal(token, 'bootstrap-token');
+  const state = (c as unknown as { _state: { pairingSecret: string | null } })._state;
+  assert.equal(state.pairingSecret, 'bridge-minted-secret-123');
+  assert.equal(store.get(c.PAIRING_KEY as unknown as string), 'bridge-minted-secret-123');
+  const headers = (c.pairingHeaders as unknown as () => Record<string, string>)();
+  assert.equal(headers['x-pairing-secret'], 'bridge-minted-secret-123');
+});
+
+test('companion: register replaces stale session pairing when a restarted bridge returns a new secret', async () => {
+  const { chrome, store } = sessionChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  const setPairing = c.setPairingSecret as unknown as (s: string) => string | null;
+  setPairing('stale-pi-secret-123');
+  const inst = { instanceId: 'inst-bootstrap-02', family: 'chromium', version: '1.0.0' };
+  let presented = '';
+  const fetchImpl = async (_url: string, init?: { body?: string }) => {
+    presented = String(JSON.parse(String(init?.body ?? '{}')).pairingSecret ?? '');
+    return {
+      ok: true,
+      json: async () => ({ bridgeToken: 'new-bridge-token', pairingSecret: 'fresh-pi-secret-456' }),
+    };
+  };
+  const token = await (c.registerCompanion as unknown as (f: unknown, ch: unknown, i: unknown) => Promise<string | null>)(fetchImpl, chrome, inst);
+  assert.equal(presented, 'stale-pi-secret-123');
+  assert.equal(token, 'new-bridge-token');
+  const state = (c as unknown as { _state: { pairingSecret: string | null } })._state;
+  assert.equal(state.pairingSecret, 'fresh-pi-secret-456');
+  assert.equal(store.get(c.PAIRING_KEY as unknown as string), 'fresh-pi-secret-456');
 });
 
 test('companion: pairing secret rides register body and poll/result headers; never urls or grants', async () => {

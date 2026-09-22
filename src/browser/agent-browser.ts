@@ -234,6 +234,45 @@ export class AgentBrowserAdapter {
   }
 
   /**
+   * Internal-only file attachment seam for code-owned browser workflows.
+   * This is deliberately NOT a BrowserAction and is therefore unreachable
+   * from the model-facing browser tool schema. Both selector and local path
+   * ride the stdin batch transport rather than child argv.
+   */
+  async uploadFileForInternalUse(
+    selector: string,
+    filePath: string,
+    options: AgentBrowserProcessOptions = {},
+  ): Promise<BackendCallResult> {
+    if (options.env?.PI_SEARCH_BROWSER_ALLOW_SENSITIVE !== '1') {
+      return jsonTextResult({
+        error: 'internal file upload disabled by policy',
+      });
+    }
+    const validatedSelector = validateSelector(selector);
+    if (!validatedSelector) return jsonTextResult({ error: 'selector is required' });
+    if (typeof filePath !== 'string' || filePath.trim() === '' || filePath.includes('\0')) {
+      return jsonTextResult({ error: 'file path is invalid' });
+    }
+    await this.ensureSession(options);
+    const merged = this.mergeOptions(options);
+    const results = await runBatchStdin(
+      [{
+        args: ['upload', validatedSelector, filePath],
+        sensitive: true,
+      }],
+      merged,
+    );
+    const result = results[0];
+    if (result?.success) this.pageState.invalidate(this.session.namespace, 'upload');
+    return jsonTextResult(
+      result?.success
+        ? { ok: true }
+        : { ok: false, error: sanitizeErrorMessage(result?.error ?? 'File upload failed') },
+    );
+  }
+
+  /**
    * Perform a status check - verify executable and version without launching browser.
    */
   async status(): Promise<AgentBrowserStatus & BackendCallResult> {
