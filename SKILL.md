@@ -105,14 +105,15 @@ Do not infer consent from the presence of a key. Sensitive selectors such as ema
 
 ## User-controlled setup
 
-`/reach-status`, `/reach-setup`, and `/chrome` are user slash commands, not agent tools.
+`/reach-status`, `/reach-setup`, `/chrome-install`, `/chrome-authorize`, and `/chrome` are user slash commands, not agent tools.
 
-- `/reach-status [family] [action]`: inspect capability/backend usability.
-- `/reach-setup status|plan|...`: inspect or perform local setup.
-- `/reach-setup import_cookies ...` and `/reach-setup login ...`: explicit credential/session acquisition only.
-- `/chrome authorize ...`: explicit user-Chrome lease; `/chrome revoke` removes it.
+- `/reach-setup`: primary onboarding path. After explicit UI confirmation, import only cookie sessions consumed by operational Atlas backends, then verify installed social CLIs/backends. If exact `PI_VISION_GEMINI_WEB_ENABLED=1` is set, the confirmation explicitly includes the sensitive Google browser-session snapshot used by the isolated Gemini Web fallback; it is stored mode `0600`.
+- `/chrome-install [family]`: install/update the packaged companion into the stable per-user directory, open that Chromium family's extension manager, hand the user the folder path for Chrome's required local-extension confirmation, and remember the prepared family for the next `/chrome-authorize`. It never pairs or grants browser control.
+- `/chrome-authorize [family] [ttl]`: second user-Chrome onboarding step. Starts the loopback bridge and owns the bounded user-armed pairing handoff for a fresh companion (generated secret by default, or the configured stable secret), TOFU-pins the origin unless an extension ID is already pinned, then grants the selected companion lease.
+- `/reach-status [family] [action]`: inspect capability/backend usability. Advanced `/reach-setup status|plan|install_*|import_cookies|login` remains available for diagnosis/manual control.
+- `/chrome status|doctor|revoke`: maintenance; revoke removes the lease and returns to isolated browsing. Legacy `/chrome authorize ...` remains compatible.
 
-Startup and bare auto-setup must not import browser cookies or create authenticated sessions. Do not ask the model-facing tools to perform these operator actions.
+Startup and the internal `reach_setup` auto action must not import browser cookies or create authenticated sessions. Bare **user slash** `/reach-setup` is the explicit consent path and requires interactive confirmation. Do not ask model-facing tools to perform these operator actions.
 
 ## Routing rules
 

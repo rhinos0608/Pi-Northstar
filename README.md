@@ -107,7 +107,7 @@ Provider selection is also operator-owned. The model does not receive provider f
 | V2EX | legacy public reads | `V2EX_PAT` unlocks API 2.0-only reads such as notifications |
 | YouTube | limited details via oEmbed; degraded transcript path via watch page/timedtext | `YOUTUBE_API_KEY` for official search/hot/details; explicit cookie import can help consent-gated transcripts |
 | SPARQL graph | no API key is required, but an operator `GRAPH_SPARQL_ENDPOINT` is required | optional `GRAPH_SPARQL_TOKEN` bearer auth |
-| Browser | isolated local browser path when its dependency is available | user-Chrome companion requires pairing plus explicit `/chrome authorize` |
+| Browser | isolated local browser path when its dependency is available | run `/chrome-install`, load the prepared unpacked companion when Chrome prompts, then run `/chrome-authorize`; first authorization performs a user-armed TOFU pair and grants the lease. `PI_SEARCH_CHROME_EXTENSION_ID` remains an optional strict origin pin and `PI_SEARCH_CHROME_PAIRING_SECRET` an optional stable steady-state pairing value |
 | Desktop | no API key | `PI_SEARCH_DESKTOP_AUTOMATION=1` plus the installed Cua Driver |
 | Vision | a loopback OpenAI-compatible endpoint can be keyless; vision features still require their exact fetch opt-in | cloud OpenAI-compatible/Gemini routes require explicit destination config and credentials/project auth |
 
@@ -141,7 +141,7 @@ Multimodal work stays behind `fetch` and internal acquisition rather than growin
 
 | Asset | Default path | Optional vision path |
 | --- | --- | --- |
-| PDF | `.pdf` URLs and `application/pdf` responses are extracted locally with `unpdf`; normal fetch is bounded to 10 MiB, 50 pages, and 50,000 characters with page citations and sparse-page warnings | none on the normal fetch path today; `PI_VISION_PDF_CLOUD_RENDER=1` is reserved but fails closed until a page-image renderer exists |
+| PDF | `.pdf` URLs and `application/pdf` responses are extracted locally with `unpdf`; normal fetch is bounded to 20 MiB, 100 pages, and 50,000 characters with page citations and sparse-page warnings | none on the normal fetch path today; `PI_VISION_PDF_CLOUD_RENDER=1` is reserved but fails closed until a page-image renderer exists |
 | Image | PNG/JPEG/GIF/WebP bytes are magic-sniffed and returned as bounded metadata | exact `PI_VISION_FETCH_DESCRIBE=1` plus OpenAI-compatible or Gemini produces a separate description in result details |
 | YouTube | metadata/transcript evidence uses the media path; the transcript has its separate unofficial keyless adapter | exact `PI_VISION_FETCH_VIDEO_FRAMES=1` plus OpenAI-compatible or Gemini can add anonymous keyframe evidence; configured vision can also synthesize admitted evidence |
 
@@ -151,13 +151,13 @@ Multimodal work stays behind `fetch` and internal acquisition rather than growin
 
 **Gemini** requires exact `PI_VISION_GEMINI_ENABLED=1`. Developer API mode uses `GEMINI_API_KEY` or `GOOGLE_GENAI_API_KEY`. Vertex mode additionally uses `GOOGLE_GENAI_USE_VERTEXAI=1`, a project (`GOOGLE_VERTEX_PROJECT` or `GOOGLE_CLOUD_PROJECT`), `GOOGLE_CLOUD_LOCATION`, and ADC. `PI_VISION_GEMINI_MODEL` selects the exact model; otherwise the current transport default is `gemini-2.0-flash`.
 
-`PI_VISION_GEMINI_WEB_ENABLED=1` enables a separate last-resort Gemini Web transport seam, but the current fetch image and video analyzers do not select it. One configured destination never authorizes another.
+`PI_VISION_GEMINI_WEB_ENABLED=1` enables a separate last-resort Gemini Web transport behind the existing video gate (`PI_VISION_VIDEO_GEMINI=1`). The user-Chrome lease is preferred for ordinary Web-session work, but the full-file video path requires a code-owned file attachment primitive; when the live lease cannot provide one, Northstar can fall back to a fresh isolated `agent-browser` session seeded from the Google session imported by `/reach-setup`. Bare `/reach-setup` includes that Google snapshot only when Gemini Web is explicitly enabled, and stores it mode `0600`; `/reach-setup import_cookies vision-gemini-web` is the explicit per-provider path. The fetch image/keyframe analyzers never select Gemini Web automatically. One configured destination never authorizes another.
 
 Fetch-time YouTube frames are the narrow exception to the normal media rule around `yt-dlp`: with the exact frames opt-in, Northstar may use `yt-dlp` + `ffmpeg` internally for anonymous frame extraction. That child path strips cookies, account credentials, proxy configuration, and user config. YouTube search/hot/details/transcript do not use `yt-dlp`.
 
 ## Browser, desktop, and setup authority
 
-`/reach-status`, `/reach-setup`, and `/chrome` are **user slash commands**, not model tools. Cookie import and login never happen at startup or because an environment variable happens to exist. They require explicit operator actions such as `/reach-setup import_cookies ...`, `/reach-setup login ...`, or `/chrome authorize`.
+`/reach-status`, `/reach-setup`, `/chrome-install`, `/chrome-authorize`, and `/chrome` are **user slash commands**, not model tools. Reach onboarding stays bare `/reach-setup`; when Gemini Web is explicitly enabled, its confirmation calls out that a sensitive Google browser-session snapshot will also be imported for the isolated fallback. User-Chrome onboarding is deliberately two commands: run `/chrome-install` to refresh a stable local companion directory and open the Chromium extension manager, then run `/chrome-authorize` to pair that installed companion and grant the lease. The family chosen/prepared by `/chrome-install` is remembered for the next authorization, so an OS default such as Safari does not force you to repeat the family argument; an explicit `/chrome-authorize [family]` still overrides it. Chrome retains the final local-extension confirmation (`Load unpacked` on first install, `Reload` after updates); the install command copies the folder path to the clipboard on macOS. Startup never imports cookies, installs the companion, or creates authenticated sessions. Advanced `/reach-setup ...` subcommands and `/chrome status|doctor|revoke` remain maintenance paths; `/chrome revoke` returns to isolated browsing.
 
 Browser navigation enforces URL/origin policy and treats remote content as untrusted evidence. Desktop mutation requires fresh observed state; sensitive keyboard input requires human confirmation. Social write capability is deny-by-default and no provider is currently allowlisted for writes.
 
@@ -167,14 +167,14 @@ Northstar has two leaf-execution paths with different jobs and authority boundar
 
 | Path | Runtime | Configuration | Structured output |
 | --- | --- | --- | --- |
-| adaptive agent steering | co-installed `pi-subagents` over `subagents:runtime:v1` | exact `PI_NORTHSTAR_LEAF_MODEL=provider/model` | negotiated; current producer advertises `structured-v1` |
+| adaptive agent steering | co-installed `pi-subagents` over `subagents:runtime:v1` | `/northstar model provider/model` + `/northstar agent on`; `PI_NORTHSTAR_MODEL` overrides file config and legacy `PI_NORTHSTAR_LEAF_MODEL` remains a fallback | negotiated; current producer advertises `structured-v1` |
 | local broker jobs | `src/runtime/local-leaf-runtime.ts` over the Pi AI model registry | `northstar jobs start --model provider/model` | text-only in the current same-user development runtime |
 
 For the co-installed path, the producer contract in `../pi-subagents/src/api/runtime-rpc.ts` is ground truth; `src/runtime/runtime-rpc-protocol.ts` is Northstar's self-contained consumer mirror. The event protocol exposes `negotiate`, `start`, `status`, `result`, and `cancelAndSettle`. Model IDs are exact `provider/model` strings and thinking suffixes are rejected.
 
 A fresh negotiation is capability discovery, not authorization. The current `pi-subagents` bridge advertises text + JSON output, `structured-v1` schema support, and correlation v2 after a successful exact-model negotiation. Northstar attaches an `outputSchema` only when `structured-v1` was negotiated; otherwise it asks for text JSON and parses/validates locally. Domain validators remain authoritative in both cases. The event bus is trusted co-installed extension plumbing, and correlation metadata is never authentication.
 
-If `PI_NORTHSTAR_LEAF_MODEL` is unset, negotiation fails, the sibling bridge is disabled/unavailable, or a staged leaf call fails, adaptive research degrades to the deterministic/evidence-only path instead of inventing model output. Exact `PI_NORTHSTAR_AGENT_STEERING=0` disables staged model steering even when a leaf runtime is available.
+If no unified/legacy leaf model is selected, agent steering is off, negotiation fails, the sibling bridge is disabled/unavailable, or a staged leaf call fails, adaptive research degrades to the deterministic/evidence-only path instead of inventing model output. `/northstar agent on|off` owns the file-backed preference; exact `PI_NORTHSTAR_AGENT_STEERING=0` remains the hard off override. Legacy `PI_NORTHSTAR_LEAF_MODEL` preserves its pre-unification enabled-by-configuration behavior unless the file preference explicitly says otherwise.
 
 ## Stateful broker
 
@@ -196,7 +196,7 @@ npm run cli -- jobs cancel --project-id local-demo --request-id demo-1
 
 In this local mode the TypeScript host provides a same-user, text-only leaf runtime backed by the existing Pi AI provider stack. The Rust broker still owns public IPC admission, sequence/replay checks, durable submission receipts, and cancellation ownership. Successful starts are journaled with the runtime-issued job ID; definitive failed starts remain settled internal mutations but do not fabricate a job receipt; interrupted dispatches become `outcome_unknown` and are never automatically replayed.
 
-Pi can own the same local broker lifecycle when `PI_NORTHSTAR_BROKER_PROJECT_ID` is set to an exact project ID. On `session_start`, Pi starts the broker only when no healthy owner already exists; on `session_shutdown`, it aborts the broker and local runtime. This opt-in is independent of `PI_NORTHSTAR_LEAF_MODEL`, which remains the separate staged-agent steering configuration. Ordinary CLI/model-triggered job paths never auto-start broker authority.
+Pi can own the same local broker lifecycle when `PI_NORTHSTAR_BROKER_PROJECT_ID` is set to an exact project ID. On `session_start`, Pi starts the broker only when no healthy owner already exists; on `session_shutdown`, it aborts the broker and local runtime. Broker hosting remains a separate authority from the unified Northstar model/agent preference. Ordinary CLI/model-triggered job paths never auto-start broker authority.
 
 **Production release readiness is still gated.** The local executor is not the privileged per-job isolation service. Signed installers, root/SYSTEM worker-service validation, per-job identity isolation, kill-to-zero proof, and the remaining Tier-2 checks stay open in `docs/tier2-proof.md`. Published/production stateful claims must not treat the unsigned source-checkout path as that proof.
 

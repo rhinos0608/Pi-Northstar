@@ -22,5 +22,5 @@ Guidance-only overhaul. No names, schema, defaults, validation, or runtime chang
 
 - `web_search` source/yearFrom research-only, ignored on plain search by contract; cursor research + exact source only; knowledge web-only.
 - `fetch` needs url or searchQuery with query; query alone throws; followLinks needs url + query.
-- `social` limit over-cap rejects for migrated actions (search + six reads); legacy unmigrated actions may still clamp with warning; cursor pins backend.
+- `social` limit over-cap rejects across the canonical request contract; some platform/action pairs have stricter caps (for example LinkedIn people search); cursor pins backend.
 - `kg`: action default search; search limit 10/50; enhance maxEntities 1/10; cursor opaque, fingerprint-pinned, single-provider auto only; fields/includeRelationships/includeEvidence/confidenceThreshold client-side only; score is not confidence; missing confidence retained; maxProviders operator cap wins; sequential auto fallback only; privacy advisory.

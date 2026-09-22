@@ -216,7 +216,7 @@ Media acquisition is not a Pi public tool. Keep platform evidence classes honest
 
 ### Multimodal fetch invariants
 
-- Normal PDF fetch is local-only through `unpdf`: 10 MiB, 50 pages, 50,000 characters, page-aware citations. Sparse/scanned pages warn; fetch must not silently upload a PDF to vision.
+- Normal PDF fetch is local-only through `unpdf`: 20 MiB, 100 pages, 50,000 characters, page-aware citations. Sparse/scanned pages warn; fetch must not silently upload a PDF to vision.
 - `PI_VISION_PDF_CLOUD_RENDER=1` is currently a reserved fail-closed flag because no PDF page-image renderer ships. Do not document it as working OCR/cloud rendering until that renderer is reachable.
 - Direct image fetch returns sniff-verified metadata by default. Description requires exact `PI_VISION_FETCH_DESCRIBE=1` plus a configured OpenAI-compatible or Gemini tier; generated description stays separate from fetched content.
 - YouTube keyframe analysis requires exact `PI_VISION_FETCH_VIDEO_FRAMES=1` plus a configured OpenAI-compatible or Gemini tier. Vision failures degrade toward transcript/metadata evidence, never toward an unconfigured provider.
