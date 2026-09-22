@@ -5,8 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { cookieImportProviders } from '../capabilities.js';
-import { PROVIDER_DESCRIPTORS } from '../setup/providers.js';
+import { defaultSetupCookieImportProviders, PROVIDER_DESCRIPTORS } from '../setup/providers.js';
 
 export interface BrowserCookie {
   name: string;
@@ -103,7 +102,7 @@ export async function importCookiesFromDefaultBrowser(
   // operational channels whose backend genuinely consumes browser sessions.
   const providerNames = options.providers?.length
     ? options.providers
-    : cookieImportProviders();
+    : defaultSetupCookieImportProviders(env);
   const descriptors = providerNames.flatMap((providerName) => {
     const descriptor = PROVIDER_DESCRIPTORS.find((provider) => provider.provider === providerName);
     return descriptor && descriptor.cookieDomains.length > 0 ? [descriptor] : [];
@@ -311,6 +310,22 @@ export function filterCookiesForDomains(cookies: BrowserCookie[], domains: strin
     const domain = cookie.domain.toLowerCase();
     return suffixes.some((suffix) => domain === suffix || domain.endsWith('.' + suffix));
   });
+}
+
+/** Read a provider cookie snapshot for an internal browser replay consumer.
+ * Values never leave this module through status/tool output. Expired and
+ * malformed ByteString cookies are dropped before replay. */
+export function storedCookiesForBrowserReplay(
+  provider: string,
+  env: Record<string, string | undefined>,
+): BrowserCookie[] {
+  const storage = readCookieState(provider, env);
+  if (!storage) return [];
+  const now = Date.now();
+  return storage.cookies
+    .filter((cookie) => !(cookie.expires > 0 && cookie.expires * 1000 < now))
+    .filter((cookie) => isByteStringSafe(cookie.name) && isByteStringSafe(cookie.value))
+    .map((cookie) => ({ ...cookie }));
 }
 
 async function readBrowserCookies(baseDir: string, safeStorageName: string, domains: string[], env: Record<string, string | undefined>): Promise<BrowserCookie[]> {
