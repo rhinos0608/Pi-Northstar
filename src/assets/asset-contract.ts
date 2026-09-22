@@ -10,6 +10,11 @@ export const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 export const IMAGE_MAX_PIXELS = 40_000_000;
 export const PDF_MAX_BYTES = 25 * 1024 * 1024;
 export const PDF_MAX_PAGES = 100;
+
+/** Fetch/PDF tier ceilings are owned separately by
+ * `src/web/access/web-access-pdf.ts` (20 MiB default, operator-selected tier
+ * bounds there). The 25 MiB constant above remains the older generic Plan-B
+ * asset-acquire ceiling and must not be described as the fetch/PDF limit. */
 export const VIDEO_MAX_BYTES = 250 * 1024 * 1024;
 export const VIDEO_MAX_MINUTES = 120;
 export const VIDEO_MAX_KEYFRAMES = 12;

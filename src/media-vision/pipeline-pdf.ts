@@ -16,10 +16,19 @@ import {
   type VisionEvidence,
 } from './pipeline-image.js';
 
-/** PDF ceilings mirror the web-access seam (operator-lower-only). */
+/** PDF ceilings mirror the web-access seam (operator-lower-only).
+ * Tiered default: 20 MiB / 100 pages. Hosted engines (datalab/gemini
+ * transfer) stay OUT until explicit operator opt-in plus the
+ * PI_VISION_PRIVATE transfer gate: `auto` resolves to local unpdf only.
+ * Open seam: attach a page-image renderer + hosted engine option behind
+ * resolvePdfEngine in web-access-pdf.ts; keep PI_VISION_PDF_CLOUD_RENDER
+ * fail-closed until then. */
 export const PDF_MAX_BYTES = WEB_ACCESS_PDF_MAX_BYTES;
 export const PDF_MAX_PAGES = WEB_ACCESS_PDF_MAX_PAGES;
 export const PDF_MAX_CHARS = WEB_ACCESS_PDF_MAX_CHARS;
+
+/** No hosted PDF engine is available in this tree (local-only posture). */
+export const PDF_HOSTED_ENGINES_AVAILABLE = false as const;
 
 /** A page is vision-escalation-worthy when local text is sparse/empty. */
 export const PDF_SCANNED_PAGE_MIN_CHARS = 48;

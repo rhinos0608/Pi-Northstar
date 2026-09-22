@@ -6,10 +6,54 @@
 // Bounds live here (not in the shared contract): byte cap, page cap, timeout,
 // char cap. Page citations use `[p. N]` markers.
 
-export const WEB_ACCESS_PDF_MAX_BYTES = 10 * 1024 * 1024;
-export const WEB_ACCESS_PDF_MAX_PAGES = 50;
+export const WEB_ACCESS_PDF_MAX_BYTES = 20 * 1024 * 1024;
+export const WEB_ACCESS_PDF_MAX_PAGES = 100;
 export const WEB_ACCESS_PDF_TIMEOUT_MS = 30_000;
 export const WEB_ACCESS_PDF_MAX_CHARS = 50_000;
+
+/** Tiered-PDF config ceilings: operator overrides may only lower the
+ * normal fetch ceilings; they never widen the local extraction surface. */
+export const PDF_TIER_DEFAULT_SIZE_MB = 20;
+export const PDF_TIER_HARD_MAX_SIZE_MB = PDF_TIER_DEFAULT_SIZE_MB;
+export const PDF_TIER_DEFAULT_MAX_PAGES = WEB_ACCESS_PDF_MAX_PAGES;
+export const PDF_TIER_HARD_MAX_PAGES = WEB_ACCESS_PDF_MAX_PAGES;
+
+/** Local engine set. `auto` resolves to `unpdf` today; hosted engines
+ * (datalab/gemini transfer) are NOT added until an explicit operator
+ * opt-in plus the PI_VISION_PRIVATE transfer gate exists. */
+export type PdfEngineOption = 'auto' | 'unpdf';
+
+export interface PdfTierConfig {
+  enabled: boolean;
+  maxSizeMB: number;
+  maxPages: number;
+  provider: PdfEngineOption;
+}
+
+export function resolvePdfTierConfig(input?: Partial<PdfTierConfig>): PdfTierConfig {
+  const provider = input?.provider ?? 'auto';
+  if (provider !== 'auto' && provider !== 'unpdf') throw new Error(`unsupported PDF provider: ${String(provider)}`);
+  const maxSizeMB = input?.maxSizeMB ?? PDF_TIER_DEFAULT_SIZE_MB;
+  if (!Number.isFinite(maxSizeMB) || maxSizeMB < 1 || maxSizeMB > PDF_TIER_HARD_MAX_SIZE_MB) {
+    throw new Error(`PDF maxSizeMB must be within 1..${PDF_TIER_HARD_MAX_SIZE_MB} (got ${String(maxSizeMB)})`);
+  }
+  const maxPages = input?.maxPages ?? PDF_TIER_DEFAULT_MAX_PAGES;
+  if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > PDF_TIER_HARD_MAX_PAGES) {
+    throw new Error(`PDF maxPages must be an integer 1..${PDF_TIER_HARD_MAX_PAGES} (got ${String(maxPages)})`);
+  }
+  return { enabled: input?.enabled ?? true, maxSizeMB, maxPages, provider };
+}
+
+/** `auto` = local unpdf now. Future hosted engines attach here behind
+ * operator opt-in + transfer gate; never silently. */
+export function resolvePdfEngine(option: PdfEngineOption = 'auto'): 'unpdf' {
+  void option;
+  return 'unpdf';
+}
+
+export function effectivePdfMaxBytes(config?: Partial<PdfTierConfig>): number {
+  return Math.floor(resolvePdfTierConfig(config).maxSizeMB * 1024 * 1024);
+}
 
 export interface WebAccessPdfRawResult {
   totalPages: number;
@@ -18,7 +62,7 @@ export interface WebAccessPdfRawResult {
 
 export type WebAccessPdfExtractor = (
   data: Uint8Array,
-  options?: { signal?: AbortSignal | undefined },
+  options?: { signal?: AbortSignal | undefined; maxPages?: number | undefined },
 ) => Promise<WebAccessPdfRawResult>;
 
 export interface WebAccessPdfCitation {
@@ -31,6 +75,8 @@ export interface WebAccessPdfText {
   pages: Array<{ page: number; text: string }>;
   citations: WebAccessPdfCitation[];
   text: string;
+  /** Answer-mode markdown: `<!-- PAGE N -->` marker per kept page. */
+  markdown: string;
   truncated: boolean;
 }
 
@@ -40,6 +86,43 @@ export interface WebAccessPdfExtractOptions {
   timeoutMs?: number | undefined;
   maxPages?: number | undefined;
   maxChars?: number | undefined;
+  maxBytes?: number | undefined;
+  tier?: Partial<PdfTierConfig> | undefined;
+}
+
+/** Build answer-mode markdown with `<!-- PAGE N -->` markers, capped at maxChars. */
+export function buildPdfMarkdown(pages: Array<{ page: number; text: string }>, maxChars?: number): string {
+  const markdown = pages.map((p) => `<!-- PAGE ${p.page} -->\n${p.text}`).join('\n\n').trimEnd();
+  if (maxChars === undefined || markdown.length <= maxChars) return markdown;
+  return markdown.slice(0, maxChars);
+}
+
+export interface PdfSavedMarkdown {
+  path: string;
+  bytes: number;
+  pages: number;
+  chars: number;
+  truncated: boolean;
+}
+
+/** Persist markdown under tmp `pi-web-pdf/`; returns path + stats (readable). */
+export async function savePdfMarkdownToTmp(
+  markdown: string,
+  stats: { pages: number; truncated: boolean },
+  deps?: { dir?: string | undefined; id?: string | undefined },
+): Promise<PdfSavedMarkdown> {
+  const { mkdtemp, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { randomUUID } = await import('node:crypto');
+  const { mkdirSync } = await import('node:fs');
+  const base = deps?.dir ?? await mkdtemp(join(tmpdir(), 'pi-web-pdf-'));
+  if (deps?.dir !== undefined) mkdirSync(base, { recursive: true, mode: 0o700 });
+  const dir = await mkdtemp(join(base, 'pdf-'));
+  const name = `${deps?.id ?? randomUUID()}.md`;
+  const path = join(dir, name);
+  await writeFile(path, markdown, { encoding: 'utf8', mode: 0o600 });
+  return { path, bytes: Buffer.byteLength(markdown, 'utf8'), pages: stats.pages, chars: markdown.length, truncated: stats.truncated };
 }
 
 /** Infer PDF format internally: `.pdf` path or `application/pdf` content type. */
@@ -75,15 +158,25 @@ export async function extractWebAccessPdfText(
   options: WebAccessPdfExtractOptions,
 ): Promise<WebAccessPdfText> {
   if (!(data instanceof Uint8Array)) throw new Error('PDF data must be a Uint8Array');
-  if (data.byteLength > WEB_ACCESS_PDF_MAX_BYTES) {
-    throw new Error(`PDF exceeds maximum of ${WEB_ACCESS_PDF_MAX_BYTES} bytes`);
+  if (options.tier !== undefined) {
+    const tier = resolvePdfTierConfig(options.tier);
+    if (!tier.enabled) throw new Error('PDF processing is disabled by config');
+    resolvePdfEngine(tier.provider);
+  }
+  const byteCap = options.maxBytes ?? effectivePdfMaxBytes(options.tier);
+  if (data.byteLength > byteCap) {
+    throw new Error(`PDF exceeds maximum of ${byteCap} bytes`);
   }
   if (options.signal?.aborted) throw new Error('PDF extraction aborted');
-  const maxPages = options.maxPages ?? WEB_ACCESS_PDF_MAX_PAGES;
+  const tierPages = options.tier !== undefined ? resolvePdfTierConfig(options.tier).maxPages : undefined;
+  const maxPages = options.maxPages ?? tierPages ?? WEB_ACCESS_PDF_MAX_PAGES;
   const maxChars = options.maxChars ?? WEB_ACCESS_PDF_MAX_CHARS;
   const timeoutMs = options.timeoutMs ?? WEB_ACCESS_PDF_TIMEOUT_MS;
   const controller = new AbortController();
-  if (options.signal) options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  const forwardAbort = options.signal !== undefined ? () => controller.abort(options.signal?.reason) : undefined;
+  if (options.signal !== undefined && forwardAbort !== undefined) {
+    options.signal.addEventListener('abort', forwardAbort, { once: true });
+  }
   let onExternalAbort: (() => void) | undefined;
   const externalAbort =
     options.signal !== undefined
@@ -97,7 +190,11 @@ export async function extractWebAccessPdfText(
   if (options.signal !== undefined && onExternalAbort !== undefined)
     options.signal.addEventListener('abort', onExternalAbort, { once: true });
   try {
-    const extraction = withTimeout(options.extractor(data, { signal: controller.signal }), timeoutMs, controller);
+    const extraction = withTimeout(
+      options.extractor(data, { signal: controller.signal, maxPages }),
+      timeoutMs,
+      controller,
+    );
     const raw =
       externalAbort !== undefined ? await Promise.race([extraction, externalAbort]) : await extraction;
     options.signal?.throwIfAborted();
@@ -113,8 +210,11 @@ export async function extractWebAccessPdfText(
     }
     text = text.trimEnd();
   if (text.length > maxChars) text = text.slice(0, maxChars);
-  return { totalPages, pages: kept, citations, text, truncated: totalPages > kept.length || text.length >= maxChars };
+  const markdown = buildPdfMarkdown(kept, maxChars);
+  return { totalPages, pages: kept, citations, text, markdown, truncated: totalPages > kept.length || text.length >= maxChars || markdown.length >= maxChars };
   } finally {
+    if (options.signal !== undefined && forwardAbort !== undefined)
+      options.signal.removeEventListener('abort', forwardAbort);
     if (options.signal !== undefined && onExternalAbort !== undefined)
       options.signal.removeEventListener('abort', onExternalAbort);
   }
@@ -226,6 +326,12 @@ export async function loadUnpdfExtractor(injected?: unknown): Promise<WebAccessP
   }
   if (typeof mod.getDocumentProxy !== 'function') return undefined;
   const getDocumentProxy = mod.getDocumentProxy.bind(mod);
-  return async (data: Uint8Array, options?: { signal?: AbortSignal | undefined }) =>
-    extractBoundedProxyPages(() => getDocumentProxy(data), WEB_ACCESS_PDF_MAX_PAGES, options?.signal);
+  return async (
+    data: Uint8Array,
+    options?: { signal?: AbortSignal | undefined; maxPages?: number | undefined },
+  ) => {
+    const maxPages = options?.maxPages ?? WEB_ACCESS_PDF_MAX_PAGES;
+    const boundedPages = Math.min(WEB_ACCESS_PDF_MAX_PAGES, Math.max(1, maxPages));
+    return extractBoundedProxyPages(() => getDocumentProxy(data), boundedPages, options?.signal);
+  };
 }

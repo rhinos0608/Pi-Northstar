@@ -53,6 +53,23 @@ describe('web-access fetch final: specialization routing', () => {
 });
 
 describe('web-access pdf: bounded local extraction, page citations, no OCR/cloud', () => {
+  it('tier overrides stay within their declared hard ceilings', async () => {
+    const {
+      PDF_TIER_HARD_MAX_SIZE_MB,
+      PDF_TIER_HARD_MAX_PAGES,
+      resolvePdfTierConfig,
+    } = await import('../../../src/web/access/web-access-pdf.js');
+    assert.deepEqual(resolvePdfTierConfig({ maxSizeMB: 5, maxPages: 25 }), {
+      enabled: true,
+      maxSizeMB: 5,
+      maxPages: 25,
+      provider: 'auto',
+    });
+    assert.throws(() => resolvePdfTierConfig({ maxSizeMB: 0.5 }), /maxSizeMB/);
+    assert.throws(() => resolvePdfTierConfig({ maxSizeMB: PDF_TIER_HARD_MAX_SIZE_MB + 1 }), /maxSizeMB/);
+    assert.throws(() => resolvePdfTierConfig({ maxPages: PDF_TIER_HARD_MAX_PAGES + 1 }), /maxPages/);
+  });
+
   it('extracts per-page text with [p. N] citations and truncates at page/char caps', async () => {
     const { extractWebAccessPdfText, WEB_ACCESS_PDF_MAX_PAGES } = await import('../../../src/web/access/web-access-pdf.js');
     const pages = Array.from({ length: WEB_ACCESS_PDF_MAX_PAGES + 10 }, (_, i) => `page-${i + 1} body`);
@@ -91,7 +108,28 @@ describe('web-access pdf: bounded local extraction, page citations, no OCR/cloud
     assert.equal(typeof loaded, 'function');
   });
 
-  it('bounds huge-page-count PDFs: numPages gate first, only first 50 pages read', async () => {
+  it('pushes lower maxPages into unpdf before page parsing', async () => {
+    const { loadUnpdfExtractor } = await import('../../../src/web/access/web-access-pdf.js');
+    const requested: number[] = [];
+    const extractor = await loadUnpdfExtractor({
+      getDocumentProxy: async () => ({
+        numPages: 20,
+        getPage: async (n: number) => {
+          requested.push(n);
+          return { getTextContent: async () => ({ items: [{ str: `t${n}`, hasEOL: false }] }) };
+        },
+        loadingTask: { destroy: async () => {} },
+      }),
+    });
+    const raw = await extractor?.(
+      new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+      { maxPages: 3 },
+    );
+    assert.equal(raw?.totalPages, 20);
+    assert.deepEqual(requested, [1, 2, 3]);
+  });
+
+  it('bounds huge-page-count PDFs: numPages gate first, only the configured page ceiling is read', async () => {
     const { loadUnpdfExtractor, WEB_ACCESS_PDF_MAX_PAGES } = await import(
       '../../../src/web/access/web-access-pdf.js'
     );
@@ -184,6 +222,18 @@ describe('web-access pdf: bounded local extraction, page citations, no OCR/cloud
     await assert.rejects(pendingText, /timed out|timeout/i);
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(destroyedOnTimeout, true);
+  });
+
+  it('removes external abort listeners after successful extraction', async () => {
+    const { getEventListeners } = await import('node:events');
+    const { extractWebAccessPdfText } = await import('../../../src/web/access/web-access-pdf.js');
+    const controller = new AbortController();
+    const before = getEventListeners(controller.signal, 'abort').length;
+    await extractWebAccessPdfText(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {
+      extractor: async () => ({ totalPages: 1, pages: ['ok'] }),
+      signal: controller.signal,
+    });
+    assert.equal(getEventListeners(controller.signal, 'abort').length, before);
   });
 
   it('isPdfUrl infers format internally from path or content type', async () => {
