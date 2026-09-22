@@ -72,7 +72,7 @@ const jaccard = (a: Set<string>, b: Set<string>) => {
 };
 
 export function corroboratingFingerprint(excerpt: string): string {
-  return sha256([...tokenBigrams(excerpt)].sort().join('\n')).slice(0, 16);
+  return sha256([...tokenBigrams(excerpt)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join('\n')).slice(0, 16);
 }
 export function isNearDuplicate(a: AgentEvidence, b: AgentEvidence): boolean {
   return a.corroboratingFingerprint === b.corroboratingFingerprint && jaccard(tokenBigrams(a.excerpt), tokenBigrams(b.excerpt)) >= 0.8;
@@ -267,10 +267,10 @@ export function createAgentState({ goal }: { goal: string }): AgentState {
         const fresh = sanitizeQuestionIds(input.questionIds).filter((q) => !existing.questionIds.includes(q));
         if (fresh.length === 0) return existing;
         const room = Math.max(0, MAX_QUESTIONS - existing.questionIds.length);
-        const kept = fresh.sort().slice(0, room);
+        const kept = fresh.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).slice(0, room);
         if (kept.length === 0) return existing;
         existing.questionIds.push(...kept);
-        existing.questionIds.sort();
+        existing.questionIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         // Ephemeral marker ships on a COPY only: the stored entry never gains
         // the mergedQuestions key, so snapshots stay free of ephemeral keys.
         return { ...existing, mergedQuestions: kept };

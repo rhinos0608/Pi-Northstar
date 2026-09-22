@@ -1423,7 +1423,7 @@ export function reachStatusCommandArgs(input: string): { family?: string; action
   // canonical action of at least one available channel in the requested
   // family. One-argument behavior is unchanged.
   const channels = CHANNEL_CAPABILITIES.filter((channel) => channel.family === family && channel.availability === 'available');
-  const supported = [...new Set(channels.flatMap((channel) => channel.actions.map((actionCapability) => actionCapability.action)))].sort();
+  const supported = [...new Set(channels.flatMap((channel) => channel.actions.map((actionCapability) => actionCapability.action)))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   if (!supported.includes(action)) {
     throw new Error(`Action "${action}" is not a supported ${family} action. Supported: ${supported.join(', ')}`);
   }

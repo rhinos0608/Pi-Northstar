@@ -533,7 +533,7 @@ function mapOntologyView(
     return undefined;
   };
   if (view === 'types') {
-    const names = Object.keys(types).filter((key) => keepDeprecated || (types[key] as Record<string, unknown>)?.isDeprecated !== true).sort();
+    const names = Object.keys(types).filter((key) => keepDeprecated || (types[key] as Record<string, unknown>)?.isDeprecated !== true).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     return { ok: true, result: { view: 'types', types: names } };
   }
   if (view === 'fields') {
@@ -550,7 +550,7 @@ function mapOntologyView(
     // stay complete; unscoped callers page per type via view 'fields' + name.
     const fields: Array<{ name: string; type?: string; description?: string }> = [];
     let truncated = false;
-    for (const key of Object.keys(types).sort()) {
+    for (const key of Object.keys(types).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
       const entry = types[key];
       if (!isRecord(entry)) continue;
       if (entry.isDeprecated === true && !keepDeprecated) continue;
@@ -565,13 +565,13 @@ function mapOntologyView(
   if (view === 'search') {
     const needle = (query ?? '').toLowerCase();
     const matches: Array<{ name: string; kind?: string; description?: string }> = [];
-    for (const key of Object.keys(types).sort()) {
+    for (const key of Object.keys(types).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
       const entry = types[key];
       if (!isRecord(entry)) continue;
       if (entry.isDeprecated === true && !keepDeprecated) continue;
       if (key.toLowerCase().includes(needle)) matches.push({ name: key, kind: 'type' });
       const fields = isRecord(entry.fields) ? (entry.fields as Record<string, unknown>) : {};
-      for (const fieldName of Object.keys(fields).sort()) {
+      for (const fieldName of Object.keys(fields).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
         const field = fields[fieldName] as Record<string, unknown>;
         if (field?.isDeprecated === true && !keepDeprecated) continue;
         const description = typeof field?.description === 'string' ? field.description as string : '';
@@ -604,7 +604,7 @@ function mapOntologyView(
 function fieldList(entry: Record<string, unknown>, keepDeprecated: boolean): Array<{ name: string; type?: string; description?: string }> {
   const fields = isRecord(entry.fields) ? (entry.fields as Record<string, unknown>) : {};
   const out: Array<{ name: string; type?: string; description?: string }> = [];
-  for (const key of Object.keys(fields).sort()) {
+  for (const key of Object.keys(fields).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
     const field = fields[key] as Record<string, unknown>;
     if (!isRecord(field)) continue;
     if (field.isDeprecated === true && !keepDeprecated) continue;

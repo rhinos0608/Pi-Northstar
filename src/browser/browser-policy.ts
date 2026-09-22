@@ -149,7 +149,7 @@ export function validateAllowedDomain(pattern: string): string {
 
 export function freezeAllowedDomains(domains: string[]): string[] {
   const validated = domains.map(validateAllowedDomain);
-  validated.sort();
+  validated.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   return validated;
 }
 

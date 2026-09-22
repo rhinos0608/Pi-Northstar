@@ -114,7 +114,7 @@ export function validateSynthesisOutput(
       droppedClaimUnits += 1;
       continue;
     }
-    const sorted = [...new Set(refs as string[])].sort();
+    const sorted = [...new Set(refs as string[])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     if (sorted.some((id) => !admitted.has(id))) {
       droppedClaimUnits += 1;
       continue;
@@ -479,7 +479,7 @@ export function renderResultFromIR(
     ...(entry.locator === undefined ? { locator: { location: entry.canonicalUrl } } : { locator: { ...entry.locator } }),
     warnings: ['derived from admitted evidence'],
   }));
-  return { reportText: parts.join('\n\n'), claims, sources, orphanedClaimUnitIds: [...orphaned].sort(), blockTexts: parts };
+  return { reportText: parts.join('\n\n'), claims, sources, orphanedClaimUnitIds: [...orphaned].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)), blockTexts: parts };
 }
 
 export interface SynthesisPromptArgs {

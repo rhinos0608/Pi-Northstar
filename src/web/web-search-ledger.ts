@@ -129,7 +129,7 @@ function jaccard(a: Set<string>, b: Set<string>): number {
 function canonicalOptions(options: WebSearchLedgerOptions | undefined): string {
   const source = options ?? {};
   const domains =
-    source.domains === undefined ? undefined : [...source.domains].map((d) => d.toLowerCase()).sort();
+    source.domains === undefined ? undefined : [...source.domains].map((d) => d.toLowerCase()).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const knowledge =
     source.knowledge === undefined
       ? undefined
