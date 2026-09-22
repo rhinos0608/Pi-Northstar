@@ -596,12 +596,15 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   }
 
   const dispatchedQueries: Array<{ entry: string; dispatched: Awaited<ReturnType<typeof dispatchBoundedSearch>> }> = [];
+  const perQueryLimit = request.queries.length > 1
+    ? Math.max(1, Math.min(limit, Math.ceil(limit / Math.max(1, request.queries.length))))
+    : limit;
   for (let index = 0; index < request.queries.length; index += WEB_ACCESS_BATCH_CONCURRENCY) {
     const batch = request.queries.slice(index, index + WEB_ACCESS_BATCH_CONCURRENCY);
     const settled = await Promise.all(
       batch.map(async (entry) => ({
         entry,
-        dispatched: await dispatchBoundedSearch(withCategoryHint(entry), limit, env, options.signal, queryFields),
+        dispatched: await dispatchBoundedSearch(withCategoryHint(entry), perQueryLimit, env, options.signal, queryFields),
       })),
     );
     dispatchedQueries.push(...settled);

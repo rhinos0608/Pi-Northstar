@@ -568,7 +568,7 @@ export function isRawContentTypeAllowed(contentType: string | null): boolean {
  * Non-2xx bodies are preserved with their status (not thrown); readability,
  * specializers, and data-URI sanitize are skipped.
  */
-export async function fetchRawUrl(url: string, options: NativeFetchOptions): Promise<BackendCallResult> {
+export async function fetchRawUrl(url: string, options: NativeFetchOptions, maxBytes: number = FETCH_RAW_MAX_BYTES): Promise<BackendCallResult> {
   validateHttpUrl(url);
   await resolvePublicHostname(new URL(url).hostname, options.signal, options.lookup);
   const fetchImpl = options.rawFetchImpl ?? fetch;
@@ -592,9 +592,9 @@ export async function fetchRawUrl(url: string, options: NativeFetchOptions): Pro
     const announced = response.headers.get('content-length');
     if (announced !== null) {
       const parsed = Number.parseInt(announced, 10);
-      if (Number.isInteger(parsed) && parsed > FETCH_RAW_MAX_BYTES) {
+      if (Number.isInteger(parsed) && parsed > maxBytes) {
         try { await response.body?.cancel(); } catch { /* discard best-effort */ }
-        throw new Error(`fetch raw exceeds ${FETCH_RAW_MAX_BYTES} bytes`);
+        throw new Error(`fetch raw exceeds ${maxBytes} bytes`);
       }
     }
     const reader = response.body?.getReader();
@@ -605,15 +605,15 @@ export async function fetchRawUrl(url: string, options: NativeFetchOptions): Pro
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > FETCH_RAW_MAX_BYTES) {
+        if (total > maxBytes) {
           await reader.cancel().catch(() => undefined);
-          throw new Error(`fetch raw exceeds ${FETCH_RAW_MAX_BYTES} bytes`);
+          throw new Error(`fetch raw exceeds ${maxBytes} bytes`);
         }
         chunks.push(value);
       }
     } else {
       const buffer = new Uint8Array(await response.arrayBuffer());
-      if (buffer.byteLength > FETCH_RAW_MAX_BYTES) throw new Error(`fetch raw exceeds ${FETCH_RAW_MAX_BYTES} bytes`);
+      if (buffer.byteLength > maxBytes) throw new Error(`fetch raw exceeds ${maxBytes} bytes`);
       chunks.push(buffer);
       total = buffer.byteLength;
     }
@@ -1100,7 +1100,7 @@ async function dispatchModeMultiFetch(args: Record<string, unknown>, options: Na
     const singleUrl = String(entry);
     try {
       const single = mode === 'raw'
-        ? await fetchRawUrl(singleUrl, options)
+        ? await fetchRawUrl(singleUrl, options, Math.floor(FETCH_RAW_MAX_BYTES / Math.max(1, urls.length)))
         : await fetchAnswerUrl(singleUrl, { prompt: args.prompt }, options);
       out.push(`## ${singleUrl}\n\n${resultToSingleText(single)}`);
       const sourceResponseId = (single as { details?: { responseId?: unknown } }).details?.responseId;
