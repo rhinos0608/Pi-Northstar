@@ -77,6 +77,7 @@ export interface LocalLeafRuntimeOptions {
 
 export class LocalLeafRuntime {
   private modelsPromise: Promise<Models> | undefined;
+  private readonly injectedModels: Models | undefined;
   private readonly runs = new Map<string, LocalRun>();
   private readonly retentionMs: number;
   private readonly maxRuns: number;
@@ -89,7 +90,7 @@ export class LocalLeafRuntime {
     for (const [key, value] of Object.entries(options.env ?? process.env)) {
       if (typeof value === 'string') this.env[key] = value;
     }
-    if (options.models !== undefined) this.modelsPromise = Promise.resolve(options.models);
+    this.injectedModels = options.models;
   }
 
   async request(method: RuntimeRpcMethod, params: Record<string, unknown>): Promise<unknown> {
@@ -117,8 +118,10 @@ export class LocalLeafRuntime {
   }
 
   private async models(): Promise<Models> {
-    if (this.modelsPromise === undefined) {
-      this.modelsPromise = import('@earendil-works/pi-ai/providers/all').then(({ builtinModels }) => builtinModels());
+    if (!this.modelsPromise) {
+      this.modelsPromise = this.injectedModels
+        ? Promise.resolve(this.injectedModels)
+        : import('@earendil-works/pi-ai/providers/all').then(({ builtinModels }) => builtinModels());
     }
     return this.modelsPromise;
   }
