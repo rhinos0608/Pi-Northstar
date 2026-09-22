@@ -100,8 +100,13 @@ export interface NavigationPolicy {
  * Rejects file:, chrome:, about:, data:, blob:, javascript:, ws:, wss:.
  * Rejects credentials in URL.
  * Rejects private/reserved IP ranges and known metadata/local hostnames.
- * Defense-in-depth: does not cover DNS rebinding, redirects, or Chromium DNS TOCTOU.
- * Container egress is the authoritative outer boundary.
+ * Strongly filtered, DNS-rebinding TOCTOU remains in user-Chrome path:
+ * static + preflight DNS checks cannot pin the address Chromium (or the
+ * user-Chrome companion) actually connects to, and companion DNR rules are
+ * hostname-only (they see the URL hostname, not the destination IP), so a
+ * hostname that flips public->private after preflight still passes the
+ * exact-host rule. Defense-in-depth only; container egress is the
+ * authoritative outer boundary where present.
  */
 export function validateNavigationUrl(raw: string): string {
   const url = new URL(raw.trim());
@@ -118,7 +123,11 @@ export function validateNavigationUrl(raw: string): string {
 
 /**
  * DNS preflight: resolve hostname via system DNS and reject if any address is private/reserved.
- * Defense-in-depth — does not prevent DNS rebinding between check and connection.
+ * Strongly filtered, DNS-rebinding TOCTOU remains in user-Chrome path:
+ * the address resolved here can differ from the address Chromium (or the
+ * user-Chrome companion, whose DNR rules match URL hostname only, never the
+ * destination IP) connects to. Callers must not claim containment; see the
+ * post-navigation re-resolution check in agent-browser navigatePublicTarget.
  */
 export async function dnsPreflight(hostname: string, signal?: AbortSignal, lookup?: DnsLookup): Promise<void> {
   await resolvePublicHostname(hostname, signal, lookup);

@@ -109,7 +109,12 @@ pub fn open_durable<P: AsRef<Path>>(path: P) -> Result<Connection, DbError> {
             request_digest  TEXT
          );
          CREATE INDEX IF NOT EXISTS idx_receipts_client_request
-             ON job_receipts(client_id, request_id);",
+             ON job_receipts(client_id, request_id);
+         CREATE TABLE IF NOT EXISTS mutation_claims (
+            client_id  TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            PRIMARY KEY (client_id, request_id)
+         );",
     )?;
     // Populate schema_version on create, read+validate on open.
     // Empty table -> QueryReturnedNoRows -> initialize version 1.
@@ -308,6 +313,119 @@ pub fn delete_job_by_request(
         params![client_id, request_id],
     )?;
     Ok(())
+}
+
+/** Remove a mutation claim only when dispatch provably never occurred.
+ *  Never call after dispatch or any provable-side-effect path. */
+pub fn delete_mutation_claim(
+    conn: &Connection,
+    client_id: &str,
+    request_id: &str,
+) -> Result<(), DbError> {
+    conn.execute(
+        "DELETE FROM mutation_claims WHERE client_id = ?1 AND request_id = ?2",
+        params![client_id, request_id],
+    )?;
+    Ok(())
+}
+
+/** Atomically remove a pending receipt and its mutation claim.
+ *  Provable-non-dispatch cleanup only (mirror of claim_start_atomic): a crash
+ *  between two separate DELETEs would leave a claim without a receipt, so an
+ *  exact retry would hit duplicate_mutation with nothing useful from
+ *  query_receipt. Single BEGIN IMMEDIATE … COMMIT; failures roll back, leaving
+ *  both rows (retry sees duplicate_mutation WITH a queryable receipt). */
+pub fn release_start_artifacts(
+    conn: &Connection,
+    client_id: &str,
+    request_id: &str,
+) -> Result<(), DbError> {
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<(), rusqlite::Error> {
+        conn.execute(
+            "DELETE FROM job_receipts WHERE client_id = ?1 AND request_id = ?2",
+            params![client_id, request_id],
+        )?;
+        conn.execute(
+            "DELETE FROM mutation_claims WHERE client_id = ?1 AND request_id = ?2",
+            params![client_id, request_id],
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            // A failed COMMIT can leave the transaction active; roll back
+            // explicitly so a later request never inherits an open txn.
+            if let Err(e) = conn.execute_batch("COMMIT;") {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(DbError::Sql(e));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Sql(e))
+        }
+    }
+}
+
+/** Atomically claim a mutation id and create its initial pending receipt.
+ *  Single BEGIN IMMEDIATE … COMMIT: a crash between claim and receipt is
+ *  impossible, so a reconnect with the same request id either sees a useful
+ *  receipt (retry returns duplicate_mutation + queryable receipt) or sees
+ *  neither row (exact retry allowed). Any failure rolls back; constraint
+ *  violations map to Duplicate (caller reports duplicate_mutation). */
+pub fn claim_start_atomic(
+    conn: &Connection,
+    client_id: &str,
+    request_id: &str,
+    rec: &ReceiptRecord,
+) -> Result<(), DbError> {
+    check_payload(&rec.receipt_payload)?;
+    check_payload(&rec.request_digest)?;
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<(), rusqlite::Error> {
+        conn.execute(
+            "INSERT INTO mutation_claims (client_id, request_id) VALUES (?1, ?2)",
+            params![client_id, request_id],
+        )?;
+        conn.execute(
+            "INSERT INTO job_receipts
+                (job_id, client_id, request_id, state, submitted_at, receipt_payload, request_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                rec.job_id,
+                rec.client_id,
+                rec.request_id,
+                rec.state.as_str(),
+                rec.submitted_at,
+                rec.receipt_payload,
+                rec.request_digest,
+            ],
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            // A failed COMMIT can leave the transaction active; roll back
+            // explicitly so a later request never inherits an open txn.
+            if let Err(e) = conn.execute_batch("COMMIT;") {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(DbError::Sql(e));
+            }
+            Ok(())
+        }
+        Err(rusqlite::Error::SqliteFailure(ref e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Duplicate)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(DbError::Sql(e))
+        }
+    }
 }
 
 /** Mark unfinished receipts unknown after broker/executor restart. Never retries them. */

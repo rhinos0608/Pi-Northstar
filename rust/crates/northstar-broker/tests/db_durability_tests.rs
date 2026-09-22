@@ -3,7 +3,8 @@
 //! payload bounding, and outcome_unknown mapping. Unprivileged / Tier 1.
 
 use northstar_broker::db::{
-    bind_dispatched_job, delete_job_by_request, insert_job, open_durable, owns_all_jobs,
+    bind_dispatched_job, claim_start_atomic, delete_job_by_request,
+    insert_job, open_durable, owns_all_jobs, release_start_artifacts,
     query_receipt, recover_incomplete_jobs, transition_job, transition_job_by_request, DbError,
     JobState, ReceiptRecord, MAX_PAYLOAD_BYTES,
 };
@@ -181,4 +182,71 @@ fn known_before_dispatch_failure_can_remove_pending_receipt() {
     assert!(query_receipt(&conn, "test-client", "test-req-1")
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn claim_start_atomic_writes_claim_and_receipt_together() {
+    let dir = tempdir().unwrap();
+    let conn = open_durable(dir.path().join("atomic.db")).unwrap();
+    let rec = sample_record("runtime_pending_atomic");
+    claim_start_atomic(&conn, "test-client", "test-req-1", &rec).unwrap();
+    // Receipt queryable: retry with same request id sees useful receipt.
+    let found = query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .expect("receipt must exist after atomic claim");
+    assert_eq!(found.job_id, "runtime_pending_atomic");
+    // Second claim with same identity is a duplicate, receipt intact.
+    let dup = claim_start_atomic(&conn, "test-client", "test-req-1", &rec);
+    assert!(matches!(dup, Err(DbError::Duplicate)));
+    assert!(query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn claim_start_atomic_failure_leaves_neither_row() {
+    let dir = tempdir().unwrap();
+    let conn = open_durable(dir.path().join("atomic-fail.db")).unwrap();
+    // Oversized digest fails payload check before any durable write.
+    let mut rec = sample_record("runtime_pending_fail");
+    rec.request_digest = Some("y".repeat(MAX_PAYLOAD_BYTES + 1));
+    let result = claim_start_atomic(&conn, "test-client", "test-req-1", &rec);
+    assert!(matches!(result, Err(DbError::PayloadTooLarge)));
+    assert!(query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .is_none());
+    let claim_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM mutation_claims WHERE client_id = 'test-client' AND request_id = 'test-req-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claim_count, 0, "failed claim must leave no claim row");
+    // Exact retry after failure is allowed and succeeds.
+    let rec = sample_record("runtime_pending_fail");
+    claim_start_atomic(&conn, "test-client", "test-req-1", &rec).unwrap();
+    assert!(query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn prepare_failure_cleanup_releases_claim_for_exact_retry() {
+    let dir = tempdir().unwrap();
+    let conn = open_durable(dir.path().join("prepare-fail.db")).unwrap();
+    let rec = sample_record("runtime_pending_prepare");
+    claim_start_atomic(&conn, "test-client", "test-req-1", &rec).unwrap();
+    // Simulate provable-non-dispatch cleanup (serialize/prepare/no-executor path):
+    // receipt AND claim released atomically so exact retry is allowed.
+    release_start_artifacts(&conn, "test-client", "test-req-1").unwrap();
+    assert!(query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .is_none());
+    // Exact retry succeeds after cleanup.
+    let rec = sample_record("runtime_pending_prepare");
+    claim_start_atomic(&conn, "test-client", "test-req-1", &rec).unwrap();
+    assert!(query_receipt(&conn, "test-client", "test-req-1")
+        .unwrap()
+        .is_some());
 }

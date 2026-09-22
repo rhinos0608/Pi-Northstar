@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 
 use northstar_broker::auth::{issue_session, verify_token, BrokerAuth};
 use northstar_broker::db::{
-    bind_dispatched_job, delete_job_by_request, insert_job, open_durable, owns_all_jobs,
-    query_receipt, recover_incomplete_jobs, transition_job, transition_job_by_request, JobState,
+    bind_dispatched_job, claim_start_atomic, delete_mutation_claim, open_durable, owns_all_jobs,
+    query_receipt, recover_incomplete_jobs, release_start_artifacts, transition_job, transition_job_by_request, JobState,
     ReceiptRecord,
 };
 use northstar_broker::endpoint::unix::get_peer_identity;
@@ -463,23 +463,8 @@ fn handle_connection(
                         );
                     }
                     RpcMethod::Start => {
-                        match db_conn.execute(
-                            "INSERT INTO mutation_claims (client_id, request_id) VALUES (?1, ?2)",
-                            rusqlite::params![&current_welcome.client_id, &req.request.request_id],
-                        ) {
-                            Ok(_) => {}
-                            Err(rusqlite::Error::SqliteFailure(e, _))
-                                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-                            {
-                                send_error(&mut stream, "duplicate_mutation");
-                                return;
-                            }
-                            Err(_) => {
-                                send_error(&mut stream, "invalid_frame");
-                                return;
-                            }
-                        }
-
+                        // Digest first: a digest failure occurs before any durable write,
+                        // so no claim cleanup is needed on this path.
                         let digest = match request_digest(&req.request) {
                             Ok(value) => value,
                             Err(_) => {
@@ -498,30 +483,59 @@ fn handle_connection(
                             receipt_payload: None,
                             request_digest: Some(digest),
                         };
-                        if insert_job(db_conn, &pending_receipt).is_err() {
-                            send_error(&mut stream, "invalid_frame");
-                            return;
+                        // Atomic claim + pending receipt in one transaction: a crash
+                        // between them is impossible, so a reconnect with the same
+                        // request id either sees a queryable receipt (duplicate_mutation
+                        // with useful receipt) or neither row (exact retry allowed).
+                        // No claim-only black hole can persist.
+                        match claim_start_atomic(
+                            db_conn,
+                            &current_welcome.client_id,
+                            &req.request.request_id,
+                            &pending_receipt,
+                        ) {
+                            Ok(()) => {}
+                            Err(northstar_broker::db::DbError::Duplicate) => {
+                                send_error(&mut stream, "duplicate_mutation");
+                                return;
+                            }
+                            Err(_) => {
+                                send_error(&mut stream, "invalid_frame");
+                                return;
+                            }
                         }
 
                         if let Some(upstream) = executor {
                             let req_bytes = match serde_json::to_vec(&req.request) {
                                 Ok(b) => b,
                                 Err(_) => {
-                                    let _ = delete_job_by_request(
+                                    // Provable non-dispatch: executor never touched.
+                                    // Atomic release so exact retry is allowed (no claim-only residue).
+                                    if release_start_artifacts(
                                         db_conn,
                                         &current_welcome.client_id,
                                         &req.request.request_id,
-                                    );
+                                    )
+                                    .is_err()
+                                    {
+                                        eprintln!("broker: release_start_artifacts failed (serialize)");
+                                    }
                                     send_error(&mut stream, "invalid_frame");
                                     return;
                                 }
                             };
                             if let Err(err) = upstream.prepare() {
-                                let _ = delete_job_by_request(
+                                // Provable non-dispatch: prepare failed before dispatch.
+                                // Atomic release so exact retry is allowed (no claim-only residue).
+                                if release_start_artifacts(
                                     db_conn,
                                     &current_welcome.client_id,
                                     &req.request.request_id,
-                                );
+                                )
+                                .is_err()
+                                {
+                                    eprintln!("broker: release_start_artifacts failed (prepare)");
+                                }
                                 let reply_val = serde_json::json!({
                                     "version": 1,
                                     "requestId": req.request.request_id,
@@ -722,11 +736,16 @@ fn handle_connection(
                             }
                         } else {
                             // No executor exists, so dispatch is provably absent.
-                            let _ = delete_job_by_request(
+                            // Atomic release so exact retry is allowed (no claim-only residue).
+                            if release_start_artifacts(
                                 db_conn,
                                 &current_welcome.client_id,
                                 &req.request.request_id,
-                            );
+                            )
+                            .is_err()
+                            {
+                                eprintln!("broker: release_start_artifacts failed (no-executor)");
+                            }
                             let reply_val = serde_json::json!({
                                 "version": 1,
                                 "requestId": req.request.request_id,
@@ -1027,6 +1046,9 @@ fn handle_cancel_and_settle(
     }
 
     let Some(upstream) = executor else {
+        // Provable non-dispatch: no executor exists. Release the claim so
+        // exact retry is allowed.
+        let _ = delete_mutation_claim(db_conn, client_id, &req.request_id);
         let reply = serde_json::json!({
             "version": 1,
             "requestId": req.request_id,
@@ -1052,6 +1074,9 @@ fn handle_cancel_and_settle(
     let req_bytes = match serde_json::to_vec(req) {
         Ok(bytes) => bytes,
         Err(_) => {
+            // Provable non-dispatch: executor never touched. Release the claim
+            // so exact retry is allowed.
+            let _ = delete_mutation_claim(db_conn, client_id, &req.request_id);
             send_error(stream, "invalid_frame");
             return;
         }

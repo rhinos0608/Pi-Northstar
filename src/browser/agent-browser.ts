@@ -43,6 +43,7 @@ import {
 } from './agent-browser-process.js';
 import { jsonTextResult, textResult } from '../core/tool-output.js';
 import type { DnsLookup } from '../network-policy.js';
+import { resolvePublicHostname } from '../network-policy.js';
 import { SessionPageStateStore, StaleRefError, preflightRef } from './session-page-state.js';
 
 function stripIpv6Brackets(hostname: string): string {
@@ -533,7 +534,7 @@ export class AgentBrowserAdapter {
   }
 
   private async navigatePublicTarget(url: string, options: AgentBrowserProcessOptions): Promise<BackendCallResult> {
-    // ── Public adapter: SSRF defense-in-depth ──
+    // ── Public adapter: strongly filtered, DNS-rebinding TOCTOU remains in user-Chrome path ──
     const preflight = await this.preflightNavigationTarget(url, options.signal);
     if (!preflight.ok) {
       return jsonTextResult({ ok: false, error: preflight.error });
@@ -548,8 +549,35 @@ export class AgentBrowserAdapter {
     if (result.success) {
       if (preflight.pendingHostname) this.commitNavigationFreeze(preflight.pendingHostname);
       this.pageState.invalidate(this.session.namespace, 'navigation');
+      const hostname = new URL(finalUrl).hostname.toLowerCase();
+      const suspect = await this.rebindingSuspectError(hostname, options.signal);
+      if (suspect) {
+        this.pageState.invalidate(this.session.namespace, 'dns-rebinding-suspect');
+        try { await this.close(); } catch { /* best-effort session teardown */ }
+        return jsonTextResult({ ok: false, error: suspect });
+      }
     }
     return jsonTextResult(result.success ? { ok: true, url: finalUrl } : { ok: false, error: sanitizeErrorMessage(result.error ?? 'Command failed') });
+  }
+
+  /**
+   * Best-effort post-navigation DNS re-resolution check (DNS-rebinding suspect detector).
+   * Re-resolves the navigated hostname after a successful open; if it now
+   * resolves private/reserved, the preflight address likely differs from the
+   * address Chromium connected to (DNS rebinding / Chromium DNS TOCTOU).
+   * Returns the degradation error string on suspect (caller invalidates state /
+   * aborts), undefined otherwise. Does NOT claim containment. DNS lookup
+   * failure keeps success (no proof either way).
+   */
+  private async rebindingSuspectError(hostname: string, signal?: AbortSignal): Promise<string | undefined> {
+    try {
+      await resolvePublicHostname(hostname, signal, this.dnsLookup);
+      return undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/private\/reserved address/.test(message)) return undefined;
+      return `DNS rebinding suspected: ${hostname} now resolves private; session invalidated (strongly filtered, DNS-rebinding TOCTOU remains in user-Chrome path)`;
+    }
   }
 
   private async runEvaluateBatch(
@@ -1212,10 +1240,63 @@ export class AgentBrowserAdapter {
     await this.ensureSession(options);
     const merged = this.mergeOptions(options);
 
-    const results = await runBatchStdin(
-      this.batchStdinCommands(batch, normalizedUrls),
-      merged,
-    );
+    const stdinCmds = this.batchStdinCommands(batch, normalizedUrls);
+    // Dispatch incrementally, split at navigation boundaries: a successful
+    // navigation is re-resolved BEFORE later commands dispatch, so eval/click/
+    // type cannot run against a rebound host. Unexecuted commands on suspect
+    // synthesize aborted failures to preserve step alignment.
+    const orderedNavs = [...navIndices].sort((a, b) => a - b);
+    const navSet = new Set(orderedNavs);
+    const segmentEnds: number[] = [...orderedNavs.map((i) => i + 1), stdinCmds.length];
+    const results: AgentBrowserResult[] = new Array(stdinCmds.length);
+    let cursor = 0;
+    let suspectError: string | undefined;
+    for (const end of segmentEnds) {
+      if (suspectError) break;
+      if (end <= cursor) continue;
+      const expected = end - cursor;
+      const segmentResults = await runBatchStdin(stdinCmds.slice(cursor, end), merged);
+      if (segmentResults.length < expected) {
+        // Fail closed on incomplete results: execution state is unknown (a
+        // navigation may have run unconfirmed), so later segments must not
+        // dispatch. Falls into the abort path below.
+        for (let k = 0; k < segmentResults.length && cursor + k < stdinCmds.length; k++) {
+          results[cursor + k] = segmentResults[k]!;
+        }
+        cursor = end;
+        suspectError =
+          `batch aborted: incomplete results for dispatched commands (expected ${expected}, got ${segmentResults.length})`;
+        break;
+      }
+      for (let k = 0; k < segmentResults.length && cursor + k < stdinCmds.length; k++) {
+        results[cursor + k] = segmentResults[k]!;
+      }
+      cursor = end;
+      const navIdx = end - 1;
+      if (navIdx >= 0 && navSet.has(navIdx) && results[navIdx]?.success) {
+        if (stagedHost) this.commitStagedFreezeIfNavigated(stagedHost, navIndices, results);
+        const navUrl = normalizedUrls.get(navIdx);
+        if (navUrl) {
+          suspectError = await this.rebindingSuspectError(
+            new URL(navUrl).hostname.toLowerCase(),
+            options.signal,
+          );
+        }
+      }
+    }
+    // Fail closed on short CLI returns: every command gets an explicit result so
+    // step alignment holds and an unconfirmed navigation never skips re-check.
+    for (let i = 0; i < results.length; i++) {
+      results[i] ??= { success: false, error: 'missing batch result' };
+    }
+    if (suspectError) {
+      for (let i = cursor; i < stdinCmds.length; i++) {
+        results[i] = { success: false, error: `aborted: ${suspectError}` };
+      }      const abortedSteps = this.buildBatchSteps(batch, results);
+      this.pageState.invalidate(this.session.namespace, 'dns-rebinding-suspect');
+      try { await this.close(); } catch { /* best-effort session teardown */ }
+      return jsonTextResult({ steps: abortedSteps, ok: false, error: suspectError });
+    }
 
     this.commitStagedFreezeIfNavigated(stagedHost, navIndices, results);
 

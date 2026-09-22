@@ -41,6 +41,10 @@ export interface ChromeBridgeInstanceInfo {
 // frozenHostname and the companion derives deny/allow rule ids from the
 // per-tab base. Keep both sides on ruleBaseForTab so future Pi-side rule
 // planning cannot collide with companion-installed rules.
+// DNR confinement is hostname-only: rules match the URL hostname, never the
+// destination IP, so DNS rebinding (hostname flipping public->private after
+// preflight) still passes. Strongly filtered, DNS-rebinding TOCTOU remains
+// in user-Chrome path — never claim containment.
 export const CHROME_DNR_RULE_BASE = 1000;
 export const CHROME_DNR_DENY_RULE_ID = CHROME_DNR_RULE_BASE;
 export const CHROME_DNR_ALLOW_RULE_ID = CHROME_DNR_RULE_BASE + 1;

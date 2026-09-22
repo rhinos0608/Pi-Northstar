@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { delimiter, join } from 'node:path';
-import { appendUserToolBinsToPath, buildPythonChildEnvironment } from '../../src/process/python-child-env.js';
+import { appendUserToolBinsToPath, buildEmbeddingChildEnvironment, buildPythonChildEnvironment, buildScraplingChildEnvironment } from '../../src/process/python-child-env.js';
 
 // ──────────────────────────────────────────────
 // Part 1: Direct unit tests for buildPythonChildEnvironment
@@ -91,6 +91,32 @@ test('excludes vars matching BLOCKED_PATTERN (TOKEN/KEY/SECRET/AUTH/...)', () =>
   assert.equal(env.LD_PRELOAD, undefined);
   assert.equal(env.DYLD_INSERT_LIBRARIES, undefined);
   assert.equal(env.npm_config_registry, undefined);
+});
+
+test('proxy authority split: embedding excludes proxies, scrapling keeps them', () => {
+  const parentEnv: Record<string, string> = {
+    PATH: '/usr/bin',
+    HOME: '/home/user',
+    HTTP_PROXY: 'http://user:pass@proxy:8080',
+    HTTPS_PROXY: 'http://user:pass@proxy:8080',
+    http_proxy: 'http://user:pass@proxy:8080',
+    https_proxy: 'http://user:pass@proxy:8080',
+    PI_SEARCH_SCRAPLING_PROXY: 'http://user:pass@proxy:8080',
+    NO_PROXY: 'localhost',
+  };
+  const embedding = buildEmbeddingChildEnvironment(parentEnv);
+  assert.equal(embedding.HTTP_PROXY, undefined);
+  assert.equal(embedding.HTTPS_PROXY, undefined);
+  assert.equal(embedding.http_proxy, undefined);
+  assert.equal(embedding.https_proxy, undefined);
+  assert.equal(embedding.PI_SEARCH_SCRAPLING_PROXY, undefined);
+  assert.equal(embedding.NO_PROXY, 'localhost');
+  const scrapling = buildScraplingChildEnvironment(parentEnv);
+  assert.equal(scrapling.HTTP_PROXY, 'http://user:pass@proxy:8080');
+  assert.equal(scrapling.PI_SEARCH_SCRAPLING_PROXY, 'http://user:pass@proxy:8080');
+  // Back-compat alias preserves scrapling (proxy) authority.
+  const legacy = buildPythonChildEnvironment(parentEnv);
+  assert.equal(legacy.HTTP_PROXY, 'http://user:pass@proxy:8080');
 });
 
 // ──────────────────────────────────────────────

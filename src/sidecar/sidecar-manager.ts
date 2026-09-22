@@ -4,7 +4,7 @@ import { createServer as realCreateServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { buildPythonChildEnvironment } from '../process/python-child-env.js';
+import { buildEmbeddingChildEnvironment } from '../process/python-child-env.js';
 
 const DEFAULT_PYTHON_PATH = 'python3';
 // Package-root resolution (no cwd dependence): src/sidecar/sidecar-manager.ts lives
@@ -150,7 +150,7 @@ export class SidecarManager {
 
         const spawned = this._spawn(this.options.pythonPath, args, {
           stdio: ['pipe', 'pipe', 'inherit'],
-          env: buildPythonChildEnvironment(),
+          env: buildEmbeddingChildEnvironment(),
         });
         child = spawned;
         const currentChild: ChildProcess = spawned;

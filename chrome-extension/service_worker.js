@@ -449,6 +449,11 @@
    * Tab-scoped DNR rules: deny-all default (priority 1) + exact-host allow
    * for http/https over the frozen hostname (priority 2). Applied to the
    * owned tab only, before navigation; DNR failure aborts navigation.
+   * Hostname-only confinement: DNR matches the URL hostname, never the
+   * destination IP, so a hostile hostname that flips public->private
+   * (DNS rebinding) still passes the exact-host rule. Strongly filtered,
+   * DNS-rebinding TOCTOU remains in user-Chrome path; Pi-side preflight +
+   * post-navigation re-resolution are best-effort only and never claim containment.
    */
   function buildDnrRules(frozenHostname, tabId, ruleBase) {
     var base = typeof ruleBase === 'number' ? ruleBase : ruleBaseForTab(tabId);
