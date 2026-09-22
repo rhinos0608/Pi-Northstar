@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { runFetchVideoAnalysis } from '../../src/media-vision/video-analysis.js';
 import type { FrameRunner } from '../../src/media-vision/frame-extract.js';
 import {
@@ -83,7 +84,7 @@ test('video-local: Windows drive/UNC paths are filesystem-shaped, not URL scheme
 test('video-local: isLocalVideoFile detects paths + file://, rejects remote', () => {
   const path = tempVideo();
   assert.equal(isLocalVideoFile(path), true);
-  assert.equal(isLocalVideoFile(`file://${path}`), true);
+  assert.equal(isLocalVideoFile(pathToFileURL(path).href), true);
   assert.equal(isLocalVideoFile('https://example.com/clip.mp4'), false);
   assert.equal(isLocalVideoFile('https://www.youtube.com/watch?v=x'), false);
   assert.equal(isLocalVideoFile('/nope/missing.mp4'), false);
