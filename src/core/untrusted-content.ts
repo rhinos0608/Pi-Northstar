@@ -33,7 +33,7 @@ export function isExternalToolName(name: string): name is ExternalToolName {
 
 const CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 const FORMATTING_RE =
-  /[\u00AD\u034F\u115F\u1160\u17B4\u17B5\u200B-\u200F\u202A-\u202E\u2028\u2029\u2060-\u2069\u3164\uFEFF\uFFA0]/;
+  /[\u00AD\u115F\u1160\u17B4\u17B5\u200B-\u200F\u202A-\u202E\u2028\u2029\u2060-\u2069\u3164\uFEFF\uFFA0]|\u034F/;
 const LATIN_RE = /[A-Za-z]/;
 const CYRILLIC_RE = /[\u0400-\u04FF]/;
 const GREEK_RE = /[\u0370-\u03FF]/;

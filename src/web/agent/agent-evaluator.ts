@@ -87,7 +87,7 @@ export function sanitizeGapLine(value: string): string {
  *  clean queries. */
 export function sanitizeEvaluatorQuery(value: string): string {
   return value
-    .replace(/(?:\x1B\]|\x9D).*?(?:\x07|\x1B\\)/g, '')
+    .replace(/(?:\x1B\]|\x9D)[^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
     .replace(/(?:\x1B\[|\x9B)[\d;]*[A-Za-z]?/g, '')
     .replace(/[\n\r]+/g, ' ')
     .replace(/[\x00-\x1F\x7F\x80-\x9F\u200B-\u200D\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
