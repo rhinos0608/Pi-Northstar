@@ -16,6 +16,9 @@ test('CLI discovery exposes fetch and search domains, capabilities, and help', a
   const fetchHelp = await runCommand(['fetch', '--help'], {});
   assert.equal(fetchHelp.ok, true);
   assert.equal((fetchHelp.data as { commandId: string }).commandId, 'fetch.read');
+  const fetchUsage = (fetchHelp.data as { usage: string }).usage;
+  assert.match(fetchUsage, /--mode readable\|raw\|answer/);
+  assert.match(fetchUsage, /--prompt QUESTION/);
 
   const fetchReadHelp = await runCommand(['fetch', 'read', '--help'], {});
   assert.equal(fetchReadHelp.ok, true);
@@ -33,6 +36,8 @@ test('CLI discovery exposes fetch and search domains, capabilities, and help', a
 test('CLI fetch and search reject malformed flags and arguments strictly', async () => {
   assert.equal((await runCommand(['fetch', '--bogus'], {})).error?.code, 'unknown_flag');
   assert.equal((await runCommand(['fetch', 'https://example.com', '--query'], {})).error?.code, 'invalid_usage');
+  assert.equal((await runCommand(['fetch', 'https://example.com', '--mode'], {})).error?.code, 'invalid_usage');
+  assert.equal((await runCommand(['fetch', 'https://example.com', '--prompt'], {})).error?.code, 'invalid_usage');
   assert.equal((await runCommand(['fetch', 'https://example.com', '--top-k', 'abc'], {})).error?.code, 'invalid_usage');
   assert.equal((await runCommand(['fetch', 'https://example.com', '--json', '--agent'], {})).error?.code, 'invalid_usage');
   assert.equal((await runCommand(['fetch', 'https://example.com', 'extra_arg'], {})).error?.code, 'invalid_usage');

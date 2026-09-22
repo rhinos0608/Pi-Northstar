@@ -1,7 +1,7 @@
 # Northstar target architecture
 
-Status: proposed architecture for audit before implementation.
-Scope: redesign of the repository currently located at Pi-Atlas and packaged as pi-northstar.
+Status: living architecture plus target-state design. Sections explicitly labeled **as built** describe reachable code; sections framed as proposed/should/end-state remain design direction rather than installed-version grammar.
+Scope: current Pi-Northstar architecture and the remaining redesign direction for the repository located at Pi-Atlas.
 
 ## Architectural thesis
 
@@ -403,7 +403,7 @@ Where an official maintained SDK or CLI is strong, prefer a thin adapter. Norths
 Three tiers, in cost order. Ordinary web, fetch, research-source, GitHub, knowledge, and social capabilities must not depend on the adaptive controller (next section).
 
 1. `fetch.query` — inside-content retrieval. The query is a ranking hint over the fetched page chunks (read-query path in `src/web/web-fetch-route.ts`, chunk ranking in `src/native-fetch.ts`); tiny, no model spend.
-2. `fetch.answer` (`--mode answer --prompt`) — probe quick-investigate over one page. Coverage gate (BM25 over extract chunks, fused with embeddings via RRF when available) runs first; bounded background of at most 5 calls (`PROBE_MAX_BACKGROUND_CALLS` in `src/web/page-query.ts`; current executor uses 1 search plus up to 3 follow-up fetches, never answer mode); returns answer + citations + escalate flag. Session model only: per-call `answerModel` is rejected (`requireAnswerModel`), no env/slash lookup; the unified model id is agent-only.
+2. `fetch.answer` (`--mode answer --prompt`) — probe quick-investigate over one page. Coverage gate (BM25 over extract chunks, fused with embeddings via RRF when available) runs first; bounded background of at most 5 calls (`PROBE_MAX_BACKGROUND_CALLS` in `src/web/page-query.ts`; current executor uses 1 search plus up to 3 follow-up fetches, never answer mode); returns grounded answer/evidence plus source/background and an escalate flag. Session model only: per-call `answerModel` is rejected and the question is admitted by `requireAnswerPrompt`; no env/slash model lookup occurs inside the probe, and the unified model id is agent-only.
 3. `web_search mode:agent` — full research. The adaptive PLAN → GATHER → EVALUATE → REFINE loop (`src/web/agent/agent-core.ts`) with workflow-owned budgets; large, iterative planning.
 
 Supporting contracts: raw mode returns the admitted HTTP text body after UTF-8 decoding (`FETCH_RAW_MAX_BYTES = 5_000_000` in `src/web/web-contract.ts`, text/* plus JSON/XML gate, non-2xx preserved). Normal PDF fetch stays local through `unpdf` (20 MiB / 100 pages / 50k chars in `src/web/access/web-access-pdf.ts`). Full-file video fallback needs exact `PI_VISION_VIDEO_GEMINI=1` (Files API upload with existing Developer key first, Gemini Web only when the direct Gemini tier is unavailable and behind exact `PI_VISION_VIDEO_GEMINI=1` + `PI_VISION_GEMINI_WEB_ENABLED=1`; a live user-Chrome lease is preferred, while full-file attachment can fall back to a fresh isolated Reach-cookie session seeded by the Google snapshot imported through `/reach-setup`; default off = zero bytes off-machine; `GEMINI_VIDEO_ENABLED_ENV_VAR` in `src/media-vision/gemini.ts`). Operator model/agent selection is the `/northstar` slash only (`model <provider/id> | model clear | agent <on|off> | status`, `registerNorthstarCommand` in `src/index.ts`): never a model tool, never gated on `PI_SEARCH_NATIVE_TOOLS`.

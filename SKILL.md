@@ -38,13 +38,13 @@ Use this root skill to choose the right surface. Then read the matching `skills/
 
 Use `web_search` first when you need candidate sources. Plain search fuses configured provider rankings deterministically. Provider selection is environment-only; do not ask for or invent a provider flag.
 
-`mode:"agent"` creates a parent-owned adaptive job for multi-step research. Poll only the returned job with `agent_poll`. Unknown, expired, or foreign job identifiers fail closed rather than enumerating jobs. When exact `PI_NORTHSTAR_LEAF_MODEL=provider/model` is configured, staged steering can negotiate the co-installed `pi-subagents` `subagents:runtime:v1` bridge; failure or exact `PI_NORTHSTAR_AGENT_STEERING=0` keeps the deterministic/evidence-only path.
+`mode:"agent"` creates a parent-owned adaptive job for multi-step research. Poll only the returned job with `agent_poll`. Unknown, expired, or foreign job identifiers fail closed rather than enumerating jobs. Staged steering uses the operator-selected `/northstar model provider/model` (or `PI_NORTHSTAR_MODEL` override) after `/northstar agent on`; legacy `PI_NORTHSTAR_LEAF_MODEL` remains a compatibility fallback. Negotiation failure or exact `PI_NORTHSTAR_AGENT_STEERING=0` keeps the deterministic/evidence-only path.
 
 For academic literature and public-data sources, use the research category in Pi or the dedicated CLI domain. The research registry covers 12 source-specific adapters and does not substitute generic web on source failure.
 
 ### Fetch
 
-Use `fetch` after discovery or when a URL is already known. It owns URL reads, same-origin sitemap discovery, no-network operations over a prior `responseId`, and URL-specialized PDF/image/media handling.
+Use `fetch` after discovery or when a URL is already known. It owns URL reads, same-origin sitemap discovery, no-network operations over a prior `responseId`, and URL-specialized PDF/image/media handling. URL reads support `readable` (default), bounded textual `raw`, and quick-investigate `answer` modes; Pi answer mode reuses the active session model, while standalone CLI answer mode has no Pi model and therefore returns evidence-only.
 
 - PDF fetch is local-first through `unpdf` and never silently invokes cloud vision. Sparse/scanned pages warn; the PDF cloud-render flag is currently fail-closed because no page renderer ships.
 - Direct image URLs return verified metadata by default. Exact `PI_VISION_FETCH_DESCRIBE=1` plus configured OpenAI-compatible or Gemini vision can add a separate generated description.

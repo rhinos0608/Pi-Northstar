@@ -1,6 +1,6 @@
 # Northstar capability-exposure matrix (Phase 6 groundwork, audit only)
 
-Status: audit only. Counts refreshed against current source and test evidence.
+Status: historical Phase 6 audit snapshot, not a live line-number index. The 28-command/9-tool inventory remains useful, but source line references and validation totals below describe the audit point at which this file was written; use reachable code, `northstar capabilities`, and `src/capabilities.ts` / `src/commands/command-registry.ts` for current truth.
 Baseline: plan.md Phase 6 classes: CLI+skill / explicit native-tool-only / dual / workflow-only / internal-only / intentionally-removed.
 Rule used: trace registered route before claiming. "Registered" = `pi.registerTool` call in `src/index.ts` / `src/github/github.ts` gated by `PI_SEARCH_NATIVE_TOOLS` allowlist (`src/capabilities.ts`). "CLI" = `northstar <domain> ...` grammar in `src/cli/cli.ts`. "Skill" = entry in `src/skills/skill-registry.ts` + `skills/` file. "Legacy dispatch" = reachable ONLY via `callNativeTool` direct branch (`src/native-tools.ts`), `callReachTool` (`src/reach-tools.ts`), or raw `northstar call` / private worker (`src/cli/cli.ts:43-46`, `src/cli/worker.ts:12`) with no registry/CLI/skill coverage.
 

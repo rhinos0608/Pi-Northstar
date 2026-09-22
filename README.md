@@ -53,7 +53,7 @@ After package installation, the same surface is available as `northstar` (and `p
 | Domain | Commands | Default auth shape |
 | --- | --- | --- |
 | `search` | web discovery | keyless baseline; optional keyed providers |
-| `fetch` | URL read, sitemap, cached retrieval/verification | keyless native reader; optional external processors |
+| `fetch` | readable/raw URL reads, quick-investigate answer mode, sitemap, cached retrieval/verification | keyless native reader; optional external processors; answer synthesis reuses the active Pi session model when available |
 | `github` | repo, file, tree, search, trending, issues, pulls, releases, commits, workflows, runs | public reads keyless; token optional |
 | `research` | search, paper, citations | all 12 sources usable anonymously; keys raise quotas |
 | `social` | search, read | V2EX baseline is keyless; most other platforms use credentials or local login sessions |
@@ -123,6 +123,8 @@ Provider selection is also operator-owned. The model does not receive provider f
 
 Plain web search fuses fulfilled provider rankings deterministically with reciprocal rank fusion. Provider failures remain observable; an all-provider failure is not rewritten as "zero results." Search results can yield a local `responseId`, which `fetch` can use for no-network slicing, text lookup, and claim checks.
 
+The live URL branches support three read modes. `readable` is the default extracted-page path; `raw` preserves the admitted textual HTTP body up to the fixed 5 MB ceiling; `answer` runs the bounded quick-investigate evidence pipeline. In Pi, answer synthesis reuses the active session model and never accepts a per-call model selector. The standalone CLI exposes the same `--mode answer --prompt ...` contract but has no Pi session model, so it fails closed to evidence-only output after acquisition/coverage checks rather than inventing a model.
+
 External page processors are not silent fallbacks. Firecrawl/Jina fetch processing requires `PI_SEARCH_EXTERNAL_FETCH=1` plus an explicit ordered `PI_SEARCH_FETCH_BACKENDS` list. Authenticated fetch profiles use a narrower path: HTTPS, configured hosts only, same-origin redirects, and no external rendering.
 
 Some optional routes send content to third parties:
@@ -144,6 +146,7 @@ Multimodal work stays behind `fetch` and internal acquisition rather than growin
 | PDF | `.pdf` URLs and `application/pdf` responses are extracted locally with `unpdf`; normal fetch is bounded to 20 MiB, 100 pages, and 50,000 characters with page citations and sparse-page warnings | none on the normal fetch path today; `PI_VISION_PDF_CLOUD_RENDER=1` is reserved but fails closed until a page-image renderer exists |
 | Image | PNG/JPEG/GIF/WebP bytes are magic-sniffed and returned as bounded metadata | exact `PI_VISION_FETCH_DESCRIBE=1` plus OpenAI-compatible or Gemini produces a separate description in result details |
 | YouTube | metadata/transcript evidence uses the media path; the transcript has its separate unofficial keyless adapter | exact `PI_VISION_FETCH_VIDEO_FRAMES=1` plus OpenAI-compatible or Gemini can add anonymous keyframe evidence; configured vision can also synthesize admitted evidence |
+| Local video file | operator/native fetch accepts bounded local video files and extracts metadata/keyframes locally | exact `PI_VISION_FETCH_VIDEO_FRAMES=1` enables configured keyframe vision; exact `PI_VISION_VIDEO_GEMINI=1` additionally permits the bounded full-file Gemini fallback, with Gemini Web available only behind its second explicit opt-in |
 
 ### Vision destinations
 

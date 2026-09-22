@@ -1586,7 +1586,7 @@ async function fetchCommandResult(
   const skill = domainSkill("fetch.read");
   const usage =
     skill?.cliHelp ??
-    "northstar fetch URL [--query QUERY] [--top-k N] [--max-chars N] [--site-map] [--max-pages N] [--response-id ID] [--find-text TEXT] [--offset N] [--limit N] [--claim CLAIM ...] [--json|--agent]";
+    "northstar fetch URL [--mode readable|raw|answer] [--prompt QUESTION] [--query QUERY] [--top-k N] [--max-chars N] [--site-map] [--max-pages N] [--response-id ID] [--find-text TEXT] [--offset N] [--limit N] [--claim CLAIM ...] [--json|--agent]";
   if (args[0] === "--help" || args[0] === "-h" || args.length === 0) {
     return {
       ok: true,
@@ -1644,6 +1644,8 @@ async function fetchCommandResult(
       claims.push(val);
     } else if (
       arg === "--query" ||
+      arg === "--mode" ||
+      arg === "--prompt" ||
       arg === "--response-id" ||
       arg === "--find-text" ||
       arg === "--source-ids"
@@ -1655,6 +1657,8 @@ async function fetchCommandResult(
       if (typeof val !== "string") return val;
       i++;
       if (arg === "--query") requestArgs.query = val;
+      else if (arg === "--mode") requestArgs.mode = val;
+      else if (arg === "--prompt") requestArgs.prompt = val;
       else if (arg === "--response-id") requestArgs.responseId = val;
       else if (arg === "--find-text") requestArgs.findText = val;
       else if (arg === "--source-ids")
