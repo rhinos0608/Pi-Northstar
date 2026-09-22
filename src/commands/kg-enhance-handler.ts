@@ -111,7 +111,8 @@ function redactEmbeddedEmails(label: string): string {
   let output = '';
   let cursor = 0;
 
-  for (let at = label.indexOf('@'); at !== -1; at = label.indexOf('@', at + 1)) {
+  let at = label.indexOf('@');
+  while (at !== -1) {
     let start = at;
     while (start > cursor && isEmailLocalChar(label[start - 1]!)) start--;
     let end = at + 1;
@@ -120,11 +121,14 @@ function redactEmbeddedEmails(label: string): string {
     const domain = label.slice(at + 1, end);
     const lastDot = domain.lastIndexOf('.');
     const tld = lastDot >= 0 ? domain.slice(lastDot + 1) : '';
-    if (start === at || lastDot <= 0 || tld.length < 2 || !/^[A-Za-z]+$/.test(tld)) continue;
+    if (start === at || lastDot <= 0 || tld.length < 2 || !/^[A-Za-z]+$/.test(tld)) {
+      at = label.indexOf('@', at + 1);
+      continue;
+    }
 
     output += label.slice(cursor, start) + '[REDACTED_EMAIL]';
     cursor = end;
-    at = end - 1;
+    at = label.indexOf('@', end);
   }
 
   return output + label.slice(cursor);
