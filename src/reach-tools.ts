@@ -225,7 +225,7 @@ async function describeChannelBackends(channel: ChannelDefinition, candidates: C
     const declared = backendCapability(channel.name, backend.name);
     const supportsAction = !canonicalAction || backendSupportsAction(channel.name, backend.name, canonicalAction);
     const authenticated = backendAuthSatisfied(channel.name, backend.name, env);
-    const completeness = declared?.quality ?? (backend.type === 'native' ? 'full' : 'full');
+    const completeness = declared?.quality ?? 'full';
     if (backend.type === 'native') {
       rows.push({ backend: backend.name, mode: 'native', authenticated, actionVerified: supportsAction, completeness });
       continue;
