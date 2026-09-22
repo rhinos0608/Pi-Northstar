@@ -16,6 +16,9 @@ const CONFIGURED_TOOL_NAMES = [
 
 const EXPECTED_COMMAND_NAMES = [
   'chrome',
+  'chrome-authorize',
+  'chrome-install',
+  'northstar',
   'reach-status',
   'reach-setup',
 ] as const;

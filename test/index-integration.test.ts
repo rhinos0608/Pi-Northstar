@@ -99,19 +99,27 @@ test('selectChromeCompanion never fabricates inventory; ambiguity fails', () => 
   assert.equal(dup.ok, false);
 });
 
-test('ensureChromeBridgeServer fails closed without extension identity', async () => {
-  await assert.rejects(() => ensureChromeBridgeServer({}), /PI_SEARCH_CHROME_EXTENSION_ID/);
+test('ensureChromeBridgeServer gates unconfigured auto-pin behind explicit pairing authority', async () => {
+  await assert.rejects(() => ensureChromeBridgeServer({}, { port: 0 }), /pairing is not armed/);
+  const server = await ensureChromeBridgeServer({}, { port: 0, allowPairingBootstrap: true });
+  assert.deepEqual(server.listInstances(), []);
   await stopChromeBridgeServer();
 });
 
 test('ensureChromeBridgeServer starts and stops on an ephemeral port', async () => {
   const server = await ensureChromeBridgeServer(
-    { PI_SEARCH_CHROME_EXTENSION_ID: 'abcdefghijklmnopqrstuvwxyzabcdef' },
+    {
+      PI_SEARCH_CHROME_EXTENSION_ID: 'abcdefghijklmnopqrstuvwxyzabcdef',
+      PI_SEARCH_CHROME_PAIRING_SECRET: 'integration-pairing-secret',
+    },
     { port: 0 },
   );
   assert.deepEqual(server.listInstances(), []);
   const again = await ensureChromeBridgeServer(
-    { PI_SEARCH_CHROME_EXTENSION_ID: 'abcdefghijklmnopqrstuvwxyzabcdef' },
+    {
+      PI_SEARCH_CHROME_EXTENSION_ID: 'abcdefghijklmnopqrstuvwxyzabcdef',
+      PI_SEARCH_CHROME_PAIRING_SECRET: 'integration-pairing-secret',
+    },
     { port: 0 },
   );
   assert.equal(again, server);

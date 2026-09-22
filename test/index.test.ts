@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildBrowseArgs, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs } from '../src/index.js';
+import { buildBrowseArgs, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs, sessionFetchProbeDeps } from '../src/index.js';
 import Value from 'typebox/value';
 import { CHANNEL_CAPABILITIES, REACH_FAMILIES, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
 
@@ -51,6 +51,63 @@ test('buildFetchRoute empty params throw union error', () => {
   assert.throws(() => buildFetchRoute({} as never), /requires one of/);
 });
 
+test('fetch answer probe reuses the exact active session model with no tool surface', async () => {
+  const model = { id: 'active-model', provider: 'test', contextWindow: 64_000 };
+  let seenModel: unknown;
+  let seenContext: Record<string, unknown> | undefined;
+  let seenOptions: Record<string, unknown> | undefined;
+  const deps = sessionFetchProbeDeps({
+    model: model as never,
+    modelRegistry: {
+      async complete(actualModel: unknown, context: Record<string, unknown>, options: Record<string, unknown>) {
+        seenModel = actualModel;
+        seenContext = context;
+        seenOptions = options;
+        return {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'grounded answer' }],
+          stopReason: 'stop',
+          errorMessage: undefined,
+        };
+      },
+    } as never,
+  });
+  assert.equal(deps.answerContextTokens, 64_000);
+  assert.ok(deps.probeCall);
+  const out = await deps.probeCall!({
+    system: 'system evidence rules',
+    page: '<page>page evidence</page>',
+    background: '<background>background evidence</background>',
+    source: '<source>https://example.com/source</source>',
+    prompt: 'what happened?',
+  });
+  assert.equal(out, 'grounded answer');
+  assert.equal(seenModel, model, 'the nested call must reuse ctx.model exactly');
+  assert.equal(seenContext?.systemPrompt, 'system evidence rules');
+  assert.equal('tools' in (seenContext ?? {}), false, 'the nested probe exposes no tools');
+  const messages = seenContext?.messages as Array<{ content?: unknown }> | undefined;
+  assert.match(String(messages?.[0]?.content ?? ''), /<page>page evidence<\/page>/);
+  assert.match(String(messages?.[0]?.content ?? ''), /<source>https:\/\/example\.com\/source<\/source>/);
+  assert.match(String(messages?.[0]?.content ?? ''), /<question>\nwhat happened\?\n<\/question>/);
+  assert.equal(seenOptions?.maxTokens, 2000);
+  assert.equal(seenOptions?.maxRetries, 0);
+});
+
+test('fetch answer probe stays evidence-only when the Pi session has no active model', () => {
+  const deps = sessionFetchProbeDeps({ model: undefined, modelRegistry: {} as never });
+  assert.deepEqual(deps, {});
+});
+
+test('fetch answer production deps expose lazy embeddings unless explicitly disabled', () => {
+  const ctx = { model: undefined, modelRegistry: {} as never };
+  const enabled = sessionFetchProbeDeps(ctx, undefined, {});
+  assert.equal(typeof enabled.probeEmbed, 'function');
+  const disabled = sessionFetchProbeDeps(ctx, undefined, { PI_SEARCH_EMBEDDING_ENABLED: '0' });
+  assert.equal(disabled.probeEmbed, undefined);
+  const disabledFalse = sessionFetchProbeDeps(ctx, undefined, { PI_SEARCH_EMBEDDING_ENABLED: 'false' });
+  assert.equal(disabledFalse.probeEmbed, undefined);
+});
+
 test('buildFetchRoute single url routes to fetch read-query path', () => {
   const route = buildFetchRoute({ url: 'https://example.com/page' });
   assert.equal(route.tool, 'fetch');
@@ -88,11 +145,11 @@ test('buildFetchRoute rejects url+urls together', () => {
 test('buildFetchRoute rejects legacy crawl shapes and filesystem paths', () => {
   assert.throws(
     () => buildFetchRoute({ mode: 'crawl', source: { type: 'url', url: 'https://example.com/' }, query: 'q' } as never),
-    /no longer accepts 'mode'/,
+    /no longer accepts 'source'/,
   );
   assert.throws(
     () => buildFetchRoute({ mode: 'crawl', source: { type: 'search', searchQuery: 'topic' }, query: 'docs' } as never),
-    /no longer accepts 'mode'/,
+    /no longer accepts 'source'/,
   );
   assert.throws(
     () => buildFetchRoute({ url: 'https://example.com/', followLinks: true } as never),
@@ -107,6 +164,17 @@ test('fetch schema enforces the 5-branch union at validation', async () => {
   assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a' } }), true);
   assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', query: 'q', topK: 3 } }), true);
   assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a'] } }), true);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'readable', query: 'q', topK: 3, maxChars: 1000 } }), true);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'raw' } }), true);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'raw', query: 'q' } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'raw', prompt: 'q?' } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer' } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer', prompt: 'what is this?' } }), true);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer', prompt: 'q?', topK: 3 } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer', prompt: 'q?', maxChars: 1000 } }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', prompt: 'q?' } }), false);
+  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a'], mode: 'answer', prompt: 'q?' } }), true);
+  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a'], mode: 'answer', prompt: 'q?', query: 'x' } }), false);
   assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', urls: ['https://example.com/b'] } }), false);
   assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', siteMap: true } }), true);
   assert.equal(Value.Check(schema, { request: { responseId: 'r1' } }), true);
@@ -114,6 +182,9 @@ test('fetch schema enforces the 5-branch union at validation', async () => {
   assert.equal(Value.Check(schema, { request: { mode: 'read', url: 'https://example.com/a' } }), false);
   assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'q' } }), false);
   assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', query: 'q', extra: 1 } }), false);
+  assert.equal(Value.Check(schema, { request: { url: '/tmp/operator-clip.mp4' } }), false, 'model-facing schema must reject local filesystem paths');
+  assert.equal(Value.Check(schema, { request: { url: 'file:///tmp/operator-clip.mp4' } }), false);
+  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a', '/tmp/clip.mp4'] } }), false);
 });
 
 
@@ -228,7 +299,7 @@ test('buildSearchRoute research paper category routes to web_search', () => {
 });
 
 test('buildFetchRoute rejects every legacy discriminant', () => {
-  for (const key of ['mode', 'action', 'source', 'searchQuery', 'followLinks', 'maxDepth'] as const) {
+  for (const key of ['action', 'source', 'searchQuery', 'followLinks', 'maxDepth'] as const) {
     assert.throws(
       () => buildFetchRoute({ [key]: 'x', url: 'https://example.com/' } as never),
       new RegExp(`no longer accepts '${key}'`),
@@ -701,8 +772,9 @@ test('browser schema batch commands exposes args subfield', async () => {
 test('browser schema job steps exposes kind subfield', async () => {
   const tool = await captureBrowserTool();
   const job = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'job')!.properties.job as { properties: Record<string, unknown> };
-  const steps = job.properties.steps as { items: { properties: Record<string, unknown> } };
-  assert.ok(steps.items.properties.kind, 'job steps[].kind must be present');
+  const steps = job.properties.steps as { items: { anyOf?: Array<{ properties: Record<string, unknown> }>; properties?: Record<string, unknown> } };
+  const kind = steps.items.properties?.kind ?? steps.items.anyOf?.[0]?.properties?.kind;
+  assert.ok(kind, 'job steps[].kind must be present');
 });
 
 // ── /reach-status <family> <action> command parsing (registry-validated) ──
@@ -1022,7 +1094,8 @@ test('guidance: fetch states the 5-branch union', async () => {
   const defs = await captureAllTools();
   const description = defs.fetch?.description ?? '';
   assert.ok(/5-branch union/i.test(description), 'fetch description must state the 5-branch union');
-  assert.ok(/Legacy mode\/action\/source\/searchQuery\/followLinks\/maxDepth rejected/i.test(description), 'fetch description must document legacy rejection');
+  assert.ok(/Legacy action\/source\/searchQuery\/followLinks\/maxDepth rejected/i.test(description), 'fetch description must document legacy rejection (mode is a valid read mode, not legacy)');
+  assert.ok(/readable\|raw\|answer/i.test(description), 'fetch description must document the url/urls read modes');
   assert.ok(/urls\[1\.\.8\]/i.test(description), 'fetch description must note multi-url reads');
   assert.ok(/per-URL isolation/i.test(description), 'multi branch must promise per-URL isolation');
   assert.ok(/claims\[1\.\.20\]/i.test(description), 'claim-check branch must name claims[1..20]');
@@ -1030,22 +1103,24 @@ test('guidance: fetch states the 5-branch union', async () => {
   assert.equal(params.type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
   const branches = requestBranches(params as any);
   assert.equal(branches.length, 5, 'fetch schema must be a five-branch union');
-  for (const branch of branches) {
-    assert.equal(branch.additionalProperties, false, 'every fetch branch must be closed');
+  const leafBranches = branches.flatMap((branch) => branch.anyOf ?? branch.oneOf ?? [branch]);
+  for (const branch of leafBranches) {
+    assert.equal(branch.additionalProperties, false, 'every concrete fetch branch must be closed');
   }
-  const keys = Object.keys(branchProperties(params as any));
+  const keys = Object.keys(Object.assign({}, ...leafBranches.map((branch) => branch.properties ?? {})));
   for (const key of ['url', 'urls', 'query', 'siteMap', 'responseId', 'claims']) {
     assert.ok(keys.includes(key), `fetch schema must expose field ${key}`);
   }
-  for (const key of ['mode', 'source', 'searchQuery', 'followLinks', 'maxDepth']) {
+  assert.ok(keys.includes('mode'), 'fetch schema must expose the read-mode field mode on the url/urls branches');
+  for (const key of ['source', 'searchQuery', 'followLinks', 'maxDepth']) {
     assert.ok(!keys.includes(key), `fetch schema must not expose legacy field ${key}`);
   }
 });
 
-test('guidance: social limit clamps with warning', async () => {
+test('guidance: social limit documents reject-on-overflow', async () => {
   const defs = await captureAllTools();
   const props = branchProperties(defs.social!.parameters);
-  assert.ok(/clamp/i.test(props.limit?.description ?? '') || /clamp/i.test((await captureAllTools()).social?.description ?? ''), 'social limit must document clamp-with-warning');
+  assert.ok(/reject/i.test(props.limit?.description ?? '') || /reject/i.test((await captureAllTools()).social?.description ?? ''), 'social limit must document reject-on-overflow');
 });
 
 test('tool_result hook fences kg output as external evidence', async () => {

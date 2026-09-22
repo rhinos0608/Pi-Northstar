@@ -4,11 +4,11 @@ import { basename, dirname, join } from 'node:path';
 import type { BackendCallResult } from '../backend.js';
 import { importCookiesFromCdp, loginViaCdp } from '../browser/cdp.js';
 import { importCookiesFromDefaultBrowser } from '../chrome/cookie-jar.js';
-import { channelCapability, cookieImportProviders, setupChannelNames } from '../capabilities.js';
+import { channelCapability, setupChannelNames } from '../capabilities.js';
 import { runSetupInstall } from './installer.js';
 import { loadedConfigSummary } from './local-config.js';
 import { codexConfigured } from '../web/providers/codex-search.js';
-import { liveAuthSnapshot, providerSummary, PROVIDER_DESCRIPTORS, findProvider } from './providers.js';
+import { defaultSetupCookieImportProviders, isSetupCookieImportProvider, liveAuthSnapshot, providerSummary, PROVIDER_DESCRIPTORS, findProvider } from './providers.js';
 import { jsonTextResult } from '../core/tool-output.js';
 
 export type SetupAction = 'auto' | 'status' | 'plan' | 'install_core' | 'install_all' | 'install_channels' | 'import_cookies' | 'login';
@@ -175,7 +175,7 @@ async function setupStatus(env?: Record<string, string | undefined>): Promise<Ba
       'First start defaults to check-only (no installs). Set PI_SEARCH_BOOTSTRAP=auto to enable startup installs, off to disable startup automation.',
       'Install actions execute allowed in-house installer commands unless PI_SEARCH_ALLOW_INSTALL=0.',
       'Startup auto-install can be disabled with PI_SEARCH_AUTO_INSTALL=0.',
-      'Startup and bare /reach-setup auto never import browser cookies. Kill switch PI_SEARCH_BROWSER_AUTOMATION=0 disables explicit import/login.',
+      'Startup and /reach-setup auto never import browser cookies. Bare user slash /reach-setup is the explicit confirmed cookie-import path; kill switch PI_SEARCH_BROWSER_AUTOMATION=0 disables explicit import/login.',
       'Explicit /reach-setup import_cookies <provider> [endpoint] is the per-provider consent path; planned providers never import cookies.',
       'macOS may show a Keychain prompt when default-browser cookies are imported.',
       'Use /reach-setup import_cookies <provider> [endpoint] with an endpoint to import via loopback CDP instead.',
@@ -190,7 +190,7 @@ async function runInteractiveSetup(options: SetupOptions): Promise<BackendCallRe
   const install = installAllowed(env) && !isDisabled(env.PI_SEARCH_AUTO_INSTALL)
     ? await runSetupInstall('install_core', env, undefined, options.signal)
     : { status: 'skipped', message: installAllowed(env) ? 'Startup auto-install disabled by PI_SEARCH_AUTO_INSTALL.' : 'Install execution disabled by PI_SEARCH_ALLOW_INSTALL.', installers: [] };
-  const cookies = { ok: false, message: 'Browser cookie import never runs at startup or bare auto. Use /reach-setup import_cookies <provider> for explicit per-provider import.', results: [] };
+  const cookies = { ok: false, message: 'Browser cookie import never runs at startup or the internal auto action. Bare user slash /reach-setup is the confirmed default import path; use /reach-setup import_cookies <provider> for manual per-provider import.', results: [] };
 
   return jsonTextResult({
     action: 'auto',
@@ -220,7 +220,7 @@ function setupPlan(env?: Record<string, string | undefined>): BackendCallResult 
   return jsonTextResult({
     platforms: platformPlan,
     providers,
-    note: 'Install actions execute local installer commands when allowed. Browser automation defaults to agent-browser; import_cookies without endpoint imports from default browser, with endpoint uses loopback CDP. Startup never imports cookies; /reach-setup import_cookies is the explicit consent path. Setup login remains separate legacy CDP during migration.'
+    note: 'Install actions execute local installer commands when allowed. Browser automation defaults to agent-browser; import_cookies without endpoint imports from default browser, with endpoint uses loopback CDP. Startup never imports cookies; bare user slash /reach-setup is the confirmed default consent path and import_cookies remains the manual per-provider path. Setup login remains separate legacy CDP during migration.'
   });
 }
 
@@ -293,7 +293,7 @@ async function handleImportAllCookies(options: SetupOptions): Promise<BackendCal
   if (isDisabled(env.PI_SEARCH_BROWSER_AUTOMATION)) {
     return jsonTextResult({ status: 'error', ok: false, message: 'Browser cookie import disabled by PI_SEARCH_BROWSER_AUTOMATION.' });
   }
-  return jsonTextResult(await importCookiesFromDefaultBrowser(env, { providers: cookieImportProviders(), force: true }));
+  return jsonTextResult(await importCookiesFromDefaultBrowser(env, { providers: defaultSetupCookieImportProviders(env), force: true }));
 }
 
 async function handleImportCookies(provider: string, args: Record<string, unknown>, options: SetupOptions): Promise<BackendCallResult> {
@@ -311,7 +311,7 @@ async function handleImportCookies(provider: string, args: Record<string, unknow
   // OpenCLI Chrome-session providers (facebook, instagram, linkedin) must not
   // collect unused cookies: their sessions live in OpenCLI, so stored Pi
   // cookies would never be consumed.
-  if (!cookieImportProviders().includes(desc.provider)) {
+  if (!isSetupCookieImportProvider(desc.provider)) {
     const registryDomains = channelCapability(desc.channel)?.provider?.cookieDomains.length ?? 0;
     if (desc.cookieDomains.length === 0 && registryDomains === 0) {
       return jsonTextResult({ status: 'error', message: `Provider ${provider} (${desc.loginFlow}) does not use cookies. Cannot import cookies.` });
@@ -399,7 +399,7 @@ function isDisabled(value: string | undefined): boolean {
 /**
  * Startup and bare auto never import browser cookies: extraction reads session
  * secrets from the default browser profile (and may prompt Keychain), so it
- * runs only via explicit /reach-setup import_cookies|login consent paths.
+ * runs only via explicit user setup actions: bare /reach-setup (confirmed default import), import_cookies, or login.
  */
 
 async function readState(env: Record<string, string | undefined>): Promise<BootstrapState | null> {

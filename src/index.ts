@@ -1,10 +1,10 @@
-import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { createSearchBackend, resultToText, type BackendCallResult, type SearchBackend } from './backend.js';
 import { normalizeProviderPayload } from './core/payload.js';
 import { registerGitHubTool } from './github/github.js';
 import { callSetupTool, ensureFirstStartBootstrap } from './setup/bootstrap.js';
-import { loadSearchMcpEnvironment, resolveSparqlConfig } from './setup/local-config.js';
+import { loadSearchMcpEnvironment, northstarStatusSnapshot, resolveSparqlConfig } from './setup/local-config.js';
 import { PROVIDER_DESCRIPTORS } from './setup/providers.js';
 import { CHANNEL_CAPABILITIES, PUBLIC_TOOL_NAMES, assertPublicToolBudget, parsePublicToolAllowlist } from './capabilities.js';
 import { guardText } from './core/tool-output.js';
@@ -22,10 +22,12 @@ import {
   userChromeStatus,
 } from './browser/browser-tools.js';
 import { ChromeBridgeServer, type ChromeBridgeInstanceInfo } from './chrome/chrome-profile-bridge.js';
+import { installChromeCompanion, readInstalledChromeCompanionFamily } from './chrome/chrome-companion-install.js';
 import { setProcessLocalBridgeToken } from './chrome/chrome-profile-adapter.js';
 import { selectBridgeCompanion, type SelectionResult } from './chrome/chrome-companion-selection.js';
 import {
   buildOsQueryEnv,
+  CHROMIUM_FAMILIES,
   detectOsDefault,
   OS_DEFAULT_MAX_OUTPUT_BYTES,
   OS_DEFAULT_TIMEOUT_MS,
@@ -34,11 +36,13 @@ import {
 } from './chrome/chrome-os-default.js';
 import { chromeTtlMsForSpec, parseChromeAuthorizeArg } from './chrome/chrome-profile-auth.js';
 import { buildFetchRoute, type FetchRouteParams } from './web/web-fetch-route.js';
+import { ANSWER_MAX_OUTPUT_TOKENS, type PageQueryMessages } from './web/page-query.js';
 import { buildSearchRoute } from './web/web-search-route.js';
 import { diffbotConfigured } from './diffbot/diffbot-search.js';
 import {
   buildBrowserParameters,
   buildDesktopParameters,
+  buildFetchParameters,
   buildGraphParameters,
   buildKgParameters,
   buildSocialParameters,
@@ -46,11 +50,16 @@ import {
 } from './public-tool-schemas.js';
 import { WebSearchLedger, type LedgerFailureCode, type WebSearchLedgerOptions } from './web/web-search-ledger.js';
 import { desktopEnabled } from './desktop/desktop-policy.js';
-import { getAgentJobSnapshot } from './web/agent/agent-jobs.js';
+import { getAgentJobSnapshot, setAgentSteeringEnv } from './web/agent/agent-jobs.js';
 import { setLeafRuntimeProvider, shutdownLeafRuntime } from './web/agent/agent-rpc.js';
 import { LeafRuntimeClient } from './runtime/leaf-runtime-client.js';
+import {
+  isNorthstarModelIdShape,
+  loadNorthstarConfig,
+  saveNorthstarConfig,
+} from './runtime/northstar-config.js';
 import { probeExistingBroker, startBrokerHost } from './runtime/broker-host.js';
-import { LocalLeafRuntime } from './runtime/local-leaf-runtime.js';
+import { LocalLeafRuntime, resolveLocalLeafModelId } from './runtime/local-leaf-runtime.js';
 import { createCommandContext } from './commands/command-context.js';
 import { commandHandler } from './commands/command-registry.js';
 import { validateCommandResult, type NorthstarCommandResultV1 } from './commands/command-result.js';
@@ -392,6 +401,106 @@ export function createWebSearchExecute(
 export interface FetchExecuteDeps {
   lookup?: import('./commands/command-context.js').CommandContext['lookup'];
   fetchPageText?: import('./commands/command-context.js').CommandContext['fetchPageText'];
+  probeCall?: import('./commands/command-context.js').CommandContext['probeCall'];
+  probeEmbed?: import('./commands/command-context.js').CommandContext['probeEmbed'];
+  answerContextTokens?: import('./commands/command-context.js').CommandContext['answerContextTokens'];
+}
+
+/**
+ * Production hybrid coverage seam. It follows the same embedding-sidecar
+ * enable/default policy as web ranking, but stays lazy: no process or network
+ * is touched until answer-mode actually asks for vectors. Failures propagate
+ * to checkProbeCoverageWithEmbeddings, which degrades to BM25-only.
+ */
+function sessionProbeEmbed(
+  env: Record<string, string | undefined> | undefined,
+  signal?: AbortSignal,
+): FetchExecuteDeps['probeEmbed'] {
+  if (env === undefined) return undefined;
+  const enabled = env.PI_SEARCH_EMBEDDING_ENABLED;
+  if (enabled === '0' || enabled === 'false') return undefined;
+  return async (texts: string[]): Promise<number[][]> => {
+    signal?.throwIfAborted();
+    const [{ EmbeddingClient }, { acquireEmbeddingSidecar }] = await Promise.all([
+      import('./sidecar/embedding-client.js'),
+      import('./sidecar/shared-sidecar.js'),
+    ]);
+    const acquired = await acquireEmbeddingSidecar(env);
+    try {
+      signal?.throwIfAborted();
+      const client = new EmbeddingClient({
+        baseUrl: acquired.baseUrl,
+        ...(acquired.apiToken !== undefined ? { apiToken: acquired.apiToken } : {}),
+        ...(acquired.apiTokenProvider !== undefined ? { apiTokenProvider: acquired.apiTokenProvider } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+      });
+      if (acquired.external) await client.health();
+      const vectors = await client.embedBatch(texts);
+      return vectors.map((vector) => Array.from(vector));
+    } finally {
+      acquired.release();
+    }
+  };
+}
+
+/**
+ * Bind quick-investigate to the exact active Pi session model. No model id is
+ * accepted here or on the fetch request: the caller's current model + runtime
+ * auth are reused, and no tool definitions are supplied to the nested call.
+ * Production callers may also pass the merged env to enable the existing
+ * shared embedding sidecar for the coverage gate.
+ */
+export function sessionFetchProbeDeps(
+  ctx: Pick<ExtensionContext, 'model' | 'modelRegistry'>,
+  signal?: AbortSignal,
+  env?: Record<string, string | undefined>,
+): Pick<FetchExecuteDeps, 'probeCall' | 'probeEmbed' | 'answerContextTokens'> {
+  const probeEmbed = sessionProbeEmbed(env, signal);
+  const model = ctx.model;
+  if (model === undefined) return probeEmbed === undefined ? {} : { probeEmbed };
+  return {
+    ...(probeEmbed !== undefined ? { probeEmbed } : {}),
+    answerContextTokens: model.contextWindow,
+    probeCall: async (messages: PageQueryMessages): Promise<string> => {
+      const userText = [
+        messages.page,
+        '',
+        messages.background,
+        '',
+        messages.source,
+        '',
+        '<question>',
+        messages.prompt,
+        '</question>',
+      ].join('\n');
+      const response = await ctx.modelRegistry.complete(
+        model,
+        {
+          systemPrompt: messages.system,
+          messages: [{ role: 'user', content: userText, timestamp: Date.now() }],
+        },
+        {
+          ...(signal !== undefined ? { signal } : {}),
+          maxTokens: ANSWER_MAX_OUTPUT_TOKENS,
+          timeoutMs: 120_000,
+          maxRetries: 0,
+        },
+      );
+      if (response.stopReason === 'error') {
+        throw new Error('answer probe model failed');
+      }
+      if (response.stopReason === 'aborted') {
+        throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      }
+      const text = response.content
+        .filter((item): item is Extract<(typeof response.content)[number], { type: 'text' }> => item.type === 'text')
+        .map((item) => item.text)
+        .join('\n')
+        .trim();
+      if (text.length === 0) throw new Error('answer probe model returned no text');
+      return text;
+    },
+  };
 }
 
 export function createFetchExecute(
@@ -408,6 +517,9 @@ export function createFetchExecute(
       ...(signal !== undefined ? { signal } : {}),
       ...(deps.lookup !== undefined ? { lookup: deps.lookup } : {}),
       ...(deps.fetchPageText !== undefined ? { fetchPageText: deps.fetchPageText } : {}),
+      ...(deps.probeCall !== undefined ? { probeCall: deps.probeCall } : {}),
+      ...(deps.probeEmbed !== undefined ? { probeEmbed: deps.probeEmbed } : {}),
+      ...(deps.answerContextTokens !== undefined ? { answerContextTokens: deps.answerContextTokens } : {}),
     });
     const result = await commandHandler<Record<string, unknown>, BackendCallResult>('fetch.read').execute(route.args, context);
     return {
@@ -471,6 +583,7 @@ export default function (pi: ExtensionAPI): void {
   // Backend and desktop are created only after allowlist validation, using the
   // final probed-or-unprobed merged env.
   const client = resolveSearchBackend(env, allowedTools);
+  setAgentSteeringEnv(env);
   // Deferred desktop init: avoid constructing DesktopService unless desktop is
   // both allowlisted and configured.
   const desktop = allowedTools.has('desktop') && desktopEnabled(env) ? new DesktopService(undefined, env, () => Promise.resolve(false)) : undefined;
@@ -498,16 +611,22 @@ export default function (pi: ExtensionAPI): void {
   if (typeof chromeRenewalTimer.unref === 'function') chromeRenewalTimer.unref();
   void ensureFirstStartBootstrap(env);
 
-  // Leaf-runtime RPC client: only when an exact leaf model is configured.
-  // Absent env = no client, agents stay standalone (existing behavior).
-  // No new tool; the client only supplies staged steering calls inside adaptive agent jobs.
-  const leafModel = (env.PI_NORTHSTAR_LEAF_MODEL ?? '').trim();
+  // Leaf-runtime RPC client: unified operator model first, legacy leaf env as
+  // fallback. Rebinding disposes the previous client before publishing the new
+  // provider so /northstar model changes take effect for subsequent jobs.
   const leafEvents = pi.events as { on?: unknown } | undefined;
-  const leafClient =
-    leafModel !== '' && leafEvents !== undefined && typeof leafEvents.on === 'function'
-      ? new LeafRuntimeClient({ events: pi.events, modelId: leafModel })
-      : undefined;
-  if (leafClient !== undefined) setLeafRuntimeProvider(leafClient);
+  let leafClient: LeafRuntimeClient | undefined;
+  const rebindLeafRuntime = (): void => {
+    const prior = leafClient;
+    leafClient = undefined;
+    setLeafRuntimeProvider(undefined);
+    prior?.dispose();
+    const leafModel = resolveLocalLeafModelId(env);
+    if (leafModel === undefined || leafEvents === undefined || typeof leafEvents.on !== 'function') return;
+    leafClient = new LeafRuntimeClient({ events: pi.events, modelId: leafModel });
+    setLeafRuntimeProvider(leafClient);
+  };
+  rebindLeafRuntime();
 
   const sessionBrokerProjectId = (env.PI_NORTHSTAR_BROKER_PROJECT_ID ?? '').trim();
   if (sessionBrokerProjectId !== '' && !/^[A-Za-z0-9._-]{1,96}$/.test(sessionBrokerProjectId)) {
@@ -569,6 +688,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   registerGitHubTool(pi, client, env);
+  registerNorthstarCommand(pi, env, rebindLeafRuntime);
   registerExpansionCommands(pi, env);
   registerExpansionTools(pi, client, env);
 
@@ -594,19 +714,13 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch runs a mode-free 5-branch union. {url, query?, topK?, maxChars?}: single-URL read (query ranks via the read-query path). {urls[1..8], query?, topK?, maxChars?}: per-URL reads in input order with per-URL isolation. {url, siteMap:true, query?, maxPages?}: discovered same-origin URLs. {responseId, sourceIds?, offset?, limit?, findText?}: cached corpus slice only, no network. {responseId, claims[1..20], sourceIds?}: cached claim verification only, no network. topK <= 20; maxChars <= 50000; maxPages <= 25 (sitemap only). Legacy mode/action/source/searchQuery/followLinks/maxDepth rejected; HTTP(S)/GitHub asset URLs only. Out-of-range rejected, never clamped.',
+    description: 'Fetch runs a 5-branch union with read modes on the url/urls branches. {url, query?, topK?, maxChars?, mode?, prompt?}: single-URL read (query/maxChars are readable-mode controls; mode readable|raw|answer, prompt required iff answer). {urls[1..8], query?, topK?, maxChars?, mode?, prompt?}: per-URL reads in input order with per-URL isolation. {url, siteMap:true, query?, maxPages?}: discovered same-origin URLs. {responseId, sourceIds?, offset?, limit?, findText?}: cached corpus slice only, no network. {responseId, claims[1..20], sourceIds?}: cached claim verification only, no network. topK <= 20; readable maxChars <= 50000; raw/answer reject maxChars; maxPages <= 25 (sitemap only). Legacy action/source/searchQuery/followLinks/maxDepth rejected; HTTP(S)/GitHub asset URLs only on the model-facing tool; filesystem paths remain operator/native-only. Out-of-range rejected, never clamped.',
     promptSnippet: 'Fetch URL content — compose with web_search first for URLs. Pass url for one page, urls[1..8] for per-URL reads with isolation, url + siteMap:true for sitemaps, responseId for cached retrieve, responseId + claims[1..20] for claim-check.',
     parameters: Type.Object({
-      request: Type.Union([
-        Type.Object({ url: Type.String({ minLength: 1 }), query: Type.Optional(Type.String({ minLength: 1 })), topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })), maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
-        Type.Object({ urls: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8 }), query: Type.Optional(Type.String({ minLength: 1 })), topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })), maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000 })) }, { additionalProperties: false }),
-        Type.Object({ url: Type.String({ minLength: 1 }), siteMap: Type.Literal(true), query: Type.Optional(Type.String({ minLength: 1 })), maxPages: Type.Optional(Type.Integer({ minimum: 1, maximum: 25 })) }, { additionalProperties: false }),
-        Type.Object({ responseId: Type.String({ minLength: 1 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000 })), findText: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
-        Type.Object({ responseId: Type.String({ minLength: 1 }), claims: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20 }), sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }, { additionalProperties: false }),
-      ]),
+      request: buildFetchParameters(),
     }),
-    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return createFetchExecute(env)(_toolCallId, params, signal);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      return createFetchExecute(env, sessionFetchProbeDeps(ctx, signal, env))(_toolCallId, params, signal);
     },
   });
 
@@ -705,8 +819,10 @@ async function callSearchMcpTool(
 
 /**
  * Stable extension identity: operator-pinned companion extension id.
- * The bridge pins this id as the only allowed extension origin; without it
- * the server never starts and every user-chrome op fails closed to isolated.
+ * OPTIONAL: operator-pinned strict origin. When set, the bridge pins this id
+ * as the only allowed extension origin. When unset (undefined), the bridge
+ * starts in auto-pin mode and pins the origin of the first paired companion
+ * (TOFU). Returns undefined when unset or blank.
  */
 export function resolveChromeExtensionId(env: Record<string, string | undefined> = process.env): string | undefined {
   const raw = env.PI_SEARCH_CHROME_EXTENSION_ID?.trim();
@@ -714,11 +830,12 @@ export function resolveChromeExtensionId(env: Record<string, string | undefined>
 }
 
 /**
- * Out-of-band pairing secret the operator provisions into the companion.
- * Operator-set via PI_SEARCH_CHROME_PAIRING_SECRET so the secret survives
- * bridge restarts without re-pairing; when unset the bridge mints an
- * ephemeral one (visible via the server pairingSecret getter for one-time
- * provisioning). Never logged.
+ * Stable steady-state pairing secret selected by the operator.
+ * PI_SEARCH_CHROME_PAIRING_SECRET makes the bridge reuse the same secret
+ * across restarts. A fresh extension cannot read host env, so the explicit
+ * /chrome-authorize bootstrap may hand this value to the companion once;
+ * when unset the bridge hands off an ephemeral generated secret instead.
+ * Never logged.
  */
 export function resolveChromePairingSecret(env: Record<string, string | undefined> = process.env): string | undefined {
   const raw = env.PI_SEARCH_CHROME_PAIRING_SECRET?.trim();
@@ -732,23 +849,30 @@ let _chromeBridgeStart: Promise<ChromeBridgeServer> | null = null;
 
 /**
  * Lazily instantiate + start the bridge server. Import-time side effects stay
- * zero: nothing binds until the first /chrome command that needs companions.
+ * zero. A bridge without a configured pairing secret may only be started
+ * for first pairing by the explicit /chrome-authorize path. That user command
+ * also owns the one-shot handoff for a configured stable secret when a fresh
+ * extension has not learned it yet; model-triggered callers cannot open the
+ * handoff window. A configured extension ID remains an optional strict origin
+ * pin, and an already-paired companion authenticates with its steady-state
+ * secret without using the handoff.
+ * Selection still uses OS-default sole-match; ambiguity fails closed.
  * EADDRINUSE against our own protocol shares; a foreign occupant throws.
  */
 export async function ensureChromeBridgeServer(
   env: Record<string, string | undefined> = process.env,
-  options?: { port?: number | undefined },
+  options?: { port?: number | undefined; allowPairingBootstrap?: boolean | undefined },
 ): Promise<ChromeBridgeServer> {
   const extensionId = resolveChromeExtensionId(env);
-  if (extensionId === undefined) {
-    throw new Error('user-chrome unavailable: set PI_SEARCH_CHROME_EXTENSION_ID to the companion extension id, then reconnect the companion');
-  }
+  const pairingSecret = resolveChromePairingSecret(env);
   if (_chromeBridge !== null) return _chromeBridge;
   if (_chromeBridgeStart !== null) return _chromeBridgeStart;
+  if (pairingSecret === undefined && options?.allowPairingBootstrap !== true) {
+    throw new Error('user-chrome pairing is not armed; run /chrome-authorize to pair the companion');
+  }
   const pending = (async (): Promise<ChromeBridgeServer> => {
-    const pairingSecret = resolveChromePairingSecret(env);
     const server = new ChromeBridgeServer({
-      extensionId,
+      ...(extensionId !== undefined ? { extensionId } : {}),
       ...(options?.port !== undefined ? { port: options.port } : {}),
       ...(pairingSecret !== undefined ? { pairingSecret } : {}),
     });
@@ -862,6 +986,316 @@ export function detectChromeOsDefault(): { family: OsDefaultFamily; isChromium: 
   }
 }
 
+// ── /northstar operator slash ──
+//
+// Operator intent surface for the unified leaf model + agent steering
+// selection. Slash command only: never a model tool, never gated on
+// PI_SEARCH_NATIVE_TOOLS. Writes persist to ~/.pi-northstar/config.json via
+// load/saveNorthstarConfig; PI_NORTHSTAR_MODEL env and exact
+// PI_NORTHSTAR_AGENT_STEERING=0 keep precedence at resolve time.
+// Admission is shape (isNorthstarModelIdShape) plus Pi ModelRegistry find +
+// hasConfiguredAuth, fail closed. Output carries ids and booleans only —
+// auth material from auth.json is never read here and never echoed.
+
+const NORTHSTAR_USAGE =
+  'Usage: /northstar model <provider/model-id> | /northstar model clear | /northstar agent <on|off> | /northstar status';
+
+function parseNorthstarModelRef(raw: string): { provider: string; id: string } | undefined {
+  const trimmed = raw.trim();
+  if (!isNorthstarModelIdShape(trimmed)) return undefined;
+  const slash = trimmed.indexOf('/');
+  return { provider: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) };
+}
+
+function northstarAuthState(
+  ctx: ExtensionCommandContext,
+  modelId: string | undefined,
+): { known: boolean; configured: boolean; valid: boolean } {
+  const invalid = { known: false, configured: false, valid: false };
+  if (!modelId) return invalid;
+  const ref = parseNorthstarModelRef(modelId);
+  if (!ref) return invalid;
+  try {
+    const model = ctx.modelRegistry.find(ref.provider, ref.id);
+    if (!model) return invalid;
+    const configured = ctx.modelRegistry.hasConfiguredAuth(model);
+    return { known: true, configured, valid: configured };
+  } catch {
+    return invalid;
+  }
+}
+
+function northstarCompletions(prefix: string): Array<{ value: string; label: string }> {
+  const parts = prefix.split(/\s+/);
+  const last = parts[parts.length - 1] ?? '';
+  if (parts.length > 1 && parts[0] === 'agent') {
+    return ['on', 'off'].filter((s) => s.startsWith(last)).map((value) => ({ value, label: value }));
+  }
+  if (parts.length > 1 && parts[0] === 'model') {
+    return 'clear'.startsWith(last) ? [{ value: 'clear', label: 'clear' }] : [];
+  }
+  return ['model', 'agent', 'status'].filter((s) => s.startsWith(parts[0] ?? '')).map((value) => ({ value, label: value }));
+}
+
+function registerNorthstarCommand(
+  pi: ExtensionAPI,
+  env: Record<string, string | undefined>,
+  onModelSelectionChanged?: () => void,
+): void {
+  pi.registerCommand('northstar', {
+    description: 'Operator model/agent selection: /northstar model <provider/id> | model clear | agent <on|off> | status',
+    getArgumentCompletions: (prefix) => northstarCompletions(prefix),
+    handler: async (args, ctx) => {
+      const tokens = args.trim().split(/\s+/).filter((t) => t !== '');
+      const sub = tokens[0];
+      if (sub === 'status' && tokens.length === 1) {
+        const snapshot = northstarStatusSnapshot(env);
+        const auth = northstarAuthState(ctx, snapshot.modelId);
+        await showCommandResult(ctx, 'Northstar status', [
+          `model: ${snapshot.modelId ?? '(none)'} (source: ${snapshot.modelSource})`,
+          `model known: ${auth.known ? 'yes' : 'no'}, auth configured: ${auth.configured ? 'yes' : 'no'}, valid: ${snapshot.modelId === undefined || auth.valid ? 'yes' : 'no'}`,
+          `agent steering: ${snapshot.agentEnabled ? 'on' : 'off'}${snapshot.agentForcedOff ? ' (forced off by PI_NORTHSTAR_AGENT_STEERING=0)' : ''}`,
+        ].join('\n'));
+        return;
+      }
+      if (sub === 'model' && tokens.length === 2 && tokens[1] === 'clear') {
+        const file = loadNorthstarConfig();
+        delete file.modelId;
+        saveNorthstarConfig(file);
+        onModelSelectionChanged?.();
+        await showCommandResult(ctx, 'Northstar model', 'Cleared (config file; PI_NORTHSTAR_MODEL env still wins when set).');
+        return;
+      }
+      if (sub === 'model' && tokens.length === 2) {
+        const ref = parseNorthstarModelRef(tokens[1] ?? '');
+        if (!ref) {
+          await showCommandResult(ctx, 'Northstar model', `Rejected: model must be an exact provider/model id (no thinking suffix). ${NORTHSTAR_USAGE}`);
+          return;
+        }
+        const auth = northstarAuthState(ctx, `${ref.provider}/${ref.id}`);
+        if (!auth.known) {
+          await showCommandResult(ctx, 'Northstar model', `Rejected: unknown model '${ref.provider}/${ref.id}' (not in the Pi model catalogue).`);
+          return;
+        }
+        if (!auth.configured) {
+          await showCommandResult(ctx, 'Northstar model', `Rejected: no configured auth for provider '${ref.provider}'. Authenticate the provider first.`);
+          return;
+        }
+        const file = loadNorthstarConfig();
+        file.modelId = `${ref.provider}/${ref.id}`;
+        saveNorthstarConfig(file);
+        onModelSelectionChanged?.();
+        const overridden = (env.PI_NORTHSTAR_MODEL ?? '').trim() !== '';
+        await showCommandResult(ctx, 'Northstar model', overridden
+          ? `Stored '${ref.provider}/${ref.id}', but PI_NORTHSTAR_MODEL env still overrides it.`
+          : `Set to '${ref.provider}/${ref.id}'.`);
+        return;
+      }
+      if (sub === 'agent' && tokens.length === 2 && (tokens[1] === 'on' || tokens[1] === 'off')) {
+        const file = loadNorthstarConfig();
+        file.agentEnabled = tokens[1] === 'on';
+        saveNorthstarConfig(file);
+        const forced = (env.PI_NORTHSTAR_AGENT_STEERING ?? '').trim() === '0';
+        await showCommandResult(ctx, 'Northstar agent', forced
+          ? `Stored '${tokens[1]}', but PI_NORTHSTAR_AGENT_STEERING=0 forces it off.`
+          : `Steering ${tokens[1]}.`);
+        return;
+      }
+      await showCommandResult(ctx, 'Northstar', NORTHSTAR_USAGE);
+    },
+  });
+}
+
+function parseBackendResultObject(result: BackendCallResult): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(resultToText(result)) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function quickReachSetupSummary(cookies: BackendCallResult, social: BackendCallResult): string {
+  const cookieData = parseBackendResultObject(cookies);
+  const socialData = parseBackendResultObject(social);
+  const cookieMessage =
+    typeof cookieData?.message === 'string'
+      ? cookieData.message
+      : 'Cookie setup completed; use /reach-setup status for details.';
+  const channels = Array.isArray(socialData?.channels)
+    ? socialData.channels.filter(isRecord)
+    : [];
+  const socialLines = channels.map((channel) => {
+    const name = typeof channel.name === 'string' ? channel.name : 'unknown';
+    const status = typeof channel.status === 'string' ? channel.status : 'unknown';
+    const backend = typeof channel.active_backend === 'string' ? ` via ${channel.active_backend}` : '';
+    return `- ${name}: ${status}${backend}`;
+  });
+  const usable = typeof socialData?.usable === 'number' ? socialData.usable : undefined;
+  const total = typeof socialData?.total === 'number' ? socialData.total : undefined;
+  const cookieResults = Array.isArray(cookieData?.results) ? cookieData.results.filter(isRecord) : [];
+  const cookieResultFailure = cookieResults.some((result) => {
+    const status = typeof result.status === 'string' ? result.status : '';
+    return status === 'error' || status === 'disabled' || status === 'unsupported';
+  });
+  // Missing cookies are ordinary: the user may simply not be logged into that
+  // provider in the default browser. Treat only actual extraction/configuration
+  // failures as setup failures.
+  const cookieSetupOk =
+    cookieData?.status !== 'error'
+    && !cookieResultFailure
+    && !(cookieData?.ok === false && cookieResults.length === 0);
+  return [
+    cookieMessage,
+    '',
+    `Social backends${usable !== undefined && total !== undefined ? ` (${usable}/${total} channels responding)` : ''}:`,
+    ...(socialLines.length > 0 ? socialLines : ['- status unavailable; use /reach-status social for details']),
+    '',
+    cookieSetupOk
+      ? 'Reach setup complete. Advanced install/login/status actions remain available as /reach-setup subcommands.'
+      : 'Reach setup needs attention. Fix the cookie-import issue above, then rerun /reach-setup; social backend detection is still shown for diagnosis.',
+  ].join('\n');
+}
+
+async function handleChromeInstall(
+  rawArgs: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  const parts = rawArgs.trim().split(/\s+/).filter(Boolean);
+  if (parts.length > 1) {
+    await showCommandResult(ctx, 'Chrome Install', 'Usage: /chrome-install [family]');
+    return;
+  }
+
+  const explicit = parts[0];
+  if (explicit !== undefined && !(CHROMIUM_FAMILIES as readonly string[]).includes(explicit)) {
+    await showCommandResult(
+      ctx,
+      'Chrome Install',
+      `Unknown Chromium family '${explicit}'. Use: ${CHROMIUM_FAMILIES.join(', ')}`,
+    );
+    return;
+  }
+
+  const detected = detectChromeOsDefault();
+  const family = (explicit ?? (detected?.isChromium ? detected.family : 'chrome')) as ChromiumFamily;
+  try {
+    const result = await installChromeCompanion(family);
+    const lines = [
+      `Companion files installed at ${result.installDir}`,
+      result.managerOpened
+        ? `${family} extension manager opened.`
+        : `Could not open the ${family} extension manager automatically.`,
+      result.pathCopied ? 'Install folder path copied to clipboard.' : 'Use the install folder path above.',
+      '',
+      result.updatedExisting
+        ? 'In the browser: if the Northstar companion is already listed, click Reload; otherwise choose Load unpacked and select that folder.'
+        : 'In the browser: enable Developer mode, choose Load unpacked, and select that folder.',
+      'Then run /chrome-authorize.',
+    ];
+    await showCommandResult(ctx, 'Chrome Install', lines.join('\n'));
+  } catch (error) {
+    await showCommandResult(ctx, 'Chrome Install', error instanceof Error ? error.message : String(error));
+  }
+}
+
+const CHROME_AUTHORIZE_DISCOVERY_POLLS = 70;
+const CHROME_AUTHORIZE_DISCOVERY_INTERVAL_MS = 100;
+
+async function discoverChromeCompanions(
+  server: ChromeBridgeServer,
+  signal: AbortSignal | undefined,
+): Promise<ReturnType<ChromeBridgeServer['listInstances']>> {
+  let instances = server.listInstances();
+  for (let i = 0; instances.length === 0 && i < CHROME_AUTHORIZE_DISCOVERY_POLLS; i += 1) {
+    if (signal?.aborted) return instances;
+    await new Promise<void>((resolve) => setTimeout(resolve, CHROME_AUTHORIZE_DISCOVERY_INTERVAL_MS));
+    instances = server.listInstances();
+  }
+  return instances;
+}
+
+async function handleChromeAuthorize(
+  rawArgs: string,
+  ctx: ExtensionCommandContext,
+  env: Record<string, string | undefined>,
+): Promise<void> {
+  const parts = rawArgs.trim().split(/\s+/).filter(Boolean);
+  if (parts.length > 2) {
+    await showCommandResult(ctx, 'Chrome Authorize', 'Usage: /chrome-authorize [family] [ttl]');
+    return;
+  }
+  const suppliedFamilyArg = parts[0];
+  const rememberedFamily = suppliedFamilyArg === undefined
+    ? await readInstalledChromeCompanionFamily()
+    : undefined;
+  const ttlArg = parts[1];
+
+  let server: ChromeBridgeServer;
+  let pairingBootstrapArmed = false;
+  try {
+    server = await ensureChromeBridgeServer(env, { allowPairingBootstrap: true });
+    // A fresh companion cannot read host env. The explicit user command is
+    // therefore the sole bounded handoff path for either a generated secret
+    // or PI_SEARCH_CHROME_PAIRING_SECRET. Already-paired companions simply
+    // register with the matching secret and never receive it back.
+    server.armPairingBootstrap();
+    pairingBootstrapArmed = true;
+  } catch (error) {
+    await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
+    return;
+  }
+
+  let liveInstances: ReturnType<ChromeBridgeServer['listInstances']>;
+  try {
+    liveInstances = await discoverChromeCompanions(server, ctx.signal);
+  } catch (error) {
+    // Shared-mode instance owns nothing: fail closed directing to the owner process.
+    await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
+    return;
+  } finally {
+    // Pairing is a bounded user-command capability, not ambient bridge state.
+    // Successful registration already disarms it; this closes no-companion,
+    // cancellation, and selection-failure attempts as well.
+    if (pairingBootstrapArmed) server.disarmPairingBootstrap();
+  }
+
+  const rememberedLive = rememberedFamily !== undefined
+    && liveInstances.some((instance) => instance.family === rememberedFamily);
+  const selectionFamily = suppliedFamilyArg ?? (rememberedLive ? rememberedFamily : undefined);
+  const check = selectChromeCompanion({
+    instances: liveInstances,
+    osDefault: detectChromeOsDefault(),
+    ...(selectionFamily !== undefined ? { explicitFamily: selectionFamily } : {}),
+    ...(ctx.hasUI ? {} : { headless: true as const }),
+  });
+  if (!check.ok) {
+    await showCommandResult(ctx, 'Chrome Authorize', check.message);
+    return;
+  }
+
+  const confirmed = ctx.hasUI
+    ? await ctx.ui.confirm(
+      'Authorize user-Chrome control?',
+      `Grant this session control of your connected ${check.selected.family} companion? Revoke any time with /chrome revoke.`,
+    )
+    : false;
+  if (!confirmed) {
+    await showCommandResult(ctx, 'Chrome Authorize', 'authorization requires explicit user confirmation; no grant issued');
+    return;
+  }
+
+  let ttl: number | null;
+  try {
+    ttl = chromeTtlMsForSpec(parseChromeAuthorizeArg(ttlArg));
+  } catch (error) {
+    await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
+    return;
+  }
+  const result = await authorizeUserChrome(ttl, true, env, check.selected.instanceId);
+  await showCommandResult(ctx, 'Chrome Authorize', resultToText(result));
+}
+
 function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string | undefined>): void {
   pi.registerCommand('reach-status', {
     description: 'Inspect search extension channel/backend health. Usage: /reach-status [social|media|web|dev|research|browser] [action]',
@@ -875,7 +1309,7 @@ function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string 
   });
 
   pi.registerCommand('reach-setup', {
-    description: 'Run local setup by default. Usage: /reach-setup [auto|status|plan|install_core|install_all|install_channels <channels>|import_cookies [provider] [cdp-endpoint]|login <provider> [port]]',
+    description: 'One-command cookie + social-tool setup. Run /reach-setup. Advanced: status|plan|install_core|install_all|install_channels|import_cookies|login.',
     getArgumentCompletions: (prefix) => {
       const actionMatches = setupActions
         .filter((action) => action.startsWith(prefix))
@@ -886,24 +1320,66 @@ function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string 
         .map((provider) => ({ value: provider.provider, label: provider.provider }));
     },
     handler: async (args, ctx) => {
-      const [action = 'auto', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const trimmed = args.trim();
+      if (trimmed === '') {
+        if (!ctx.hasUI) {
+          await showCommandResult(
+            ctx,
+            'Reach Setup',
+            'Bare /reach-setup imports supported browser-session cookies and requires interactive confirmation. Use /reach-setup status in headless sessions.',
+          );
+          return;
+        }
+        const geminiCookieNotice = env.PI_VISION_GEMINI_WEB_ENABLED === '1'
+          ? ' Gemini Web is enabled, so this also imports a Google browser-session snapshot for its isolated fallback; that snapshot contains sensitive Google session material and is stored mode 0600.'
+          : '';
+        const confirmed = await ctx.ui.confirm(
+          'Set up Reach?',
+          `Import the browser-session cookies Atlas can actually consume, then verify installed social CLIs/backends?${geminiCookieNotice} macOS may request Keychain access.`,
+        );
+        if (!confirmed) {
+          await showCommandResult(ctx, 'Reach Setup', 'Setup cancelled; no cookies imported.');
+          return;
+        }
+        const cookies = await callSetupTool(
+          { action: 'import_cookies' },
+          { env, ...(ctx.signal ? { signal: ctx.signal } : {}) },
+        );
+        const social = await callSetupOrStatus('reach_status', { family: 'social' }, env, ctx.signal);
+        await showCommandResult(ctx, 'Reach Setup', quickReachSetupSummary(cookies, social));
+        return;
+      }
+
+      const [action = 'auto', ...rest] = trimmed.split(/\s+/).filter(Boolean);
       const params = setupCommandParams(action, rest);
       const result = await callSetupTool(params, { env, ...(ctx.signal ? { signal: ctx.signal } : {}) });
       await showCommandResult(ctx, 'Reach Setup', resultToText(result));
     },
   });
 
+  pi.registerCommand('chrome-install', {
+    description: 'Install/update the local Chrome companion. Usage: /chrome-install [family]',
+    getArgumentCompletions: (prefix) => CHROMIUM_FAMILIES
+      .filter((family) => family.startsWith(prefix))
+      .map((family) => ({ value: family, label: family })),
+    handler: async (args, ctx) => handleChromeInstall(args, ctx),
+  });
+
+  pi.registerCommand('chrome-authorize', {
+    description: 'Pair the installed Chrome companion if needed and authorize the user-Chrome lease. Usage: /chrome-authorize [family] [ttl]',
+    getArgumentCompletions: (prefix) => CHROMIUM_FAMILIES
+      .filter((family) => family.startsWith(prefix))
+      .map((family) => ({ value: family, label: family })),
+    handler: async (args, ctx) => handleChromeAuthorize(args, ctx, env),
+  });
+
   pi.registerCommand('chrome', {
-    description: 'User-Chrome companion control. Usage: /chrome authorize [family] [ttl] | /chrome revoke | /chrome status | /chrome doctor | /chrome onboard [family]. Family is a user slash-command argument only, never model input. Revoke/expiry returns to isolated backend.',
-    getArgumentCompletions: (prefix) => ['authorize', 'revoke', 'status', 'doctor', 'onboard'].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value })),
+    description: 'User-Chrome maintenance: /chrome revoke | status | doctor. Legacy /chrome authorize [family] [ttl] remains supported.',
+    getArgumentCompletions: (prefix) => ['authorize', 'revoke', 'status', 'doctor'].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const sub = parts[0] ?? 'status';
-      const familyArg = parts[1];
-      const ttlArg = parts[2];
       if (sub === 'status') {
-        // Shared singleton: the same auth state the browser tool routes on.
-        // Authorized grants reach the companion bridge; anything else stays isolated.
         const state = userChromeStatus(env);
         await showCommandResult(ctx, 'Chrome Status', JSON.stringify(state));
         return;
@@ -918,55 +1394,11 @@ function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string 
         await showCommandResult(ctx, 'Chrome Revoke', resultToText(result));
         return;
       }
-      if (sub === 'authorize' || sub === 'onboard') {
-        // Option B: select over live bridge instances + OS default. The family
-        // argument is a user slash-command choice only, never model input.
-        // Chromium OS default selects the sole family match; non-Chromium or
-        // unknown defaults require the explicit family argument; same-family
-        // ambiguity always fails closed. No inventory is ever fabricated: an
-        // empty registry reports missing, never a grant that selects nothing.
-        let server: ChromeBridgeServer;
-        try {
-          server = await ensureChromeBridgeServer(env);
-        } catch (error) {
-          await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
-          return;
-        }
-        let liveInstances: ReturnType<ChromeBridgeServer['listInstances']>;
-        try {
-          liveInstances = server.listInstances();
-        } catch (error) {
-          // Shared-mode instance owns nothing: fail closed directing to the owner process.
-          await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
-          return;
-        }
-        const check = selectChromeCompanion({
-          instances: liveInstances,
-          osDefault: detectChromeOsDefault(),
-          ...(familyArg !== undefined ? { explicitFamily: familyArg } : {}),
-          ...(ctx.hasUI ? {} : { headless: true as const }),
-        });
-        if (!check.ok) {
-          await showCommandResult(ctx, 'Chrome Authorize', check.message);
-          return;
-        }
-        const confirmed = ctx.hasUI ? await ctx.ui.confirm('Authorize user-Chrome control?', `Grant this session control of your connected ${check.selected.family} companion? Revoke any time with /chrome revoke.`) : false;
-        if (!confirmed) {
-          await showCommandResult(ctx, 'Chrome Authorize', 'authorization requires explicit user confirmation; no grant issued');
-          return;
-        }
-        let ttl: number | null;
-        try {
-          ttl = chromeTtlMsForSpec(parseChromeAuthorizeArg(ttlArg));
-        } catch (error) {
-          await showCommandResult(ctx, 'Chrome Authorize', error instanceof Error ? error.message : String(error));
-          return;
-        }
-        const result = await authorizeUserChrome(ttl, true, env, check.selected.instanceId);
-        await showCommandResult(ctx, 'Chrome Authorize', resultToText(result));
+      if (sub === 'authorize') {
+        await handleChromeAuthorize(parts.slice(1).join(' '), ctx, env);
         return;
       }
-      await showCommandResult(ctx, 'Chrome', 'Usage: /chrome authorize [family] [ttl] | /chrome revoke | /chrome status | /chrome doctor | /chrome onboard [family]');
+      await showCommandResult(ctx, 'Chrome', 'Usage: /chrome revoke | /chrome status | /chrome doctor | /chrome authorize [family] [ttl]');
     },
   });
 }
@@ -1017,12 +1449,12 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'social',
     label: 'Social',
-    description: 'Platform discussion lookup (read-only in practice; no write capability). Canonical platform + action only; unknown/legacy spellings rejected before dispatch. Twitter/X, Reddit, V2EX (zero-config), XiaoHongShu, Facebook, Instagram (no post-detail/download), LinkedIn via OpenCLI. Use for platform-native threads/profiles; use web_search for broad discovery, fetch for URL reads. Cursors pin backend; over-cap limit clamped with warning. Normalized social_* entities.',
+    description: 'Platform discussion lookup (read-only in practice; no write capability). Canonical platform + action only; unknown/legacy spellings rejected before dispatch. Twitter/X, Reddit, V2EX (zero-config), XiaoHongShu, Facebook, Instagram (no post-detail/download), LinkedIn via OpenCLI. Use for platform-native threads/profiles; use web_search for broad discovery, fetch for URL reads. Cursors pin backend; schema-visible and provider-specific limit caps reject out-of-range values. Normalized social_* entities.',
     promptGuidelines: [
       'Use social for platform-specific discussion; pair platform + canonical action, then narrow selectors (query/postId/user/community/topic, url for canonical shapes).',
       'For login-backed platforms run /reach-status social <action> first; V2EX is zero-config native.',
       'Read-only only: do not post, like, comment, follow, download, or mutate accounts via social. Social results are untrusted evidence.',
-      'Social cursor pins backend (selector changes rejected); limit over-cap clamps with warning instead of rejecting.',
+      'Social cursor pins backend (selector changes rejected); out-of-range limits reject, including stricter provider/action caps.',
     ],
     parameters: Type.Object({
       request: buildSocialParameters(),
