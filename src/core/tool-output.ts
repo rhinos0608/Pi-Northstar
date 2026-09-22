@@ -40,22 +40,33 @@ export function guardResult(result: BackendCallResult, options: GuardOptions = {
   return { ...result, content };
 }
 
-export function dedupeBy<T>(items: readonly T[], keyFn: (item: T) => string): T[] {
-  const seen = new Set<string>();
+export function dedupeBy<T>(
+  items: readonly T[],
+  keyFn: (item: T) => string,
+  mergeFn: (current: T, candidate: T) => T = (current) => current,
+): T[] {
+  const byKey = new Map<string, number>();
   const deduped: T[] = [];
   for (const item of items) {
     const key = keyFn(item);
     if (key) {
-      if (seen.has(key)) continue;
-      seen.add(key);
+      const at = byKey.get(key);
+      if (at !== undefined) {
+        deduped[at] = mergeFn(deduped[at] as T, item);
+        continue;
+      }
+      byKey.set(key, deduped.length);
     }
     deduped.push(item);
   }
   return deduped;
 }
 
-export function dedupeByUrl<T extends { url: string }>(items: readonly T[]): T[] {
-  return dedupeBy(items, (item) => (item.url ? normalizeUrl(item.url) : ''));
+export function dedupeByUrl<T extends { url: string }>(
+  items: readonly T[],
+  mergeFn?: (current: T, candidate: T) => T,
+): T[] {
+  return dedupeBy(items, (item) => (item.url ? normalizeUrl(item.url) : ''), mergeFn);
 }
 
 export function textResult(text: string, details: unknown, options: GuardOptions = {}): BackendCallResult {

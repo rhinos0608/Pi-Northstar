@@ -38,6 +38,38 @@ test('rrfMerge dedupes within rankings and boosts cross-ranking agreement', () =
   assert.ok(fused[0]!.rrfScore > fused[2]!.rrfScore);
 });
 
+test('rrfMerge merges duplicate representations via mergeFn while scores accumulate', () => {
+  const mergeFn = (current: { url: string; snippet: string }, candidate: { url: string; snippet: string }) =>
+    candidate.snippet.length > current.snippet.length ? candidate : current;
+  const fused = rrfMerge([
+    [{ url: 'https://a.test', snippet: 'two lines' }],
+    [{ url: 'https://a.test/', snippet: 'a much richer multi-sentence account' }],
+  ], { keyFn: (item) => normalizeUrl(item.url), mergeFn });
+
+  assert.equal(fused.length, 1);
+  assert.equal(fused[0]!.item.snippet, 'a much richer multi-sentence account');
+  const single = rrfMerge([
+    [{ url: 'https://a.test', snippet: 'two lines' }],
+  ], { keyFn: (item) => normalizeUrl(item.url), mergeFn });
+  assert.ok(fused[0]!.rrfScore > single[0]!.rrfScore, 'score accumulates across rankings');
+});
+
+test('rrfMerge merges within-ranking duplicates at the earliest rank', () => {
+  const mergeFn = (current: { url: string; snippet: string }, candidate: { url: string; snippet: string }) =>
+    candidate.snippet.length > current.snippet.length ? candidate : current;
+  const fused = rrfMerge([
+    [
+      { url: 'https://a.test', snippet: 'short' },
+      { url: 'https://a.test/', snippet: 'the richer repeat of the same page' },
+      { url: 'https://b.test', snippet: 'b' },
+    ],
+  ], { keyFn: (item) => normalizeUrl(item.url), mergeFn });
+
+  assert.equal(fused.length, 2);
+  assert.equal(fused[0]!.item.snippet, 'the richer repeat of the same page');
+  assert.equal(normalizeUrl(fused[1]!.item.url), 'https://b.test/');
+});
+
 test('rrfMerge keeps the first-seen item version on cross-ranking key overlap', () => {
   // Rankings arrive in priority order (operator backend order); the earliest
   // copy wins while RRF scores still accumulate across rankings.

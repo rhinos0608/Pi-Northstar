@@ -66,6 +66,17 @@ test('dedupeByUrl collapses normalized URL variants', () => {
   assert.deepEqual(dedupeByUrl(items).map((item) => item.title), ['first', 'other']);
 });
 
+test('dedupeByUrl merges duplicate representations via mergeFn', () => {
+  const items = [
+    { url: 'https://example.com/page', title: 'terse' },
+    { url: 'https://example.com/page/', title: 'a richer, longer title' },
+  ];
+  const merged = dedupeByUrl(items, (current, candidate) =>
+    candidate.title.length > current.title.length ? candidate : current,
+  );
+  assert.deepEqual(merged.map((item) => item.title), ['a richer, longer title']);
+});
+
 test('textResult and jsonTextResult guard text but preserve details', () => {
   const data = { blob: 'z'.repeat(5000) };
   const result = jsonTextResult(data, { maxChars: 1000 });

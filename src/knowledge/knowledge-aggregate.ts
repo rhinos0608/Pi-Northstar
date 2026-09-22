@@ -69,25 +69,45 @@ export function groupKgEntitiesByIdentity(inputs: ReadonlyArray<KgEntityInput>, 
   return [...groups.values()];
 }
 
-/** First-wins dedupe by identity key; earliest input order wins. */
+/**
+ * Merge duplicate-identity representations without adjudication: identity
+ * (id/type) and provider attribution stay with the earliest input for stable
+ * keys; missing descriptive fields (name/url/confidence) backfill from later
+ * copies so their evidence contributes instead of being discarded.
+ * Conflicting values keep the earliest copy. Order-preserving.
+ */
+export function mergeKgEntityRepresentations(current: KgEntity, candidate: KgEntity): KgEntity {
+  return {
+    ...current,
+    ...(current.name === undefined && candidate.name !== undefined ? { name: candidate.name } : {}),
+    ...(current.url === undefined && candidate.url !== undefined ? { url: candidate.url } : {}),
+    ...(current.confidence === undefined && candidate.confidence !== undefined
+      ? { confidence: candidate.confidence }
+      : {}),
+  };
+}
+
+/** Identity-keyed dedupe; earliest input order wins, later copies backfill gaps. */
 export function dedupeKgEntities(inputs: ReadonlyArray<KgEntityInput>): KgEntityMember[] {
-  const seen = new Set<string>();
-  const out: KgEntityMember[] = [];
+  const byKey = new Map<string, KgEntityMember>();
   for (const input of inputs) {
     const signals: KgIdentitySignals = input.signals ?? extractKgIdentitySignals(input.entity, input.raw);
     const { key } = conservativeIdentityKey(input.entity, signals, input.provider);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ entity: input.entity, provider: input.provider });
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { entity: input.entity, provider: input.provider });
+      continue;
+    }
+    existing.entity = mergeKgEntityRepresentations(existing.entity, input.entity);
   }
-  return out;
+  return [...byKey.values()];
 }
 
 export interface KgRrfOptions {
   k?: number;
 }
 
-/** RRF over per-provider entity rankings; identity-aware key so dupes fuse, first copy kept. */
+/** RRF over per-provider entity rankings; identity-aware key so dupes fuse, representations merge. */
 export function rrfRankKgEntities(rankings: KgEntity[][], opts: KgRrfOptions = {}): Array<{ item: KgEntity; rrfScore: number }> {
   return rrfMerge<KgEntity>(rankings, {
     ...(opts.k === undefined ? {} : { k: opts.k }),
@@ -97,6 +117,7 @@ export function rrfRankKgEntities(rankings: KgEntity[][], opts: KgRrfOptions = {
       const identity = conservativeIdentityKey(entity, signals, '');
       return identity.basis === 'provider_id' ? `providerless:${entity.type}:${entity.id}` : identity.key;
     },
+    mergeFn: mergeKgEntityRepresentations,
   });
 }
 

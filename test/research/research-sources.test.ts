@@ -117,6 +117,37 @@ test('research-sources: source "all" fans out in registry order, dedupes, report
   }
 });
 
+test('research-sources: aggregate dedupe merges richer duplicate evidence', async () => {
+  const restore = stubFetch((url) => {
+    if (url.includes('en.wikipedia.org')) {
+      return new Response(JSON.stringify(['q', ['Shared Title'], ['short'], ['https://en.wikipedia.org/wiki/Shared']]), { status: 200 });
+    }
+    if (url.includes('www.wikidata.org')) {
+      return new Response(JSON.stringify({
+        search: [{
+          id: 'Q1',
+          label: 'Shared Title',
+          concepturi: 'https://en.wikipedia.org/wiki/Shared',
+          description: 'a much richer multi-sentence account of the shared subject',
+        }],
+      }), { status: 200 });
+    }
+    return new Response('<html>gateway</html>', { status: 200, headers: { 'content-type': 'text/html' } });
+  });
+  try {
+    const result = await searchResearchPage({ query: 'shared', limit: 5 });
+    assert.ok(validateNorthstarResult(result).ok, JSON.stringify(result));
+    const entities = result.data.kind === 'entities' ? result.data.entities : [];
+    const shared = entities.filter((entity) => entity.url === 'https://en.wikipedia.org/wiki/Shared');
+    assert.equal(shared.length, 1);
+    assert.equal(shared[0]?.snippet, 'a much richer multi-sentence account of the shared subject');
+    // Attribution stays with the capability-first source; representation is richest.
+    assert.equal(shared[0]?.source, 'wikipedia');
+  } finally {
+    restore();
+  }
+});
+
 test('research-sources: cross-source cursor rejected via adapter envelope', async () => {
   const foreign = Buffer.from(JSON.stringify({ v: 1, source: 'openalex', queryHash: 'x', state: { cursor: 'abc' } }), 'utf8').toString('base64url');
   const restore = stubFetch(() => new Response('[]', { status: 200 }));

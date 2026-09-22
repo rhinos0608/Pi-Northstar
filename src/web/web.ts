@@ -242,7 +242,13 @@ export function fuseWebSearchRankings(
     const seen = new Set<string>();
     ranking.hits.forEach((hit, localIndex) => {
       const key = normalizeUrl(hit.url);
-      if (seen.has(key)) return;
+      if (seen.has(key)) {
+        // Same-provider repeat: merge evidence at the earliest rank, no
+        // extra contributor and no score change.
+        const existing = byKey.get(key);
+        if (existing) existing.hit = chooseRepresentation(existing.hit, hit);
+        return;
+      }
       seen.add(key);
       const rank = localIndex + 1;
       const score = 1 / (WEB_RRF_K + rank);

@@ -576,16 +576,47 @@ export interface WebPageV1 {
   warnings: string[];
 }
 
-/** Dedupe entities by url, first-wins. */
+/**
+ * Dedupe entities by exact url. Attribution (id/source/backend) stays with
+ * the first-seen copy for stable identity; the richer donor keeps the
+ * title/snippet/content representation so a later duplicate contributes its
+ * evidence instead of being discarded. Ties keep the first copy.
+ */
 export function dedupeWebEntities(entities: WebEntityV1[]): WebEntityV1[] {
-  const seen = new Set<string>();
-  const out: WebEntityV1[] = [];
+  const byUrl = new Map<string, WebEntityV1>();
   for (const entity of entities) {
-    if (seen.has(entity.url)) continue;
-    seen.add(entity.url);
-    out.push(entity);
+    const kept = byUrl.get(entity.url);
+    if (!kept) {
+      byUrl.set(entity.url, entity);
+      continue;
+    }
+    byUrl.set(entity.url, chooseRicherWebEntity(kept, entity));
   }
-  return out;
+  return [...byUrl.values()];
+}
+
+/** Clean-text length used for duplicate representation comparison. */
+function webEntityCleanLength(value: string | undefined): number {
+  return value?.trim().length ?? 0;
+}
+
+/**
+ * Field-wise richer merge for one article URL: content, snippet, and title
+ * each take the longer donor; ties keep the earlier copy. Identity
+ * (id/source/backend) always stays with the first-seen copy.
+ */
+export function chooseRicherWebEntity(current: WebEntityV1, candidate: WebEntityV1): WebEntityV1 {
+  const merged: WebEntityV1 = { ...current };
+  if (candidate.content !== undefined && webEntityCleanLength(candidate.content) > webEntityCleanLength(current.content)) {
+    merged.content = candidate.content;
+  }
+  if (candidate.snippet !== undefined && webEntityCleanLength(candidate.snippet) > webEntityCleanLength(current.snippet)) {
+    merged.snippet = candidate.snippet;
+  }
+  if (candidate.title !== undefined && webEntityCleanLength(candidate.title) > webEntityCleanLength(current.title)) {
+    merged.title = candidate.title;
+  }
+  return merged;
 }
 
 function webEntityTextLength(entity: WebEntityV1): number {
@@ -617,7 +648,7 @@ export function validateWebPage(value: unknown): { ok: boolean; issues: string[]
     if (issues.length === 0) {
       entities = dedupeWebEntities(page.entities as WebEntityV1[]);
       if (entities.length !== (page.entities as unknown[]).length) {
-        issues.push('entities contain duplicate urls (dedupe by url, first-wins)');
+        issues.push('entities contain duplicate urls (dedupe by url, richest representation kept)');
       }
       const total = entities.reduce((sum, entity) => sum + webEntityTextLength(entity), 0);
       if (total > WEB_PAGE_CONTENT_MAX) {

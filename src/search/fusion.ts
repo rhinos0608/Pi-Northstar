@@ -20,20 +20,28 @@ export function normalizeUrl(raw: string): string {
 
 export function rrfMerge<T>(
   rankings: T[][],
-  opts: { k?: number; keyFn?: (item: T) => string; getId?: (item: T) => string } = {},
+  opts: { k?: number; keyFn?: (item: T) => string; getId?: (item: T) => string; mergeFn?: (current: T, candidate: T) => T } = {},
 ): RrfMergeResult<T>[] {
   const k = opts.k ?? 60;
   const keyFn = opts.keyFn ?? defaultKey;
   const crossRankKey = opts.getId ?? keyFn;
+  // Default keeps the first-seen copy (stable for id-keyed chunk rankings).
+  // URL-keyed callers should pass a mergeFn so a later richer duplicate
+  // contributes its evidence instead of being discarded.
+  const mergeFn = opts.mergeFn ?? ((current) => current);
   const scores = new Map<string, { item: T; score: number; ranking: number }>();
 
   rankings.forEach((ranking, rankingIndex) => {
-    const seen = new Set<string>();
+    const seen = new Map<string, number>();
     const deduped: T[] = [];
     for (const item of ranking) {
       const key = keyFn(item);
-      if (seen.has(key)) continue;
-      seen.add(key);
+      const at = seen.get(key);
+      if (at !== undefined) {
+        deduped[at] = mergeFn(deduped[at] as T, item);
+        continue;
+      }
+      seen.set(key, deduped.length);
       deduped.push(item);
     }
 
@@ -45,11 +53,10 @@ export function rrfMerge<T>(
         scores.set(key, { item, score, ranking: rankingIndex });
         return;
       }
-      // First-seen item wins. Rankings arrive in priority order (sitemap
-      // section order in web-sitemap.ts, per-provider rankings in
-      // knowledge-aggregate.ts `rrfRankKgEntities`), and both call sites
-      // document first-copy-wins. Scores still accumulate.
+      // Scores still accumulate across rankings; representation merges so a
+      // later duplicate contributes evidence instead of being discarded.
       existing.score += score;
+      existing.item = mergeFn(existing.item, item);
     });
   });
 

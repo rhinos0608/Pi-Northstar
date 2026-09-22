@@ -197,6 +197,30 @@ test('page validation mirrors media: dedupe first-wins, bounded sizes', () => {
   const deduped = dedupeWebEntities([article(), article({ id: 'web:article:2' })]);
   assert.equal(deduped.length, 1);
   assert.equal(deduped[0]!.id, 'web:article:1');
+});
+
+test('dedupeWebEntities merges richer duplicate evidence, first copy keeps identity', () => {
+  const deduped = dedupeWebEntities([
+    article({ snippet: 'short' }),
+    article({
+      id: 'web:article:2',
+      source: 'other',
+      backend: 'other',
+      title: 'A longer, more descriptive title',
+      snippet: 'a much longer excerpt with real detail',
+      content: 'full body text',
+    }),
+  ]);
+  assert.equal(deduped.length, 1);
+  assert.equal(deduped[0]!.id, 'web:article:1');
+  assert.equal(deduped[0]!.source, 'duckduckgo');
+  assert.equal(deduped[0]!.title, 'A longer, more descriptive title');
+  assert.equal(deduped[0]!.snippet, 'a much longer excerpt with real detail');
+  assert.equal(deduped[0]!.content, 'full body text');
+  // Ties keep the first copy wholesale.
+  const tied = dedupeWebEntities([article({ title: 'Hello' }), article({ id: 'web:article:2', title: 'Hello' })]);
+  assert.equal(tied[0]!.id, 'web:article:1');
+  assert.equal(tied[0]!.title, 'Hello');
   const over = validateWebPage(
     page({
       entities: [article({ content: 'x'.repeat(WEB_PAGE_CONTENT_MAX + 1) })],

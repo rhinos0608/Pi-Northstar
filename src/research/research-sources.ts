@@ -12,7 +12,7 @@
 // `source: "all"` fans out with completeness-aware ordering — sources whose
 // declared filter capability matches the requested filters run first, with
 // deterministic registry order as tiebreak — dedupes entities by normalized
-// URL (first source in capability order wins), keeps the sources list in
+// URL (capability-first source keeps attribution; richest donor keeps representation), keeps the sources list in
 // registry order, and reports failed/unsupported sources per contract as a
 // partial/error envelope. An empty page from a usable backend is a success
 // (status `empty`), never a trigger to retry other sources.
@@ -50,6 +50,39 @@ import { searchWikipedia } from './research-wikipedia.js';
 
 /** Aggregate fanout is bounded by the shared limit (one request per source). */
 const MAX_AGGREGATE_NOTES = 30;
+
+/** Clean-text length used for duplicate representation comparison. */
+function researchTextLength(value: string | undefined): number {
+  return value?.trim().length ?? 0;
+}
+
+/**
+ * Field-wise richer merge for one normalized URL. Identity (id/source)
+ * stays with the earlier (capability-first) copy; title/snippet take the
+ * longer donor per field so a later richer duplicate contributes its
+ * evidence instead of being discarded. Ties keep the earlier copy, so
+ * dispatch order stays the only tiebreak. Optional metadata backfills only
+ * when the merged copy lacks it.
+ */
+export function chooseRicherResearchEntity(
+  current: NorthstarEntityV1,
+  candidate: NorthstarEntityV1,
+): NorthstarEntityV1 {
+  const merged: NorthstarEntityV1 = { ...current };
+  if (candidate.title !== undefined && researchTextLength(candidate.title) > researchTextLength(current.title)) {
+    merged.title = candidate.title;
+  }
+  if (candidate.snippet !== undefined && researchTextLength(candidate.snippet) > researchTextLength(current.snippet)) {
+    merged.snippet = candidate.snippet;
+  }
+  if (merged.authors === undefined && candidate.authors !== undefined) merged.authors = candidate.authors;
+  if (merged.year === undefined && candidate.year !== undefined) merged.year = candidate.year;
+  if (merged.publishedAt === undefined && candidate.publishedAt !== undefined) merged.publishedAt = candidate.publishedAt;
+  if (merged.venue === undefined && candidate.venue !== undefined) merged.venue = candidate.venue;
+  if (merged.doi === undefined && candidate.doi !== undefined) merged.doi = candidate.doi;
+  if (merged.metrics === undefined && candidate.metrics !== undefined) merged.metrics = candidate.metrics;
+  return merged;
+}
 
 export type { ResearchAdapterContext };
 
@@ -254,7 +287,8 @@ async function searchAllSources(
 
   // Completeness-aware dispatch: capability-matching sources run first,
   // registry order breaks ties. Outcomes are reassembled in registry order
-  // below; dedupe lets the capability-first source win shared URLs.
+  // below; dedupe keeps capability-first attribution for shared URLs while
+  // the richer donor keeps the representation.
   const dispatchOrder = input ? orderFanoutSources(input) : RESEARCH_SOURCE_CAPABILITIES.map((capability) => capability.id);
   const outcomes = await Promise.allSettled(
     dispatchOrder.map((id) => ADAPTERS[id]!(request, contextOfDefault)),
@@ -305,12 +339,13 @@ async function searchAllSources(
     return outcome;
   });
 
-  // Dedupe by normalized URL in capability order (first wins), so the most
-  // filter-capable source keeps shared entities. The sources list itself
-  // stays in deterministic registry order. Entities filtered per source so
-  // source counts stay honest.
+  // Dedupe by normalized URL in capability order: the most filter-capable
+  // source keeps attribution for shared entities, but representation merges
+  // so a later richer duplicate contributes its evidence instead of being
+  // discarded. The sources list itself stays in deterministic registry
+  // order. Entities filtered per source so source counts stay honest.
   const byId = new Map(perSource.map((outcome) => [outcome.source, outcome]));
-  const seen = new Set<string>();
+  const keptByUrl = new Map<string, NorthstarEntityV1>();
   const notes: string[] = [
     'Aggregate source pagination is unsupported; choose one exact source to continue.',
   ];
@@ -318,10 +353,19 @@ async function searchAllSources(
     const outcome = byId.get(id)!;
     outcome.entities = outcome.entities.filter((entity) => {
       const key = normalizeUrl(entity.url);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+      const kept = keptByUrl.get(key);
+      if (!kept) {
+        keptByUrl.set(key, entity);
+        return true;
+      }
+      keptByUrl.set(key, chooseRicherResearchEntity(kept, entity));
+      return false;
     });
+  }
+  // Merged representations may live in an earlier source's list; refresh
+  // every surviving reference so the richer text surfaces everywhere.
+  for (const outcome of perSource) {
+    outcome.entities = outcome.entities.map((entity) => keptByUrl.get(normalizeUrl(entity.url)) ?? entity);
   }
   // Global limit restore: source:"all" caller's limit is a response budget,
   // not a per-source allowance. Each adapter already ran with `limit`, so the

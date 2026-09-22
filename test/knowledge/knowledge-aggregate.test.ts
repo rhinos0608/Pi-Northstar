@@ -77,6 +77,26 @@ test('dedupeKgEntities is first-wins, order-preserving', () => {
   assert.equal(out[1]?.entity.name, 'Third');
 });
 
+test('dedupeKgEntities backfills missing descriptive fields without adjudication', () => {
+  const out = dedupeKgEntities([
+    { entity: entity('a1', { url: 'https://example.com/x' }), provider: 'p1' },
+    { entity: entity('b2', { url: 'https://example.com/x', name: 'Second', confidence: 0.8 }), provider: 'p2' },
+  ]);
+  assert.equal(out.length, 1);
+  // Identity and attribution stay with the earliest copy; gaps backfill.
+  assert.equal(out[0]?.entity.id, 'a1');
+  assert.equal(out[0]?.provider, 'p1');
+  assert.equal(out[0]?.entity.name, 'Second');
+  assert.equal(out[0]?.entity.confidence, 0.8);
+  // Conflicting values keep the earliest copy, never adjudicated.
+  const conflict = dedupeKgEntities([
+    { entity: entity('a1', { url: 'https://example.com/x', name: 'First', confidence: 0.4 }), provider: 'p1' },
+    { entity: entity('b2', { url: 'https://example.com/x', name: 'Second', confidence: 0.8 }), provider: 'p2' },
+  ]);
+  assert.equal(conflict[0]?.entity.name, 'First');
+  assert.equal(conflict[0]?.entity.confidence, 0.4);
+});
+
 test('rrfRankKgEntities surfaces items ranked by multiple providers first', () => {
   const sharedA1 = entity('a1', { url: 'https://example.com/shared' });
   const sharedA2 = entity('a2', { url: 'https://example.com/shared' });
@@ -87,6 +107,16 @@ test('rrfRankKgEntities surfaces items ranked by multiple providers first', () =
   assert.equal(ranked[0]?.item.url, 'https://example.com/shared');
   assert.ok((ranked[0]?.rrfScore ?? 0) > (ranked[1]?.rrfScore ?? 0));
   assert.equal(ranked.length, 3);
+});
+
+test('rrfRankKgEntities merges duplicate representations across providers', () => {
+  const ranked = rrfRankKgEntities([
+    [entity('a1', { url: 'https://example.com/shared' })],
+    [entity('a2', { url: 'https://example.com/shared', name: 'Richer Name' })],
+  ]);
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0]?.item.id, 'a1');
+  assert.equal(ranked[0]?.item.name, 'Richer Name');
 });
 
 test('rrfRankKgEntities exercises providerless identity branch for signal-free entities', () => {
