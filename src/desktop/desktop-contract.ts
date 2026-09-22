@@ -55,7 +55,7 @@ export function validateDesktopRequest(raw: Record<string, unknown>): DesktopReq
   return req;
 }
 export function resourceKey(pid:number, windowId:string):string { return `desktop:${pid}:${windowId}`; }
-export function timeoutFor(action:DesktopAction, requested?:number):number { const max=action==='observe_window'||action==='status'||action==='list_apps'||action==='list_windows'?15000:action==='wait'?30000:10000; return Math.min(max, Math.max(1, requested??max)); }
+export function timeoutFor(action:DesktopAction, requested?:number):number { if (requested !== undefined) return Math.min(60000, Math.max(1, requested)); const def=action==='observe_window'||action==='status'||action==='list_apps'||action==='list_windows'?15000:action==='wait'?30000:10000; return def; }
 export class ObservationStore {
  private readonly entries=new Map<string,Observation>(); private readonly latest=new Map<string,number>(); private generation=0;
  issue(pid:number,windowId:string,data:unknown,ttlMs=OBSERVATION_TTL_MS):Observation { const now=Date.now(); const resource=resourceKey(pid,windowId); const observation=Object.freeze({stateId:crypto.randomUUID(),pid,windowId,generation:++this.generation,issuedAt:now,expiresAt:now+ttlMs,fingerprint:fingerprintData(data),data:Object.freeze(data)}); this.latest.set(resource,observation.generation); this.entries.set(observation.stateId,observation); while(this.entries.size>128) this.entries.delete(this.entries.keys().next().value!); return observation; }
