@@ -28,6 +28,16 @@ jobs:
         shell: bash
       - run: npm pack --dry-run --json
 
+  rust-ci:
+    # Broker is security boundary: typecheck + full workspace tests on every push/PR.
+    # Release workflows only build; this is the gate that catches regressions.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - run: cargo test --locked --workspace --manifest-path rust/Cargo.toml
+
   sidecar-ci:
     # Real Torch/SentenceTransformers stack: guards sidecar/requirements.lock pins
     # against silent runtime drift. CPU-only, time-bounded. Linux only — the

@@ -45,25 +45,27 @@ fn spawn_broker(project_id: &str) -> (BrokerChild, UnixStream) {
         .spawn()
         .expect("failed to spawn northstar-broker");
 
-    // Poll until socket is bound and ready to accept
+    // Guard the child before polling so a startup-timeout panic kills it before
+    // TempDir removes its DB directory. Cold/loaded CI runners can exceed 1s.
+    let mut broker = BrokerChild {
+        child,
+        _temp: temp,
+        socket_path,
+    };
     let mut stream = None;
-    for _ in 0..50 {
-        if let Ok(s) = UnixStream::connect(&socket_path) {
+    for _ in 0..250 {
+        if let Ok(s) = UnixStream::connect(&broker.socket_path) {
             stream = Some(s);
             break;
+        }
+        if let Ok(Some(status)) = broker.child.try_wait() {
+            panic!("northstar-broker exited before binding socket: {status}");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let stream = stream.expect("failed to connect to broker socket");
-    (
-        BrokerChild {
-            child,
-            _temp: temp,
-            socket_path,
-        },
-        stream,
-    )
+    let stream = stream.expect("failed to connect to broker socket within 5s");
+    (broker, stream)
 }
 
 fn read_exact_frame(stream: &mut UnixStream) -> Vec<u8> {

@@ -24,6 +24,7 @@ function loadCompanion(chromeMock: Record<string, unknown>) {
     Array,
     Object,
     Promise,
+    URL,
     chrome: chromeMock,
   };
   sandbox.globalThis = sandbox;
@@ -40,6 +41,7 @@ function loadCompanion(chromeMock: Record<string, unknown>) {
 function fakeChrome() {
   const calls: string[] = [];
   const tabsStore = new Map<number, Record<string, unknown>>([[11, { id: 11, url: 'https://example.com/', title: 'Example' }]]);
+  let sessionRules: Array<Record<string, unknown>> = [];
   return {
     calls,
     tabs: {
@@ -73,9 +75,14 @@ function fakeChrome() {
     },
     storage: { session: { set: async () => {}, get: async () => ({}), remove: async () => {} } },
     declarativeNetRequest: {
-      updateDynamicRules: async (opts: Record<string, unknown>) => {
-        calls.push(`dnr ${JSON.stringify(opts).slice(0, 80)}`);
+      updateSessionRules: async (opts: Record<string, unknown>) => {
+        calls.push('dnr ' + JSON.stringify(opts).slice(0, 80));
+        const removeIds = Array.isArray(opts.removeRuleIds) ? opts.removeRuleIds as number[] : [];
+        const addRules = Array.isArray(opts.addRules) ? opts.addRules as Array<Record<string, unknown>> : [];
+        sessionRules = sessionRules.filter((rule) => !removeIds.includes(Number(rule.id)));
+        sessionRules.push(...addRules);
       },
+      getSessionRules: async () => sessionRules.slice(),
     },
     scripting: {
       executeScript: async (opts: Record<string, unknown>) => {
@@ -133,8 +140,10 @@ test('manifest: MV3, Atlas bridge only, least-privilege permissions', () => {
   }
   const hosts = manifest.host_permissions as string[];
   assert.ok(hosts.includes('http://127.0.0.1:17319/*'), 'Atlas bridge host pinned');
+  assert.ok(hosts.includes('http://*/*') && hosts.includes('https://*/*'), 'scripting has HTTP(S) target host access');
+  assert.equal(hosts.includes('<all_urls>'), false, 'no broader all-urls grant');
+  assert.equal(hosts.some((h) => h.startsWith('file:') || h.startsWith('ftp:')), false, 'no file/ftp host access');
   assert.equal(manifestRaw.includes('17318'), false, 'never pi-chrome port');
-  assert.equal(manifestRaw.includes('<all_urls>'), false, 'no all-urls host permission');
 });
 
 test('service_worker: static prohibitions hold', () => {
@@ -251,11 +260,44 @@ test('companion: DNR rules deny-by-default with exact-host allow, tab-scoped', (
   assert.ok(allow.priority > deny.priority, 'allow outranks deny');
   assert.equal(JSON.stringify(deny.condition.tabIds), '[77]');
   assert.equal(JSON.stringify(allow.condition.tabIds), '[77]');
+  const deniedTypes = deny.condition.resourceTypes as string[];
+  assert.deepEqual(
+    Array.from(deniedTypes),
+    ['main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font', 'object', 'xmlhttprequest', 'ping', 'csp_report', 'media', 'websocket', 'webtransport', 'webbundle', 'other'],
+    'deny rule covers the complete Chrome ResourceType set',
+  );
+  assert.deepEqual(
+    Array.from(allow.condition.resourceTypes as string[]),
+    Array.from(deniedTypes),
+    'exact-host allow covers main_frame and the same complete resource set',
+  );
   const re = new RegExp(String(allow.condition.regexFilter));
   assert.ok(re.test('https://example.com/page'), 'exact host allowed');
   assert.equal(re.test('https://evil-example.com/'), false, 'lookalike host blocked');
   assert.equal(re.test('https://example.com.evil.com/'), false, 'suffix host blocked');
   assert.equal(re.test('https://sub.example.com/'), false, 'subdomain not covered by exact freeze');
+});
+
+test('companion: renew cannot resurrect an expired lease', () => {
+  const chrome = fakeChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  (c.onAuthorize as unknown as (cmd: unknown) => unknown)({ protocol: 1, id: '1', sessionKey: 's1', grantId: 'g1', kind: 'authorize', leaseExpiresAt: Date.now() - 1 });
+  const renewed = (c.onRenew as unknown as (cmd: unknown) => { ok: boolean; error?: { code: string } })({
+    protocol: 1, id: 'r', sessionKey: 's1', grantId: 'g1', kind: 'renew', leaseExpiresAt: Date.now() + 60_000,
+  });
+  assert.equal(renewed.ok, false);
+  assert.equal(renewed.error?.code, 'chrome_revoked');
+});
+
+test('companion: navigation URL must match the frozen HTTP(S) hostname', () => {
+  const chrome = fakeChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  const matches = c.navigationMatchesFrozenHost as unknown as (url: string, host: string) => boolean;
+  assert.equal(matches('https://example.com/path', 'example.com'), true);
+  assert.equal(matches('http://example.com:8080/path', 'example.com'), true);
+  assert.equal(matches('https://example.com.evil.test/', 'example.com'), false);
+  assert.equal(matches('https://sub.example.com/', 'example.com'), false);
+  assert.equal(matches('file:///tmp/x', 'example.com'), false);
 });
 
 test('companion: navigate installs DNR before tab update; close removes only owned tab', async () => {
@@ -273,6 +315,70 @@ test('companion: navigate installs DNR before tab update; close removes only own
   assert.ok(chrome.calls.includes('tabs.remove 77'), 'owned tab removed');
   assert.equal(chrome.calls.some((s) => s.includes('windows.remove')), false);
   assert.equal(chrome.calls.some((s) => s.includes('tabs.remove 11')), false, 'never unknown tab');
+});
+
+test('companion: worker restart restores and revalidates only the persisted owned tab', async () => {
+  const { chrome, store } = sessionChrome();
+  const first = loadCompanion(chrome as unknown as Record<string, unknown>);
+  (first.onAuthorize as unknown as (cmd: unknown) => unknown)({
+    protocol: 1, id: '1', sessionKey: 's1', grantId: 'g1', kind: 'authorize', leaseExpiresAt: Date.now() + 60_000,
+  });
+  const dispatch = first.dispatchOperation as unknown as (ch: unknown, cmd: unknown) => Promise<unknown>;
+  await dispatch(chrome, {
+    protocol: 1, id: 'n', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'navigate', url: 'https://example.com/', frozenHostname: 'example.com' },
+  });
+  assert.ok(store.get(first.OWNED_KEY as unknown as string), 'ownership persisted in session storage');
+
+  const restarted = loadCompanion(chrome as unknown as Record<string, unknown>);
+  assert.equal((restarted as unknown as { _state: { owned: unknown } })._state.owned, null);
+  await (restarted.restoreRuleBase as unknown as (ch: unknown) => Promise<void>)(chrome);
+  const restored = await (restarted.restoreOwnedTab as unknown as (ch: unknown) => Promise<Record<string, unknown> | null>)(chrome);
+  assert.equal(restored?.tabId, 77);
+  assert.equal(restored?.frozenHostname, 'example.com');
+});
+
+test('companion: a new grant cleans the old owned tab before creating another', async () => {
+  const chrome = fakeChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  const auth = c.onAuthorize as unknown as (cmd: unknown) => unknown;
+  const dispatch = c.dispatchOperation as unknown as (ch: unknown, cmd: unknown) => Promise<unknown>;
+
+  auth({ protocol: 1, id: 'a1', sessionKey: 's1', grantId: 'g1', kind: 'authorize', leaseExpiresAt: Date.now() + 60_000 });
+  await dispatch(chrome, {
+    protocol: 1, id: 'n1', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'navigate', url: 'https://example.com/', frozenHostname: 'example.com' },
+  });
+  chrome.calls.length = 0;
+
+  auth({ protocol: 1, id: 'a2', sessionKey: 's2', grantId: 'g2', kind: 'authorize', leaseExpiresAt: Date.now() + 60_000 });
+  await dispatch(chrome, {
+    protocol: 1, id: 'n2', sessionKey: 's2', grantId: 'g2', kind: 'execute',
+    operation: { kind: 'navigate', url: 'https://example.org/', frozenHostname: 'example.org' },
+  });
+  const removeIdx = chrome.calls.indexOf('tabs.remove 77');
+  const createIdx = chrome.calls.findIndex((entry) => entry === 'tabs.create active=false');
+  assert.ok(removeIdx !== -1 && createIdx !== -1 && removeIdx < createIdx, 'old Atlas tab removed before replacement');
+});
+
+test('companion: a grant cannot retarget its owned tab to another frozen hostname', async () => {
+  const chrome = fakeChrome();
+  const c = loadCompanion(chrome as unknown as Record<string, unknown>);
+  (c.onAuthorize as unknown as (cmd: unknown) => unknown)({
+    protocol: 1, id: '1', sessionKey: 's1', grantId: 'g1', kind: 'authorize', leaseExpiresAt: Date.now() + 60_000,
+  });
+  const dispatch = c.dispatchOperation as unknown as (ch: unknown, cmd: unknown) => Promise<unknown>;
+  await dispatch(chrome, {
+    protocol: 1, id: 'n1', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+    operation: { kind: 'navigate', url: 'https://example.com/', frozenHostname: 'example.com' },
+  });
+  await assert.rejects(
+    dispatch(chrome, {
+      protocol: 1, id: 'n2', sessionKey: 's1', grantId: 'g1', kind: 'execute',
+      operation: { kind: 'navigate', url: 'https://example.org/', frozenHostname: 'example.org' },
+    }),
+    /frozen hostname cannot change/,
+  );
 });
 
 test('companion: semantic action resolves locator semantics before CDP fill/click', async () => {

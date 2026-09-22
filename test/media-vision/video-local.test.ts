@@ -21,6 +21,8 @@ import {
   parseLocalTimestampSpec,
   parseVideoTimestamp,
   resolveLocalVideoMaxBytes,
+  resolveLocalVideoPath,
+  stripFileUri,
   timestampsForLocalRequest,
   toLocalFramePayload,
 } from '../../src/media-vision/video-local.js';
@@ -66,6 +68,16 @@ test('video-local: timestamp spacing rules', () => {
   assert.deepEqual(timestampsForLocalRequest(undefined, { kind: 'single', seconds: 7 }, 1), [7]);
   // Frames-only: full-duration sample via ffprobe duration.
   assert.deepEqual(timestampsForLocalRequest(60, null, 3), [15, 30, 45]);
+});
+
+test('video-local: Windows drive/UNC paths are filesystem-shaped, not URL schemes', () => {
+  assert.equal(resolveLocalVideoPath(String.raw`C:\Users\operator\clip.mp4`), String.raw`C:\Users\operator\clip.mp4`);
+  assert.equal(resolveLocalVideoPath('C:/Users/operator/clip.mp4'), 'C:/Users/operator/clip.mp4');
+  assert.equal(resolveLocalVideoPath(String.raw`\\server\share\clip.mp4`), String.raw`\\server\share\clip.mp4`);
+  assert.equal(stripFileUri('file:///C:/Users/operator/clip.mp4'), 'C:/Users/operator/clip.mp4');
+  assert.equal(stripFileUri('file://localhost/C:/Users/operator/clip.mp4'), 'C:/Users/operator/clip.mp4');
+  assert.equal(resolveLocalVideoPath('https://example.com/clip.mp4'), null);
+  assert.equal(stripFileUri('file://evil.example/clip.mp4'), null);
 });
 
 test('video-local: isLocalVideoFile detects paths + file://, rejects remote', () => {

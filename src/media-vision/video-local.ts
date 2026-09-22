@@ -105,7 +105,10 @@ export function stripFileUri(raw: string): string | null {
   // authority other than empty/localhost is not a local file.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('./') || withoutScheme === '') {
     try {
-      return decodeURIComponent(withoutScheme);
+      const decoded = decodeURIComponent(withoutScheme);
+      // file:///C:/clip.mp4 -> C:/clip.mp4 so Windows lstat succeeds.
+      const drive = /^\/([a-zA-Z]:[\/])/.exec(decoded);
+      return drive ? decoded.slice(1) : decoded;
     } catch {
       return null;
     }
@@ -115,7 +118,8 @@ export function stripFileUri(raw: string): string | null {
   const host = withoutScheme.slice(0, slash).toLowerCase();
   if (host !== '' && host !== 'localhost') return null;
   try {
-    return decodeURIComponent(withoutScheme.slice(slash));
+    const decoded = decodeURIComponent(withoutScheme.slice(slash));
+    return /^\/[a-zA-Z]:[\/]/.test(decoded) ? decoded.slice(1) : decoded;
   } catch {
     return null;
   }
@@ -131,7 +135,10 @@ function hasVideoExtension(path: string): boolean {
 
 function looksLikeLocalPath(raw: string): boolean {
   if (raw.startsWith('file://')) return true;
-  if (raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
+  // Windows: C:\clip.mp4, C:/clip.mp4, \\host\share\clip.mp4 are local,
+  // not URL schemes. Check before the generic scheme guard below.
+  if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('\\\\')) return true;
+  if (raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../') || raw.startsWith('.\\') || raw.startsWith('..\\')) return true;
   // Bare relative filenames (`clip.mp4`) are local paths when the extension matches.
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return true;
   return false;

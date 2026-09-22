@@ -414,6 +414,10 @@
     if (isNonEmptyString(state.bridgeToken) && cmd.bridgeToken !== state.bridgeToken) {
       return { ok: false, error: err('chrome_revoked', 'bridge token mismatch', false) };
     }
+    // A renewal may extend a live lease, but must never resurrect an expired one.
+    if (!isLeaseLive(now())) {
+      return { ok: false, error: err('chrome_revoked', 'grant lease expired', true) };
+    }
     state.grant.leaseExpiresAt = Math.min(cmd.leaseExpiresAt, now() + LEASE_MAX_MS);
     return { ok: true };
   }
@@ -421,6 +425,25 @@
   function ownedMatches(tabId) {
     return state.owned !== null && state.owned.tabId === tabId;
   }
+
+  function navigationMatchesFrozenHost(rawUrl, frozenHostname) {
+    if (!isNonEmptyString(rawUrl) || !isNonEmptyString(frozenHostname)) return false;
+    try {
+      var parsed = new URL(rawUrl);
+      var protocol = String(parsed.protocol || '').toLowerCase();
+      if (protocol !== 'http:' && protocol !== 'https:') return false;
+      var actual = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+      var frozen = String(frozenHostname).trim().toLowerCase().replace(/\.$/, '');
+      return actual.length > 0 && actual === frozen;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Keep this list in sync with Chrome's declarativeNetRequest.ResourceType
+  // enum. Explicitly include main_frame because omitting resourceTypes excludes
+  // top-level navigation from a rule's match set.
+  var DNR_RESOURCE_TYPES = ['main_frame', 'sub_frame', 'stylesheet', 'script', 'image', 'font', 'object', 'xmlhttprequest', 'ping', 'csp_report', 'media', 'websocket', 'webtransport', 'webbundle', 'other'];
 
   /**
    * Tab-scoped DNR rules: deny-all default (priority 1) + exact-host allow
@@ -436,13 +459,13 @@
         id: base,
         priority: 1,
         action: { type: 'block' },
-        condition: { urlFilter: '*', tabIds: [tabId], resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'websocket', 'script', 'image', 'stylesheet', 'media', 'font', 'other'] },
+        condition: { urlFilter: '*', tabIds: [tabId], resourceTypes: DNR_RESOURCE_TYPES.slice() },
       },
       {
         id: base + 1,
         priority: 2,
         action: { type: 'allow' },
-        condition: { regexFilter: '^https?://' + escaped + '(:[0-9]+)?([/?#]|$)', tabIds: [tabId] },
+        condition: { regexFilter: '^https?://' + escaped + '(:[0-9]+)?([/?#]|$)', tabIds: [tabId], resourceTypes: DNR_RESOURCE_TYPES.slice() },
       },
     ];
   }
@@ -476,14 +499,34 @@
     return c;
   }
 
+  async function forgetOwnedTab(chrome, owned, closeTab) {
+    if (!owned || typeof owned.tabId !== 'number') return;
+    var base = ruleBaseForTab(owned.tabId);
+    if (state.owned !== null && state.owned.tabId === owned.tabId) state.owned = null;
+    await debuggerDetachBestEffort(chrome, owned.tabId);
+    if (closeTab === true) {
+      try { await chrome.tabs.remove(owned.tabId); } catch (e) {}
+    }
+    await removeDnrRules(chrome, [base, base + 1]);
+    try { await chrome.storage.session.remove(OWNED_KEY); } catch (e) {}
+  }
+
   /** Create the Atlas-owned inactive tab; new unfocused window only if none. */
   async function ensureOwnedTab(chrome, frozenHostname, sessionKey, grantId) {
-    if (state.owned !== null && state.owned.sessionKey === sessionKey && state.owned.grantId === grantId) {
-      try {
-        var existing = await chrome.tabs.get(state.owned.tabId);
-        if (existing && existing.id === state.owned.tabId) return state.owned;
-      } catch (e) {
-        state.owned = null;
+    if (state.owned !== null) {
+      var sameGrant = state.owned.sessionKey === sessionKey && state.owned.grantId === grantId;
+      if (sameGrant && state.owned.frozenHostname !== frozenHostname) {
+        throw new Error('chrome_domain_blocked: frozen hostname cannot change within a grant');
+      }
+      if (!sameGrant) {
+        // A new grant must not orphan authority from the prior grant.
+        await forgetOwnedTab(chrome, state.owned, true);
+      } else {
+        try {
+          var existing = await chrome.tabs.get(state.owned.tabId);
+          if (existing && existing.id === state.owned.tabId) return state.owned;
+        } catch (e) {}
+        await forgetOwnedTab(chrome, state.owned, false);
       }
     }
     // Never adopt: only Atlas-created tabs are tracked; existing tabs unadoptable.
@@ -508,9 +551,98 @@
     return state.owned;
   }
 
+  async function discardStoredOwnedTab(chrome, owned) {
+    // Verification failure means we cannot safely claim ownership. Retain the
+    // deny rule but remove the allow rule so a stale/reused tab cannot keep
+    // network authority under an unverifiable record.
+    if (owned && typeof owned.tabId === 'number' && Number.isFinite(owned.tabId)) {
+      var base = ruleBaseForTab(owned.tabId);
+      await removeAllowRules(chrome, base, owned.tabId);
+    }
+    try {
+      if (chrome.storage && chrome.storage.session) await chrome.storage.session.remove(OWNED_KEY);
+    } catch (e) {}
+  }
+
+  async function restoreOwnedTab(chrome) {
+    if (state.owned !== null) return state.owned;
+    if (!chrome || !chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== 'function') return null;
+    var got;
+    try {
+      got = await chrome.storage.session.get(OWNED_KEY);
+    } catch (e) {
+      return null;
+    }
+    var owned = got && got[OWNED_KEY];
+    if (!owned || typeof owned !== 'object' || Array.isArray(owned)) return null;
+    if (
+      typeof owned.tabId !== 'number' || !Number.isFinite(owned.tabId) ||
+      !isNonEmptyString(owned.frozenHostname) ||
+      !isNonEmptyString(owned.sessionKey) ||
+      !isNonEmptyString(owned.grantId)
+    ) {
+      await discardStoredOwnedTab(chrome, owned);
+      return null;
+    }
+
+    var tab;
+    try {
+      tab = await chrome.tabs.get(owned.tabId);
+    } catch (e) {
+      await discardStoredOwnedTab(chrome, owned);
+      return null;
+    }
+    if (!tab || tab.id !== owned.tabId) {
+      await discardStoredOwnedTab(chrome, owned);
+      return null;
+    }
+
+    var currentUrl = isNonEmptyString(tab.pendingUrl) ? tab.pendingUrl : (isNonEmptyString(tab.url) ? tab.url : '');
+    if (currentUrl !== 'about:blank' && !navigationMatchesFrozenHost(currentUrl, owned.frozenHostname)) {
+      await discardStoredOwnedTab(chrome, owned);
+      return null;
+    }
+
+    // tabIds are legal only in session-scoped DNR rules. Require both of our
+    // tab-scoped rules before trusting persisted ownership after a worker wake.
+    if (!chrome.declarativeNetRequest || typeof chrome.declarativeNetRequest.getSessionRules !== 'function') {
+      await discardStoredOwnedTab(chrome, owned);
+      return null;
+    }
+    var rules;
+    try {
+      rules = await chrome.declarativeNetRequest.getSessionRules();
+    } catch (e) {
+      await discardStoredOwnedTab(chrome, owned);
+      return null;
+    }
+    var base = ruleBaseForTab(owned.tabId);
+    var denySeen = false;
+    var allowSeen = false;
+    for (var i = 0; i < rules.length; i++) {
+      var rule = rules[i];
+      var ids = rule && rule.condition && rule.condition.tabIds;
+      if (!Array.isArray(ids) || ids.indexOf(owned.tabId) === -1) continue;
+      if (rule.id === base) denySeen = true;
+      if (rule.id === base + 1) allowSeen = true;
+    }
+    if (!denySeen || !allowSeen) {
+      await discardStoredOwnedTab(chrome, owned);
+      return null;
+    }
+
+    state.owned = {
+      tabId: owned.tabId,
+      frozenHostname: String(owned.frozenHostname).toLowerCase(),
+      sessionKey: owned.sessionKey,
+      grantId: owned.grantId,
+    };
+    return state.owned;
+  }
+
   async function applyDnr(chrome, rules) {
     try {
-      await chrome.declarativeNetRequest.updateDynamicRules({
+      await chrome.declarativeNetRequest.updateSessionRules({
         removeRuleIds: rules.map(function (r) { return r.id; }),
         addRules: rules,
       });
@@ -521,7 +653,7 @@
 
   async function removeDnrRules(chrome, ruleIds) {
     try {
-      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ruleIds, addRules: [] });
+      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds, addRules: [] });
     } catch (e) {
       // best-effort
     }
@@ -531,7 +663,7 @@
     var base = typeof ruleBase === 'number' ? ruleBase : ruleBaseForTab(tabId);
     try {
       // Retain deny-all for orphans; remove only the allow rule.
-      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [base + 1], addRules: [] });
+      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [base + 1], addRules: [] });
     } catch (e) {
       // best-effort
     }
@@ -770,20 +902,16 @@
     }
     if (op.kind === 'close') {
       if (state.owned === null) throw new Error('chrome_no_owned_tab: no Atlas-owned tab');
-      var ownedId = state.owned.tabId;
-      var ruleBase = ruleBaseForTab(ownedId);
-      await debuggerDetachBestEffort(chrome, ownedId);
-      await chrome.tabs.remove(ownedId);
-      await removeDnrRules(chrome, [ruleBase, ruleBase + 1]);
-      state.owned = null;
-      try {
-        await chrome.storage.session.remove(OWNED_KEY);
-      } catch (e) {}
+      var closing = state.owned;
+      await forgetOwnedTab(chrome, closing, true);
       return { closed: true };
     }
     if (op.kind === 'navigate') {
       if (!isNonEmptyString(op.url) || !isNonEmptyString(op.frozenHostname)) {
         throw new Error('chrome_invalid_request: navigate needs url + frozenHostname');
+      }
+      if (!navigationMatchesFrozenHost(op.url, op.frozenHostname)) {
+        throw new Error('chrome_domain_blocked: navigation url must be http(s) on frozenHostname');
       }
       throwIfCancelled(signal);
       var owned = await ensureOwnedTab(chrome, op.frozenHostname.toLowerCase(), cmd.sessionKey, cmd.grantId);
@@ -1114,9 +1242,11 @@
     if (!fetchImpl) throw new Error('chrome_extension_unavailable: fetch unavailable');
     if (state.polling) return;
     state.polling = true;
-    // Session storage survives worker restarts: restore the operator-provisioned
-    // pairing secret before the first register so polls stay paired.
+    // Session storage survives MV3 worker suspension/restart. Restore the
+    // confinement bookkeeping and operator pairing before accepting commands.
     if (chrome && chrome.storage && chrome.storage.session) {
+      try { await restoreRuleBase(chrome); } catch (e) {}
+      try { await restoreOwnedTab(chrome); } catch (e) {}
       try { await restorePairingSecret(chrome); } catch (e) {}
     }
     if (chrome && chrome.storage && chrome.storage.session) {
@@ -1268,8 +1398,10 @@
     onAuthorize: onAuthorize,
     onRenew: onRenew,
     buildDnrRules: buildDnrRules,
+    navigationMatchesFrozenHost: navigationMatchesFrozenHost,
     redactSecrets: redactSecrets,
     ensureOwnedTab: ensureOwnedTab,
+    forgetOwnedTab: forgetOwnedTab,
     applyDnr: applyDnr,
     removeAllowRules: removeAllowRules,
     dispatchOperation: dispatchOperation,
@@ -1278,6 +1410,7 @@
     ruleBaseForTab: ruleBaseForTab,
     persistRuleBase: persistRuleBase,
     restoreRuleBase: restoreRuleBase,
+    restoreOwnedTab: restoreOwnedTab,
     RULEBASE_KEY: RULEBASE_KEY,
     normalizeVersion: normalizeVersion,
     ownExtensionId: ownExtensionId,
@@ -1319,11 +1452,21 @@
   // Start the poll loop immediately in a real extension worker (service workers
   // suspend; listeners alone would leave the loop dead after a restart). Only
   // when chrome.runtime.id exists so unit tests loading this file stay inert.
+  function restoreExtensionStateAndStart(chrome) {
+    Promise.resolve()
+      .then(function () { return restoreRuleBase(chrome); })
+      .then(function () { return restoreOwnedTab(chrome); })
+      .catch(function () {})
+      .finally(function () {
+        try { startPolling(chrome); } catch (e) {}
+      });
+  }
+
   function autostartIfExtensionWorker() {
     try {
       var c = globalThis.chrome;
       if (c && c.runtime && typeof c.runtime.id === 'string' && c.runtime.id.length > 0) {
-        try { startPolling(c); } catch (e) {}
+        restoreExtensionStateAndStart(c);
       }
     } catch (e) {}
   }
@@ -1334,25 +1477,21 @@
     var c = globalThis.chrome;
     if (c && c.runtime && typeof c.runtime.onInstalled === 'object') {
       c.runtime.onInstalled.addListener(function () {
-        // Ephemeral session state only (cleared on browser/extension restart).
-        try {
-          if (c.storage && c.storage.session && typeof c.storage.session.get === 'function') {
-            c.storage.session.get(OWNED_KEY).then(function (v) {
-              if (v && v[OWNED_KEY] && typeof v[OWNED_KEY].tabId === 'number') {
-                state.owned = v[OWNED_KEY];
-              }
-            }).catch(function () {});
-            restoreRuleBase(c).catch(function () {});
-          }
-        } catch (e) {}
-        try { startPolling(c); } catch (e) {}
+        // Ephemeral state is verified before reuse; never adopt a tab from an
+        // unvalidated storage record.
+        restoreExtensionStateAndStart(c);
       });
     }
     if (c && c.runtime && c.runtime.onStartup && typeof c.runtime.onStartup.addListener === 'function') {
       c.runtime.onStartup.addListener(function () {
-        // storage.session is empty after restart: poll loop registers a fresh ephemeral instance.
-        try { restoreRuleBase(c).catch(function () {}); } catch (e) {}
-        try { startPolling(c); } catch (e) {}
+        restoreExtensionStateAndStart(c);
+      });
+    }
+    if (c && c.tabs && c.tabs.onRemoved && typeof c.tabs.onRemoved.addListener === 'function') {
+      c.tabs.onRemoved.addListener(function (tabId) {
+        if (!ownedMatches(tabId)) return;
+        var owned = state.owned;
+        forgetOwnedTab(c, owned, false).catch(function () {});
       });
     }
     if (c && c.alarms && typeof c.alarms.create === 'function') {

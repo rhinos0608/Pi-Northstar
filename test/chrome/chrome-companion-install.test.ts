@@ -25,9 +25,10 @@ async function fixture(root: string, marker: string): Promise<string> {
 }
 
 test('default companion install directory is stable under the user home', () => {
+  const home = join('Users', 'example');
   assert.equal(
-    defaultChromeCompanionInstallDir('/Users/example'),
-    '/Users/example/.pi-northstar/chrome-companion',
+    defaultChromeCompanionInstallDir(home),
+    join(home, '.pi-northstar', 'chrome-companion'),
   );
 });
 

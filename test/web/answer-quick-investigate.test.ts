@@ -16,6 +16,11 @@ const pageOptions = (pageHtml: string, extra: Record<string, unknown> = {}) => (
   lookup: stubLookup,
   env: {},
   fetchPageText: async () => pageHtml,
+  // Unit tests must never fall through to production provider timing when the
+  // coverage gate asks for background evidence. Background-specific tests
+  // override these seams explicitly below.
+  backgroundSearch: async () => [],
+  backgroundFetch: async () => '',
   ...extra,
 });
 

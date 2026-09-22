@@ -17,7 +17,9 @@
     "alarms"
   ],
   "host_permissions": [
-    "http://127.0.0.1:17319/*"
+    "http://127.0.0.1:17319/*",
+    "http://*/*",
+    "https://*/*"
   ],
   "web_accessible_resources": []
 }
