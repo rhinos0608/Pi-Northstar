@@ -2,6 +2,11 @@ import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  loadNorthstarConfig,
+  resolveNorthstarAgentEnabled,
+  resolveNorthstarModelId,
+} from '../runtime/northstar-config.js';
 
 export const DEFAULT_SEARCH_MCP_CONFIG_PATH = '';
 export const DEFAULT_ENV_PATH = join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), '.env');
@@ -294,4 +299,33 @@ export function resolveSparqlConfig(env: Record<string, string | undefined>): Sp
   const parsed = parseSparqlUrl(raw);
   if ('message' in parsed) return sparqlError(token, parsed.message);
   return { configured: true, endpoint: raw, endpointHost: parsed.url.host, ...(token ? { token } : {}) };
+}
+
+// ── Northstar operator status snapshot (slash layer support) ──
+//
+// Pure read of the operator-owned model/agent selection: unified model id
+// (PI_NORTHSTAR_MODEL env > ~/.pi-northstar/config.json) plus agent steering
+// (PI_NORTHSTAR_AGENT_STEERING=0 forces off > explicit config flag > legacy leaf-model compatibility). Ids and booleans
+// only — never auth material. Registry/auth admission happens in the slash
+// handler, never here.
+
+export interface NorthstarStatusSnapshot {
+  modelId: string | undefined;
+  modelSource: 'env' | 'config' | 'none';
+  agentEnabled: boolean;
+  agentForcedOff: boolean;
+}
+
+export function northstarStatusSnapshot(
+  env: Record<string, string | undefined>,
+): NorthstarStatusSnapshot {
+  const file = loadNorthstarConfig();
+  const model = resolveNorthstarModelId(env, file);
+  const agent = resolveNorthstarAgentEnabled(env, file);
+  return {
+    modelId: model.modelId,
+    modelSource: model.source,
+    agentEnabled: agent.enabled,
+    agentForcedOff: agent.forcedOff,
+  };
 }

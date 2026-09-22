@@ -5,6 +5,16 @@ import {
   type RuntimeRpcErrorCode,
   type RuntimeRpcMethod,
 } from './runtime-rpc-protocol.js';
+import {
+  NORTHSTAR_LEAF_MODEL_ENV_VAR,
+  resolveNorthstarModelId,
+} from './northstar-config.js';
+
+// Operator default model for the local leaf runtime: unified selection
+// (PI_NORTHSTAR_MODEL env > ~/.pi-northstar/config.json) with
+// PI_NORTHSTAR_LEAF_MODEL as the last-resort fallback. Id only — auth stays
+// in Pi ModelRuntime auth.json. Undefined when nothing is configured, so
+// callers without a model still fail closed.
 
 type RunState = 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -25,6 +35,18 @@ export class LocalLeafRuntimeError extends Error {
     super(message);
     this.name = 'LocalLeafRuntimeError';
   }
+}
+
+export function resolveLocalLeafModelId(
+  env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+): string | undefined {
+  const unified = resolveNorthstarModelId(env);
+  if (unified.source === 'env') {
+    return unified.modelId?.trim() || undefined;
+  }
+  if (unified.modelId !== undefined && unified.modelId.trim() !== '') return unified.modelId.trim();
+  const leaf = env[NORTHSTAR_LEAF_MODEL_ENV_VAR]?.trim();
+  return leaf !== undefined && leaf !== '' ? leaf : undefined;
 }
 
 function splitModelId(modelId: string): { provider: string; id: string } {
@@ -116,7 +138,7 @@ export class LocalLeafRuntime {
   }
 
   private async negotiate(params: Record<string, unknown>): Promise<unknown> {
-    const modelId = String(params.modelId ?? '');
+    const modelId = String(params.modelId ?? '').trim() || resolveLocalLeafModelId(this.env) || '';
     await this.resolveModel(modelId);
     return {
       compatible: true,
@@ -142,7 +164,7 @@ export class LocalLeafRuntime {
       throw new LocalLeafRuntimeError('capacity_exceeded', 'Local leaf runtime is at capacity.');
     }
 
-    const modelId = String(params.modelId ?? '');
+    const modelId = String(params.modelId ?? '').trim() || resolveLocalLeafModelId(this.env) || '';
     const prompt = String(params.prompt ?? '');
     const maxOutputTokens = Number(params.maxOutputTokens);
     const timeoutMs = Number(params.timeoutMs);

@@ -4,8 +4,9 @@
 // always recorded on the job — never silently skipped.
 //
 // Leaf-runtime seam: agent-jobs registers a provider via
-// setLeafRuntimeProvider (wired in src/index.ts only when
-// PI_NORTHSTAR_LEAF_MODEL is set). executeAgentJob calls refreshReady() per
+// setLeafRuntimeProvider (wired in src/index.ts from the unified Northstar
+// model selection, with PI_NORTHSTAR_LEAF_MODEL as legacy fallback).
+// executeAgentJob calls refreshReady() per
 // job before first use; transport 'leaf-runtime' records only on a fresh
 // successful negotiate. Snapshots carry transport + safe reason only — never
 // provider/model identity.

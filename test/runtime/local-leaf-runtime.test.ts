@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LocalLeafRuntime, LocalLeafRuntimeError } from '../../src/runtime/local-leaf-runtime.js';
+import { LocalLeafRuntime, LocalLeafRuntimeError, resolveLocalLeafModelId } from '../../src/runtime/local-leaf-runtime.js';
 
 function completedModels() {
   return {
@@ -30,6 +30,20 @@ async function waitForState(runtime: LocalLeafRuntime, runId: string, target: st
   }
   assert.fail(`run did not reach ${target}`);
 }
+
+test('resolveLocalLeafModelId treats explicit malformed unified env as authoritative failure', () => {
+  assert.equal(
+    resolveLocalLeafModelId({
+      PI_NORTHSTAR_MODEL: 'not-an-exact-model',
+      PI_NORTHSTAR_LEAF_MODEL: 'legacy/fallback',
+    }),
+    undefined,
+  );
+  assert.equal(
+    resolveLocalLeafModelId({ PI_NORTHSTAR_LEAF_MODEL: 'legacy/fallback' }),
+    'legacy/fallback',
+  );
+});
 
 test('LocalLeafRuntime negotiates exact models and completes a local run', async () => {
   const runtime = new LocalLeafRuntime({ models: completedModels() as never, env: {} });

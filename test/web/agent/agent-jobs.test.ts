@@ -444,23 +444,34 @@ test('refresh failure keeps standalone with precise reason', async () => {
   }
 });
 
-test('registered runtime without model env stays standalone', async () => {
+test('registered leaf provider is sufficient after unified model resolution', async () => {
   __resetAgentJobs();
   mockRunner();
   const prior = process.env.PI_NORTHSTAR_LEAF_MODEL;
   delete process.env.PI_NORTHSTAR_LEAF_MODEL;
+  const stages: Array<string | undefined> = [];
   setLeafRuntimeProvider({
     refreshReady: async () => true,
-    runLeaf: async () => ({ text: 'must not run' }),
+    runLeaf: async (_prompt: string, runOpts?: { stage?: string }) => {
+      stages.push(runOpts?.stage);
+      if (runOpts?.stage === 'agent-plan') {
+        return { text: JSON.stringify({ questions: [{ question: 'What evidence?', priority: 1, required: true }] }) };
+      }
+      if (runOpts?.stage === 'agent-evaluate') {
+        return { text: JSON.stringify({ questionUpdates: [], nextActions: [], shouldContinue: false }) };
+      }
+      return { text: 'leaf-composed report sentence one. Sentence two here.' };
+    },
   });
   let n = 0;
   __setAgentJobClock(() => 7_000_000, () => `nomodel-${(n += 1)}`);
   try {
-    const job = createAgentJobEntry({ query: 'no-model topic' });
+    const job = createAgentJobEntry({ query: 'unified-model topic' });
     const done = await executeAgentJob(job.jobId);
     assert.equal(done.status, 'ready');
-    assert.equal(done.rpc.transport, 'standalone');
-    assert.ok(done.rpc.reason.includes('model unset'));
+    assert.equal(done.rpc.transport, 'leaf-runtime');
+    assert.equal(done.rpc.reason, 'negotiated exact leaf model');
+    assert.equal(stages.length, 0, 'transport may negotiate while agent steering remains explicitly off');
   } finally {
     if (prior === undefined) delete process.env.PI_NORTHSTAR_LEAF_MODEL;
     else process.env.PI_NORTHSTAR_LEAF_MODEL = prior;

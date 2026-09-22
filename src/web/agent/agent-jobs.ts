@@ -3,14 +3,15 @@
 // inside-job; poll serves the snapshot only.
 //
 // Leaf-runtime steering: when a provider is registered via
-// setLeafRuntimeProvider (agent-rpc.ts seam), PI_NORTHSTAR_LEAF_MODEL names
-// the exact model (read here at call time, never inside the client), and a
-// per-job refreshReady() succeeds, planner/evaluator/synthesizer/verifier/
+// setLeafRuntimeProvider (agent-rpc.ts seam), the unified Northstar model
+// selection names the exact model (legacy PI_NORTHSTAR_LEAF_MODEL remains a
+// fallback), and a per-job refreshReady() succeeds, planner/evaluator/synthesizer/verifier/
 // repair steer through the leaf runtime. Leaf seam failures degrade to the
 // deterministic ladder with fixed safe reasons. Snapshots carry transport +
 // safe reason only, never provider/model identity.
 
 import { randomUUID } from 'node:crypto';
+import { loadNorthstarConfig, resolveNorthstarAgentEnabled, type NorthstarFileConfig } from '../../runtime/northstar-config.js';
 import {
   canonicalJson,
   validateAgentResult,
@@ -165,6 +166,13 @@ const store: JobStore = {
   id: () => randomUUID(),
 };
 
+let agentSteeringEnv: Record<string, string | undefined> = process.env as Record<string, string | undefined>;
+
+/** Bind the extension's merged operator env for per-job steering decisions. */
+export function setAgentSteeringEnv(env: Record<string, string | undefined> | undefined): void {
+  agentSteeringEnv = env ?? (process.env as Record<string, string | undefined>);
+}
+
 /** In-flight execution per job: concurrent callers reuse one drive. */
 const inFlight = new Map<string, Promise<AgentJobV1>>();
 
@@ -176,10 +184,18 @@ export const LEAF_MODEL_ENV_VAR = 'PI_NORTHSTAR_LEAF_MODEL';
  *  ladder without model calls. */
 export const AGENT_STEERING_ENV_VAR = 'PI_NORTHSTAR_AGENT_STEERING';
 
-/** No-model ladder selector (Task 3): exact '0' disables steering.
- *  Any other value (including absent) keeps steering enabled. */
-export function isAgentSteeringDisabled(env: Record<string, string | undefined>): boolean {
-  return env[AGENT_STEERING_ENV_VAR] === '0';
+/**
+ * No-model ladder selector. Exact env '0' always disables. When a file config
+ * is supplied, its explicit agentEnabled flag governs unified-model steering;
+ * without a file argument this preserves the legacy env-only predicate used by
+ * older embedders/tests.
+ */
+export function isAgentSteeringDisabled(
+  env: Record<string, string | undefined>,
+  file?: NorthstarFileConfig,
+): boolean {
+  if (file === undefined) return env[AGENT_STEERING_ENV_VAR] === '0';
+  return !resolveNorthstarAgentEnabled(env, file).enabled;
 }
 
 /** Strip every model-call dep so the job runs the deterministic ladder:
@@ -799,16 +815,10 @@ export function createAgentJobEntry(input: CreateAgentJobInput): AgentJobV1 {
 async function negotiateLeafTransport(job: AgentJobV1): Promise<LeafRuntimeProvider | undefined> {
   const provider = getLeafRuntimeProvider();
   if (provider === undefined) return undefined;
-  const model = (process.env[LEAF_MODEL_ENV_VAR] ?? '').trim();
-  if (model === '') {
-    job.rpc = {
-      attempted: true,
-      negotiated: false,
-      transport: 'standalone',
-      reason: 'leaf runtime registered but leaf model unset; core runs standalone',
-    };
-    return undefined;
-  }
+  // Registration is the model-admission boundary. The extension publishes a
+  // provider only after unified/legacy model resolution and binds that exact
+  // model into the LeafRuntimeClient. Re-checking raw process.env here would
+  // reject providers created from /northstar config or PI_NORTHSTAR_MODEL.
   let ready = false;
   try {
     ready = await provider.refreshReady();
@@ -1048,7 +1058,10 @@ async function driveAgentJob(jobId: string, deadlineMs: number | undefined, sign
     // controller runs (Task 4 seams pass through this same point).
     const result: AgentResultV1 = await runAgentCore(
       job.query,
-      isAgentSteeringDisabled(process.env as Record<string, string | undefined>) ? stripAgentModelDeps(coreDeps) : coreDeps,
+      isAgentSteeringDisabled(
+        agentSteeringEnv,
+        loadNorthstarConfig(),
+      ) ? stripAgentModelDeps(coreDeps) : coreDeps,
     );
     job.result = result;
     job.status = 'ready';
