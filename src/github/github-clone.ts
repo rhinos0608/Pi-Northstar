@@ -721,7 +721,7 @@ export async function cloneGithubRepo(
 
   const root = await acquireCloneRoot();
   const warnings: string[] = [];
-  let failed = false;
+  let outcome: GithubCloneOutcome | undefined;
   try {
     const workdir = join(root, 'work');
     const hooksDir = join(root, 'no-hooks');
@@ -821,19 +821,20 @@ export async function cloneGithubRepo(
     if (scanned.files.length > policy.maxTreeEntries || scanned.metadataOnly.length > policy.maxTreeEntries) {
       payload.warnings.push(`tree entries capped at ${policy.maxTreeEntries}`);
     }
-    return { payload, ghAbsent, warnings: payload.warnings };
+    outcome = { payload, ghAbsent, warnings: payload.warnings };
   } catch (error) {
-    failed = true;
-    throw error;
-  } finally {
-    // Cleanup failure only propagates when no earlier error exists: it must
-    // never replace the original clone error/SocialError code.
+    // Primary clone operation failed: always release, but never let a
+    // cleanup failure replace the original clone error/SocialError code.
     try {
       await releaseCloneRoot(root);
-    } catch (cleanupError) {
-      if (!failed) throw cleanupError;
+    } catch {
+      // Preserve original error.
     }
+    throw error;
   }
+  // Primary operation succeeded: a cleanup failure propagates to the caller.
+  await releaseCloneRoot(root);
+  return outcome as GithubCloneOutcome;
 }
 
 // ── GithubBackendPlan seam ──
