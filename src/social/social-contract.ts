@@ -128,7 +128,7 @@ const SOCIAL_ACTION_SELECTORS: Readonly<Record<SocialPlatform, Readonly<Partial<
   xiaohongshu: {
     search: { required: ['query'] },
     get_post: { anyOf: ['postId'] },
-    get_comments: { anyOf: ['postId'] },
+    get_comments: { anyOf: ['postId'], maxLimit: 50 },
     get_profile: { required: ['user'] },
     get_user_posts: { required: ['user'] },
     get_followers: { required: ['user'] },
@@ -164,7 +164,7 @@ const SOCIAL_ACTION_SELECTORS: Readonly<Record<SocialPlatform, Readonly<Partial<
     get_notifications: {},
   },
   linkedin: {
-    search: { required: ['query'] },
+    search: { required: ['query'], maxLimit: 10 },
     get_profile: { required: ['user'] },
     get_user_posts: { required: ['user'] },
     get_feed: {},
@@ -249,16 +249,14 @@ export const DEFAULT_SOCIAL_LIMIT = 20;
 export const SOCIAL_MAX_LIMIT = 100;
 export const MAX_SELECTOR_LENGTH = 1024;
 
-/** Validate and bound a request limit. Clamps above the cap with a warning. */
+/** Validate and bound a request limit. Rejects out-of-range limits instead of clamping. */
 export function resolveSocialLimit(raw: unknown, maxLimit: number = SOCIAL_MAX_LIMIT): { limit: number; warnings: string[] } {
   const warnings: string[] = [];
-  if (raw === undefined || raw === null) return { limit: DEFAULT_SOCIAL_LIMIT, warnings };
-  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
-    throw new SocialError('invalid_request', 'limit must be a positive integer');
+  if (raw === undefined || raw === null) {
+    return { limit: Math.min(DEFAULT_SOCIAL_LIMIT, maxLimit), warnings };
   }
-  if (raw > maxLimit) {
-    warnings.push(`limit clamped to ${maxLimit}`);
-    return { limit: maxLimit, warnings };
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > maxLimit) {
+    throw new SocialError('invalid_request', `limit must be an integer 1..${maxLimit}`);
   }
   return { limit: raw, warnings };
 }

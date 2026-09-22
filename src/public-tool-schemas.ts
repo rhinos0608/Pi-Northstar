@@ -6,6 +6,7 @@ import { StringEnum } from '@earendil-works/pi-ai';
 import { Type, type TSchema } from 'typebox';
 import { researchSourceIds } from './capabilities.js';
 import {
+  FETCH_ANSWER_PROMPT_MAX_CHARS,
   MAX_WEB_QUERY_LENGTH,
   RESEARCH_SEARCH_LIMIT_MAX,
   SEARCH_CATEGORY_NAMES,
@@ -249,6 +250,7 @@ function socialBody(
   action: SocialAction,
   allowed: readonly SocialSelectorField[],
   requiredFields: ReadonlySet<string>,
+  maxLimit: number,
 ): TSchema {
   const properties: Record<string, TSchema> = {
     platform: Type.Literal(platform),
@@ -256,7 +258,7 @@ function socialBody(
     url: requiredFields.has('url')
       ? Type.String({ minLength: 1, description: 'Canonical platform URL (selectors derived from closed path shapes).' })
       : Type.Optional(Type.String({ minLength: 1, description: 'Canonical platform URL (selectors derived from closed path shapes).' })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: SOCIAL_MAX_LIMIT, description: 'Max items 1..100. Migrated actions (search + six reads) reject over-cap values; legacy unmigrated actions may still clamp with warning.' })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: maxLimit, description: `Max items 1..${maxLimit}. Out-of-range values reject.` })),
     cursor: Type.Optional(Type.String({ maxLength: MAX_SOCIAL_CURSOR_LENGTH, description: 'Opaque pagination cursor.' })),
     ...socialAuxFields(auxSpecFor(platform, action)),
   };
@@ -283,19 +285,20 @@ export function buildSocialParameters(): TSchema {
         (field, index, all) => all.indexOf(field) === index,
       );
       const required = new Set<string>(spec.required ?? []);
+      const maxLimit = spec.maxLimit ?? SOCIAL_MAX_LIMIT;
       if (spec.anyOf !== undefined && spec.anyOf.length > 0) {
         for (const field of spec.anyOf) {
-          branches.push(socialBody(platform, action, allowed, new Set([...required, field])));
+          branches.push(socialBody(platform, action, allowed, new Set([...required, field]), maxLimit));
         }
-        branches.push(socialBody(platform, action, allowed, new Set([...required, 'url'])));
+        branches.push(socialBody(platform, action, allowed, new Set([...required, 'url']), maxLimit));
       } else {
-        branches.push(socialBody(platform, action, allowed, required));
+        branches.push(socialBody(platform, action, allowed, required, maxLimit));
         // URL-only alternative when the canonical URL extractor can supply
         // every required selector (it derives postId/commentId/user/community/
         // topic, never query). Runtime fills missing selectors from the URL
         // and rejects unrecognized shapes with invalid_request.
         if (required.size > 0 && [...required].every((field) => field !== 'query' && field !== 'url')) {
-          branches.push(socialBody(platform, action, allowed, new Set(['url'])));
+          branches.push(socialBody(platform, action, allowed, new Set(['url']), maxLimit));
         }
       }
     }
@@ -312,12 +315,13 @@ import {
   MAX_URL_LENGTH as MAX_BROWSER_URL_LENGTH,
   MAX_WAIT_MS,
   MAX_COOKIES,
+  MAX_BATCH_COMMANDS,
   SEMANTIC_LOCATORS,
   SEMANTIC_VERBS,
 } from './browser/browser-policy.js';
-
-const MAX_BATCH_COMMANDS = 20;
-const MAX_JOB_STEPS = 20;
+import {
+  MAX_JOB_STEPS,
+} from './browser/browser-job.js';
 
 /**
  * Strict semanticAction: closed locator/verb enums with the runtime rules
@@ -382,27 +386,69 @@ export function buildBrowserParameters(): TSchema {
     Type.Object({
       action: Type.Literal('job'),
       job: Type.Object({
-        steps: Type.Array(Type.Object({
-          kind: Type.Optional(Type.String()),
-          url: Type.Optional(Type.String({ maxLength: MAX_BROWSER_URL_LENGTH })),
-          selector: Type.Optional(Type.String({ maxLength: MAX_SELECTOR_LENGTH })),
-          text: Type.Optional(Type.String({ maxLength: MAX_BROWSER_TEXT_LENGTH })),
-          values: Type.Optional(Type.Array(Type.String())),
-          waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: MAX_WAIT_MS })),
-          assertText: Type.Optional(Type.String({ maxLength: MAX_BROWSER_TEXT_LENGTH })),
-          continueOnFailure: Type.Optional(Type.Boolean()),
-        }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_JOB_STEPS }),
-        maxSteps: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_JOB_STEPS })),
+        steps: Type.Array(Type.Union([
+          Type.Object({
+            kind: Type.Literal('open'),
+            url: Type.String({ minLength: 1, maxLength: MAX_BROWSER_URL_LENGTH }),
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('click'),
+            selector: selector('CSS/XPath selector to click.'),
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('fill'),
+            selector: selector('Target selector.'),
+            text,
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('type'),
+            selector: selector('Target selector.'),
+            text,
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('select'),
+            selector: selector('Target selector.'),
+            values: Type.Array(Type.String({ maxLength: MAX_BROWSER_TEXT_LENGTH }), { minItems: 1, maxItems: MAX_SELECT_VALUES }),
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('wait'),
+            selector: Type.Optional(Type.String({ maxLength: MAX_SELECTOR_LENGTH })),
+            text: Type.Optional(Type.String({ maxLength: MAX_BROWSER_TEXT_LENGTH })),
+            waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: MAX_WAIT_MS })),
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('assert'),
+            selector: selector('Target selector to assert.'),
+            assertText: Type.Optional(Type.String({ maxLength: MAX_BROWSER_TEXT_LENGTH })),
+            waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: MAX_WAIT_MS })),
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('snapshot'),
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+          Type.Object({
+            kind: Type.Literal('screenshot'),
+            continueOnFailure: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false }),
+        ]), { minItems: 1, maxItems: MAX_JOB_STEPS }),
+        maxSteps: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_JOB_STEPS })),
       }, { additionalProperties: false }),
     }, { additionalProperties: false }),
     Type.Object({
       action: Type.Literal('batch'),
       batch: Type.Object({
         commands: Type.Array(Type.Object({
-          args: Type.Array(Type.String(), { minItems: 1 }),
+          args: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
           sensitive: Type.Optional(Type.Boolean()),
         }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_BATCH_COMMANDS }),
-        maxCommands: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_BATCH_COMMANDS })),
+        maxCommands: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_BATCH_COMMANDS })),
       }, { additionalProperties: false }),
     }, { additionalProperties: false }),
   ];
@@ -483,4 +529,84 @@ export function buildKgParameters(): TSchema {
     extractTopics: Type.Optional(Type.Boolean()),
   }, { additionalProperties: false, description: 'kg analyze_text request.' });
   return Type.Union([searchBranch, ...enhanceBranches, analyzeBranch], { description: 'One canonical kg action request.' });
+}
+
+// ── fetch parameters: 5-branch union mirroring web-fetch-route.ts ──
+// Read modes live on the url/urls branches only: mode defaults to readable
+// when absent; prompt is required iff mode is answer; per-call answerModel
+// is removed (schema rejects it via additionalProperties:false); raw forbids
+// query/topK/prompt; answer forbids query/topK (prompt is the question). Runtime re-validates every
+// request; sitemap/retrieve/claim-check branches carry no mode fields.
+
+function fetchReadableFields(): Record<string, TSchema> {
+  return {
+    query: Type.Optional(Type.String({ minLength: 1, description: 'Rank extract via the read-query path.' })),
+    topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Top chunks, max 20.' })),
+    maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000, description: 'Readable-mode output cap, max 50000.' })),
+  };
+}
+
+function fetchReadFamily(
+  locator: Record<string, TSchema>,
+  description: string,
+): TSchema {
+  const answerPrompt = Type.String({
+    minLength: 1,
+    maxLength: FETCH_ANSWER_PROMPT_MAX_CHARS,
+    description: 'Answer-mode question. Required exactly when mode is answer.',
+  });
+  return Type.Union([
+    Type.Object(
+      { ...locator, ...fetchReadableFields() },
+      { additionalProperties: false, description: `${description} Readable mode (implicit default).` },
+    ),
+    Type.Object(
+      { ...locator, mode: Type.Literal('readable'), ...fetchReadableFields() },
+      { additionalProperties: false, description: `${description} Readable mode (explicit).` },
+    ),
+    Type.Object(
+      { ...locator, mode: Type.Literal('raw') },
+      { additionalProperties: false, description: `${description} Raw exact-HTTP text mode.` },
+    ),
+    Type.Object(
+      { ...locator, mode: Type.Literal('answer'), prompt: answerPrompt },
+      { additionalProperties: false, description: `${description} Quick-investigate answer mode.` },
+    ),
+  ], { description });
+}
+
+export function buildFetchParameters(): TSchema {
+  const liveUrl = (description: string): TSchema => Type.String({
+    minLength: 1,
+    pattern: '^[Hh][Tt][Tt][Pp][Ss]?://',
+    description,
+  });
+  const queryField = Type.Optional(Type.String({ minLength: 1, description: 'Rank sitemap URLs.' }));
+  return Type.Union([
+    fetchReadFamily(
+      { url: liveUrl('Single HTTP(S)/GitHub asset URL. Filesystem paths are not model-addressable.') },
+      'Single-URL fetch.',
+    ),
+    fetchReadFamily(
+      { urls: Type.Array(liveUrl('HTTP(S)/GitHub asset URL.'), { minItems: 1, maxItems: 8, description: 'Per-URL reads 1..8 in input order with per-URL isolation.' }) },
+      'Multi-URL fetch.',
+    ),
+    Type.Object({
+      url: liveUrl('HTTP(S) sitemap root URL.'), siteMap: Type.Literal(true, { description: 'Discovered same-origin URLs.' }),
+      query: queryField,
+      maxPages: Type.Optional(Type.Integer({ minimum: 1, maximum: 25, description: 'Max sitemap pages, max 25 (sitemap only).' })),
+    }, { additionalProperties: false, description: 'Sitemap discovery (no read modes).' }),
+    Type.Object({
+      responseId: Type.String({ minLength: 1, description: 'Cached corpus id (no network).' }),
+      sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50000 })),
+      findText: Type.Optional(Type.String({ minLength: 1 })),
+    }, { additionalProperties: false, description: 'Cached corpus slice (no network, no read modes).' }),
+    Type.Object({
+      responseId: Type.String({ minLength: 1 }),
+      claims: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 20, description: 'Cached claim verification 1..20 (no network).' }),
+      sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })),
+    }, { additionalProperties: false, description: 'Cached claim verification (no network, no read modes).' }),
+  ], { description: 'Single {url} | batch {urls[1..8]} | sitemap {url, siteMap:true} | retrieve {responseId} | claim-check {responseId, claims[1..20]}. Read modes (readable|raw|answer) live on the url/urls branches only.' });
 }

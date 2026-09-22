@@ -323,6 +323,27 @@ async function searchAllSources(
       return true;
     });
   }
+  // Global limit restore: source:"all" caller's limit is a response budget,
+  // not a per-source allowance. Each adapter already ran with `limit`, so the
+  // merged set can hold up to N_sources x limit records. Truncate in
+  // capability-first dispatch order so the most filter-capable sources win,
+  // keeping pagination.limit honest (returned <= limit).
+  const totalBeforeCap = perSource.reduce((total, outcome) => total + outcome.entities.length, 0);
+  if (totalBeforeCap > limit) {
+    let remaining = limit;
+    for (const id of dispatchOrder) {
+      const outcome = byId.get(id)!;
+      if (remaining <= 0) {
+        outcome.entities = [];
+      } else if (outcome.entities.length > remaining) {
+        outcome.entities = outcome.entities.slice(0, remaining);
+      }
+      remaining -= outcome.entities.length;
+    }
+    notes.push(
+      `Aggregate result capped to global limit ${limit} (${totalBeforeCap - limit} of ${totalBeforeCap} deduplicated entities truncated; capability-first sources retained).`,
+    );
+  }
   for (const outcome of perSource) {
     for (const note of outcome.notes) {
       if (notes.length >= MAX_AGGREGATE_NOTES) break;

@@ -21,11 +21,12 @@ export interface JobRequest {
   maxSteps?: number;
 }
 
-const VALID_STEP_KINDS: readonly JobStepKind[] = [
+export const VALID_STEP_KINDS: readonly JobStepKind[] = [
   'open', 'click', 'fill', 'type', 'select', 'wait', 'assert', 'snapshot', 'screenshot',
 ];
 
-const MAX_STEPS_DEFAULT = 20;
+export const MAX_STEPS_DEFAULT = 20;
+export const MAX_JOB_STEPS = MAX_STEPS_DEFAULT;
 
 /** Validate a raw job request, throwing on invalid shape. */
 export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
@@ -33,6 +34,12 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
     throw new Error('steps is required and must be a non-empty array');
   }
 
+  if (
+    raw.maxSteps !== undefined &&
+    (typeof raw.maxSteps !== 'number' || !Number.isInteger(raw.maxSteps) || raw.maxSteps < 1)
+  ) {
+    throw new Error('maxSteps must be a positive integer');
+  }
   const callerMax = typeof raw.maxSteps === 'number' ? raw.maxSteps : MAX_STEPS_DEFAULT;
   // Hard cap: caller may not exceed the built-in constant
   const maxSteps = Math.min(callerMax, MAX_STEPS_DEFAULT);
@@ -67,7 +74,10 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
     }
     if (kind === 'select') {
       if (!Array.isArray(s.values)) throw new Error(`step ${i}: select requires values array`);
-      step.values = s.values.filter((v): v is string => typeof v === 'string');
+      if (s.values.some((value) => typeof value !== 'string')) {
+        throw new Error(`step ${i}: select values must all be strings`);
+      }
+      step.values = [...(s.values as string[])];
       if (step.values.length === 0) throw new Error(`step ${i}: select requires a non-empty values array`);
     }
     if (kind === 'wait' && typeof s.waitMs === 'number') {

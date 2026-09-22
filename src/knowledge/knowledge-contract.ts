@@ -296,10 +296,11 @@ export function buildKnowledgeResult(params: BuildKgResultParams): KgResult {
 
   const data: KgData = params.data ?? defaultKgData(params.request.action, entities);
   const limit = params.pagination?.limit ?? entities.length;
+  const returnedCount = params.pagination?.returned ?? (Array.isArray(data.entities) ? data.entities.length : entities.length);
   const pagination: KgPagination = {
     supported: params.pagination?.supported ?? false,
     limit,
-    returned: entities.length,
+    returned: returnedCount,
     hasMore: params.pagination?.hasMore ?? false,
   };
   if (params.pagination?.nextCursor !== undefined) pagination.nextCursor = params.pagination.nextCursor;

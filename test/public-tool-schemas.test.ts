@@ -150,6 +150,10 @@ test('social schema accepts canonical platform/action selectors and url derivati
 
 test('social schema rejects missing selectors, cross-action fields, and overflow', () => {
   const schema = buildSocialParameters();
+  assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 10 }), true);
+  assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 11 }), false, 'schema must mirror LinkedIn runtime cap');
+  assert.equal(Value.Check(schema, { platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 50 }), true);
+  assert.equal(Value.Check(schema, { platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 51 }), false, 'schema must mirror Xiaohongshu comments cap');
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search' }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_post' }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile' }), false);
@@ -230,6 +234,24 @@ test('browser parameters keep bounded action branches and reject unknown fields'
   assert.equal(Value.Check(schema, { action: 'wait', waitMs: 120001 }), false);
   assert.equal(Value.Check(schema, { action: 'batch', batch: { commands: [{ args: ['open', 'https://example.com'] }] } }), true);
   assert.equal(Value.Check(schema, { action: 'batch', batch: { commands: [] } }), false);
+  assert.equal(Value.Check(schema, { action: 'batch', batch: { commands: [{ args: [] }] } }), false);
+  assert.equal(Value.Check(schema, { action: 'batch', batch: { commands: [{ args: ['open', 'https://example.com'] }], maxCommands: 0 } }), false);
+  assert.equal(Value.Check(schema, { action: 'batch', batch: { commands: [{ args: ['open', 'https://example.com'] }], maxCommands: 21 } }), false);
+  assert.equal(Value.Check(schema, { action: 'batch', batch: { commands: [{ args: ['open', 'https://example.com'] }], maxCommands: 2.5 } }), false);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'open', url: 'https://example.com' }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'click', selector: '#btn' }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'fill', selector: '#input', text: 'hello' }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'type', selector: '#input', text: 'hello' }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'select', selector: '#select', values: ['a'] }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'select', selector: '#select', values: [] }] } }), false);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'wait', waitMs: 1000 }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'assert', selector: '#div', assertText: 'done' }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'snapshot' }, { kind: 'screenshot' }] } }), true);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [] } }), false);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'dance' }] } }), false);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'open', url: 'https://example.com' }], maxSteps: 0 } }), false);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'open', url: 'https://example.com' }], maxSteps: 21 } }), false);
+  assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'open', url: 'https://example.com' }], maxSteps: 1.5 } }), false);
   assert.equal(Value.Check(schema, { action: 'navigate' }), false);
   assert.equal(Value.Check(schema, { action: 'navigate', url: 'https://example.com', bogus: 1 }), false);
   assert.equal(Value.Check(schema, { action: 'dance' }), false);

@@ -237,25 +237,29 @@ test('unsupported platform is invalid_request', () => {
   socialError('invalid_request', () => validateSocialRequest({ platform: 'gab', action: 'search', query: 'x' }));
 });
 
-test('limit defaults, clamps, and rejects garbage', () => {
+test('limit defaults and rejects out-of-range or garbage values', () => {
   assert.equal(resolveSocialLimit(undefined).limit, DEFAULT_SOCIAL_LIMIT);
   assert.deepEqual(resolveSocialLimit(undefined), { limit: DEFAULT_SOCIAL_LIMIT, warnings: [] });
-  const clamped = resolveSocialLimit(500);
-  assert.equal(clamped.limit, SOCIAL_MAX_LIMIT);
-  assert.deepEqual(clamped.warnings, ['limit clamped to 100']);
   assert.equal(resolveSocialLimit(7).limit, 7);
-  for (const bad of [0, -1, 1.5, '5', NaN, Number.POSITIVE_INFINITY]) {
+  assert.equal(resolveSocialLimit(SOCIAL_MAX_LIMIT).limit, SOCIAL_MAX_LIMIT);
+  assert.deepEqual(resolveSocialLimit(undefined, 10), { limit: 10, warnings: [] });
+  assert.equal(
+    validateSocialRequest({ platform: 'linkedin', action: 'search', query: 'sre' }).request.limit,
+    10,
+    'provider-specific max must also cap the implicit default',
+  );
+  for (const bad of [0, -1, 1.5, '5', NaN, Number.POSITIVE_INFINITY, 101, 500]) {
     socialError('invalid_request', () => resolveSocialLimit(bad));
   }
   socialError('invalid_request', () => validateSocialRequest({ platform: 'twitter', action: 'get_feed', limit: 0 }));
 });
 
-test('over-limit requests clamp with a warning', () => {
-  const { request, warnings } = validateSocialRequest({
-    platform: 'reddit', action: 'search', query: 'x', limit: 250,
-  });
-  assert.equal(request.limit, SOCIAL_MAX_LIMIT);
-  assert.ok(warnings.includes('limit clamped to 100'));
+test('over-limit requests reject with invalid_request', () => {
+  socialError('invalid_request', () =>
+    validateSocialRequest({
+      platform: 'reddit', action: 'search', query: 'x', limit: 250,
+    }),
+  );
 });
 
 // ── URL extraction ──

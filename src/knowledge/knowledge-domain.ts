@@ -74,6 +74,12 @@ export function planExplicitProviders(
   requested: readonly string[],
   opts: KgExplicitPlanOptions = {},
 ): KgExplicitPlan {
+  if (requested.length > KG_MAX_PROVIDERS_CEILING) {
+    throw new KgContractError(
+      'unsupported_option',
+      `providers array cardinality out of range: expected at most ${KG_MAX_PROVIDERS_CEILING} providers, got ${requested.length}`,
+    );
+  }
   const maxProviders = opts.maxProviders ?? KG_DEFAULT_MAX_PROVIDERS;
   if (!Number.isInteger(maxProviders) || maxProviders < 1 || maxProviders > KG_MAX_PROVIDERS_CEILING) {
     throw new KgContractError(

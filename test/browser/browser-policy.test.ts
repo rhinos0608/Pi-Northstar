@@ -153,6 +153,21 @@ test('validateBatchRequest rejects exceeding maxCommands', () => {
   assert.throws(() => validateBatchRequest({ commands, maxCommands: 3 }), /too many commands/);
 });
 
+test('validateBatchRequest rejects malformed maxCommands instead of silently admitting it', () => {
+  const commands = [{ args: ['click', '#btn'] }];
+  for (const maxCommands of [0, -1, 1.5, Number.NaN]) {
+    assert.throws(
+      () => validateBatchRequest({ commands, maxCommands }),
+      /maxCommands must be a positive integer/,
+      String(maxCommands),
+    );
+  }
+  assert.throws(
+    () => validateBatchRequest({ commands, maxCommands: '2' as unknown as number }),
+    /maxCommands must be a positive integer/,
+  );
+});
+
 test('validateBatchRequest rejects command with empty args', () => {
   assert.throws(() => validateBatchRequest({ commands: [{ args: [] }] }), /args is required/);
 });

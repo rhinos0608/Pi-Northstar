@@ -1,5 +1,5 @@
 import { codexConfigured } from '../web/providers/codex-search.js';
-import { channelCapability } from '../capabilities.js';
+import { channelCapability, cookieImportProviders } from '../capabilities.js';
 import { resolveSparqlConfig } from './local-config.js';
 import { resolveOpenAICompatibleVisionConfig } from '../media-vision/openai-compatible.js';
 
@@ -85,7 +85,7 @@ export const PROVIDER_DESCRIPTOR_SOURCE: Array<Omit<ProviderDescriptor, 'availab
   // ── Vision / multimodal (Plan D — explicit opt-in, content leaves the machine) ──
   { provider: 'vision-openai-compatible', channel: '', family: 'media', envKeys: ['PI_VISION_OPENAI_COMPAT_BASE_URL', 'PI_VISION_OPENAI_COMPAT_MODEL', 'PI_VISION_OPENAI_COMPAT_API_KEY'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only: setting PI_VISION_OPENAI_COMPAT_BASE_URL + PI_VISION_OPENAI_COMPAT_MODEL sends admitted image/PDF/video bytes plus OCR/description text to that operator-configured endpoint (loopback or cloud) — content leaves the machine on every vision call. Optional PI_VISION_OPENAI_COMPAT_API_KEY for keyed endpoints. Read the README vision privacy warning first', description: 'Operator-configured OpenAI-compatible vision endpoint (exact model IDs, synthetic probe-gated)' },
   { provider: 'vision-gemini', channel: '', family: 'media', envKeys: ['GEMINI_API_KEY', 'GOOGLE_GENAI_API_KEY', 'GOOGLE_VERTEX_PROJECT', 'GOOGLE_CLOUD_PROJECT'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only: setting a Gemini key or Vertex project sends admitted image/PDF/video bytes plus OCR/description text to Google — content leaves the machine on every vision call. Read the README vision privacy warning first', description: 'Gemini Developer API or Vertex vision transport (exact configured models)' },
-  { provider: 'vision-gemini-web', channel: '', family: 'media', envKeys: ['PI_VISION_GEMINI_WEB_ENABLED'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only and last resort (disabled default): PI_VISION_GEMINI_WEB_ENABLED=1 (exact value) sends admitted image/PDF/video bytes plus OCR/description text through the Gemini web session — content leaves the machine on every vision call. Read the README vision privacy warning first', description: 'Gemini Web last-resort vision via user-Chromium lease (disabled default)' },
+  { provider: 'vision-gemini-web', channel: '', family: 'media', envKeys: ['PI_VISION_GEMINI_WEB_ENABLED'], cookieDomains: ['google.com'], loginFlow: 'browser_cookie', risk: 'high', loginUrl: 'https://gemini.google.com/', setup: 'Explicit opt-in only and last resort (disabled default): together with PI_VISION_VIDEO_GEMINI=1, PI_VISION_GEMINI_WEB_ENABLED=1 can attach admitted local video bytes and send the analysis prompt through Gemini Web. A live /chrome-authorize lease is preferred; /reach-setup can import a Google browser-session snapshot for the isolated cookie fallback. The cookie snapshot contains sensitive Google session material and is stored mode 0600. Read the README vision privacy warning first', description: 'Gemini Web last-resort vision via user-Chromium lease with Reach-imported cookie fallback (disabled default)' },
   { provider: 'vision-private-gate', channel: '', family: 'media', envKeys: ['PI_VISION_PRIVATE_GITHUB_TRANSFER'], cookieDomains: [], loginFlow: 'env_var', risk: 'high', setup: 'Explicit opt-in only: PI_VISION_PRIVATE_GITHUB_TRANSFER=1 (exact value) is the independent flag permitting private or authenticated GitHub content to reach any cloud vision endpoint — without it private content never leaves the machine. Read the README vision privacy warning first', description: 'Independent private-GitHub to vision transfer flag (default off)' },
 ];
 
@@ -94,6 +94,25 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = PROVIDER_DESCRIPTOR_SO
   ...descriptor,
   availability: channelCapability(descriptor.channel)?.availability ?? 'available',
 }));
+
+/** Infrastructure cookie consumers that are not model-facing channel providers.
+ * They stay out of the canonical channel-derived cookie set, but explicit
+ * /reach-setup may prepare them because a real backend consumes the stored
+ * state. Bare /reach-setup includes Gemini Web only when its exact opt-in is on. */
+export const SETUP_ONLY_COOKIE_PROVIDERS = ['vision-gemini-web'] as const;
+
+export function isSetupCookieImportProvider(provider: string): boolean {
+  return cookieImportProviders().includes(provider)
+    || (SETUP_ONLY_COOKIE_PROVIDERS as readonly string[]).includes(provider);
+}
+
+export function defaultSetupCookieImportProviders(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const providers = [...cookieImportProviders()];
+  if (env.PI_VISION_GEMINI_WEB_ENABLED === '1') providers.push('vision-gemini-web');
+  return providers;
+}
 
 function redditOAuthConfigured(env: Record<string, string | undefined>): boolean {
   return Boolean(env.REDDIT_CLIENT_ID?.trim() && env.REDDIT_CLIENT_SECRET?.trim() && env.REDDIT_USER_AGENT?.trim());

@@ -475,7 +475,10 @@ async function kgEnhance(args: Record<string, unknown>, call: KgCallContext): Pr
     if (provider !== DIFFBOT_KG_PROVIDER) return unsupportedKgOutcome(provider, `Unknown kg provider: ${provider}.`);
     return toKgEnhanceOutcome(await enhanceDiffbotKg(input, call.ctx));
   });
-  const assembled = assembleKgEnhanceResult(outcomes);
+  const assembled = assembleKgEnhanceResult(
+    outcomes,
+    validated.maxEntities !== undefined ? { maxEntities: validated.maxEntities } : {},
+  );
   const { entities, claims, conflicts, partitions, groups, evidence } = assembled;
   const envelope = buildKnowledgeResult({
     request: { tool: 'kg', action: 'enhance', providers }, outcomes,

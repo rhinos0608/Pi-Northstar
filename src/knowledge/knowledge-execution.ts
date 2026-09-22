@@ -24,7 +24,10 @@ export async function runKgProviderPlan(action: KgAction, requested: readonly st
 }
 
 export function assembleKgSearchResult(input: { query: string; outcomes: readonly KgSourceOutcome[]; providers: readonly string[]; limit: number; pagination: { supported: boolean; hasMore: boolean; nextCursor?: string } }): { entities: KgEntity[]; envelope: KgResult } {
-  const entities = rrfRankKgEntities(input.outcomes.map((outcome) => [...(outcome.entities ?? [])])).map((entry) => entry.item);
+  // Apply final global limit (cap merged entities to caller limit) so adding second provider cannot exceed limit.
+  const entities = rrfRankKgEntities(input.outcomes.map((outcome) => [...(outcome.entities ?? [])]))
+    .map((entry) => entry.item)
+    .slice(0, input.limit);
   return { entities, envelope: buildKnowledgeResult({ request: { tool: 'kg', action: 'search', providers: [...input.providers] }, outcomes: [...input.outcomes], data: { kind: 'search', entities }, pagination: { supported: input.pagination.supported, limit: input.limit, hasMore: input.pagination.hasMore, ...(input.pagination.nextCursor === undefined ? {} : { nextCursor: input.pagination.nextCursor }) } }) };
 }
 
@@ -38,20 +41,40 @@ function partition(outcome: KgSourceOutcome): KgPartition {
 }
 
 /** Shared enhance dedupe, identity alignment, claims/conflicts, groups, evidence assembly. */
-export function assembleKgEnhanceResult(outcomes: readonly KgSourceOutcome[]): KgEnhanceAssembly {
+export function assembleKgEnhanceResult(outcomes: readonly KgSourceOutcome[], opts: { maxEntities?: number } = {}): KgEnhanceAssembly {
   const enhanced = outcomes as readonly KgEnhanceOutcome[];
   const inputs = enhanced.flatMap((outcome) => (outcome.entities ?? []).map((entity, index) => ({ entity, provider: outcome.provider, ...(outcome.signals?.[index] === undefined ? {} : { signals: outcome.signals[index] }) })));
-  const entities = dedupeKgEntities(inputs).map((member) => member.entity);
-  const internalGroups = groupKgEntitiesByIdentity(inputs);
+  const dedupedEntities = dedupeKgEntities(inputs).map((member) => member.entity);
+  // Apply the caller's final global cap after provider fanout/dedupe. Sibling
+  // enhance fields must obey the same visible entity set: otherwise groups,
+  // claims, or evidence could leak entities beyond maxEntities.
+  const capped = typeof opts.maxEntities === 'number' && opts.maxEntities > 0;
+  const entities = capped ? dedupedEntities.slice(0, opts.maxEntities) : dedupedEntities;
+  const returnedEntityIds = new Set(entities.map((entity) => entity.id));
+
+  const allInternalGroups = groupKgEntitiesByIdentity(inputs);
+  const internalGroups = capped
+    ? allInternalGroups.filter((group) => group.members.some((member) => returnedEntityIds.has(member.entity.id)))
+    : allInternalGroups;
+  const visibleMemberIds = new Set(
+    internalGroups.flatMap((group) => group.members.map((member) => member.entity.id)),
+  );
+
   const publicIdByKey = new Map<string, string>();
   internalGroups.forEach((group, index) => publicIdByKey.set(group.key, `alignment:${index + 1}`));
   const groups = internalGroups.map((group): KgAlignedGroup => ({ id: publicIdByKey.get(group.key) ?? 'alignment:0', basis: group.basis, strength: group.strength, ...(group.alignmentConfidence === undefined ? {} : { alignmentConfidence: group.alignmentConfidence }), members: group.members.map((member) => ({ entity: member.entity, provider: member.provider })) }));
   const subjectToGroup = new Map<string, string>();
   for (const group of internalGroups) for (const member of group.members) { const publicId = publicIdByKey.get(group.key) ?? 'alignment:0'; if (!subjectToGroup.has(member.entity.id)) subjectToGroup.set(member.entity.id, publicId); }
-  const allClaims = enhanced.flatMap((outcome) => (outcome.claims ?? []).map((claim) => claim.provider === undefined ? { ...claim, provider: outcome.provider } : claim));
+  const allClaims = enhanced
+    .flatMap((outcome) => (outcome.claims ?? []).map((claim) => claim.provider === undefined ? { ...claim, provider: outcome.provider } : claim))
+    .filter((claim) => !capped || visibleMemberIds.has(claim.subjectId));
   const alignedClaims = allClaims.map((claim) => { const key = subjectToGroup.get(claim.subjectId); return key !== undefined && key !== claim.subjectId ? { ...claim, subjectId: key } : claim; });
   const { claims, conflicts } = partitionEnhanceClaims(alignedClaims);
   const seenEvidence = new Set<string>(); const evidence: KgEntityEvidence[] = [];
-  for (const outcome of enhanced) for (const record of outcome.evidence ?? []) { if (seenEvidence.has(record.entityId)) continue; seenEvidence.add(record.entityId); evidence.push(record); }
+  for (const outcome of enhanced) for (const record of outcome.evidence ?? []) {
+    if ((capped && !visibleMemberIds.has(record.entityId)) || seenEvidence.has(record.entityId)) continue;
+    seenEvidence.add(record.entityId);
+    evidence.push(record);
+  }
   return { entities, claims, conflicts, partitions: outcomes.map(partition), groups, evidence };
 }

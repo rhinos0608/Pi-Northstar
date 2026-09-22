@@ -54,6 +54,16 @@ test('explicit fanout never expands beyond requested providers and respects cap'
   }
 });
 
+test('explicit fanout rejects requested providers length exceeding ceiling', async () => {
+  const { planExplicitProviders } = await import('../../src/knowledge/knowledge-domain.js');
+  assert.throws(
+    () => planExplicitProviders('search', ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9']),
+    (err: unknown) =>
+      err instanceof Error &&
+      (err as { code?: string }).code === 'unsupported_option' &&
+      /cardinality/i.test(err.message),
+  );
+});
 // ── Slice 3: omitted auto sequential retryable-only fallback ──
 
 test('auto fallback advances only on recoverable error codes, stops on success', async () => {
@@ -178,4 +188,81 @@ test('cursor with empty explicit allowlist is rejected, omitted providers allow 
   }
   rejectCursorForExplicitFanout('cursor-token', undefined);
   rejectCursorForExplicitFanout(undefined, []);
+});
+
+test('assembleKgSearchResult caps entities at input.limit across multiple provider outcomes', async () => {
+  const { assembleKgSearchResult } = await import('../../src/knowledge/knowledge-execution.js');
+  const entity = (id: string) => ({
+    entityVersion: 1 as const,
+    id,
+    type: 'Organization',
+    name: `Org ${id}`,
+  });
+  const outcome1 = {
+    provider: 'p1',
+    entities: [entity('e1'), entity('e2'), entity('e3')],
+  };
+  const outcome2 = {
+    provider: 'p2',
+    entities: [entity('e4'), entity('e5'), entity('e6')],
+  };
+  const assembled = assembleKgSearchResult({
+    query: 'type:Organization',
+    outcomes: [outcome1, outcome2],
+    providers: ['p1', 'p2'],
+    limit: 3,
+    pagination: { supported: false, hasMore: false },
+  });
+  assert.equal(assembled.entities.length, 3);
+  assert.equal(assembled.envelope.data.kind, 'search');
+  if (assembled.envelope.data.kind === 'search') {
+    assert.equal(assembled.envelope.data.entities.length, 3);
+  }
+  assert.equal(assembled.envelope.pagination.limit, 3);
+  assert.equal(assembled.envelope.pagination.returned, 3);
+});
+
+test('assembleKgEnhanceResult caps entities at opts.maxEntities across multiple provider outcomes', async () => {
+  const { assembleKgEnhanceResult } = await import('../../src/knowledge/knowledge-execution.js');
+  const entity = (id: string) => ({
+    entityVersion: 1 as const,
+    id,
+    type: 'Organization',
+    name: `Org ${id}`,
+  });
+  const outcome1 = {
+    provider: 'p1',
+    entities: [entity('e1'), entity('e2'), entity('e3')],
+    claims: [
+      { subjectId: 'e1', predicate: 'name', object: 'Org e1' },
+      { subjectId: 'e2', predicate: 'name', object: 'Org e2' },
+      { subjectId: 'e3', predicate: 'name', object: 'Org e3' },
+    ],
+    evidence: [
+      { entityId: 'e1', evidence: { status: 'provided' as const } },
+      { entityId: 'e2', evidence: { status: 'provided' as const } },
+      { entityId: 'e3', evidence: { status: 'provided' as const } },
+    ],
+  };
+  const outcome2 = {
+    provider: 'p2',
+    entities: [entity('e4'), entity('e5'), entity('e6')],
+  };
+  const assembled = assembleKgEnhanceResult([outcome1, outcome2], { maxEntities: 2 });
+  assert.deepEqual(assembled.entities.map((entry) => entry.id), ['e1', 'e2']);
+  assert.deepEqual(
+    assembled.groups.flatMap((group) => group.members.map((member) => member.entity.id)).sort(),
+    ['e1', 'e2'],
+    'alignment groups must not expose entities beyond maxEntities',
+  );
+  assert.deepEqual(
+    assembled.evidence.map((entry) => entry.entityId).sort(),
+    ['e1', 'e2'],
+    'evidence must stay inside the returned entity set',
+  );
+  assert.equal(
+    assembled.claims.some((claim) => claim.object === 'Org e3'),
+    false,
+    'claims for excluded entities must not survive the global cap',
+  );
 });

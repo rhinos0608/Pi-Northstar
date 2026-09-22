@@ -17,6 +17,21 @@ test('validateJobRequest rejects exceeding maxSteps', () => {
   assert.throws(() => validateJobRequest({ steps, maxSteps: 3 }), /too many steps/);
 });
 
+test('validateJobRequest rejects malformed maxSteps instead of silently admitting it', () => {
+  const steps = [{ kind: 'snapshot' as const }];
+  for (const maxSteps of [0, -1, 1.5, Number.NaN]) {
+    assert.throws(
+      () => validateJobRequest({ steps, maxSteps }),
+      /maxSteps must be a positive integer/,
+      String(maxSteps),
+    );
+  }
+  assert.throws(
+    () => validateJobRequest({ steps, maxSteps: '2' as unknown as number }),
+    /maxSteps must be a positive integer/,
+  );
+});
+
 test('validateJobRequest rejects unknown kind', () => {
   assert.throws(() => validateJobRequest({ steps: [{ kind: 'fly' }] }), /unknown kind/);
 });
@@ -61,6 +76,10 @@ test('validateJobRequest requires values array for select', () => {
   assert.throws(
     () => validateJobRequest({ steps: [{ kind: 'select', selector: '#sel' }] }),
     /select requires values/,
+  );
+  assert.throws(
+    () => validateJobRequest({ steps: [{ kind: 'select', selector: '#sel', values: ['a', 2] }] }),
+    /select values must all be strings/,
   );
 });
 

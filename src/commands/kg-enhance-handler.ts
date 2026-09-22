@@ -163,7 +163,10 @@ export async function executeKgEnhance(args: Record<string, unknown>, context: C
         ? { provider: raw.provider, entities: raw.entities, invalid: raw.invalid, error: { code: raw.error.code, message: raw.error.message, retryable: raw.error.retryable }, signals: raw.signals, claims: raw.claims, evidence: raw.evidence }
         : { provider: raw.provider, entities: raw.entities, invalid: raw.invalid, signals: raw.signals, claims: raw.claims, evidence: raw.evidence };
     });
-    const assembled = assembleKgEnhanceResult(outcomes);
+    const assembled = assembleKgEnhanceResult(
+      outcomes,
+      typeof input.maxEntities === 'number' ? { maxEntities: input.maxEntities } : {},
+    );
     const { entities, claims, conflicts, partitions, groups, evidence } = assembled;
     const envelope = buildKnowledgeResult({ request: { tool: 'kg', action: 'enhance', providers }, outcomes, data: { kind: 'enhance', entities, claims, conflicts, partitions, groups, evidence } });
     const northstarCommand = mapKgEnhanceCommandResult(envelope, context);

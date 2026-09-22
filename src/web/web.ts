@@ -618,10 +618,33 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   const combinedRunnable: WebSearchProviderId[] = [];
   const seenUnavailable = new Set<WebSearchProviderId>();
   const combinedUnavailable: WebSearchProviderId[] = [];
-  for (const { dispatched } of dispatchedQueries) {
+  let totalProviderSearches = 0;
+  const perQueryFanout: Array<{
+    query: string;
+    attemptedProviders: WebSearchProviderId[];
+    servedProviders: WebSearchProviderId[];
+    failedProviders: WebSearchProviderId[];
+    providerSearches: number;
+    hitsCount: number;
+  }> = [];
+
+  for (const { entry, dispatched } of dispatchedQueries) {
     combinedRankings.push(...dispatched.rankings);
     combinedGeneratedRaw.push(...dispatched.generatedRaw);
     combinedFailures.push(...dispatched.failures);
+    const querySearches = dispatched.runnable.length;
+    totalProviderSearches += querySearches;
+    const servedSet = new Set(dispatched.servedBackends);
+    const failedSet = new Set(dispatched.failures.map((f) => f.backend));
+    const queryHitsCount = dispatched.rankings.reduce((sum, r) => sum + r.hits.length, 0);
+    perQueryFanout.push({
+      query: entry,
+      attemptedProviders: [...dispatched.runnable],
+      servedProviders: dispatched.runnable.filter((id) => servedSet.has(id)),
+      failedProviders: dispatched.runnable.filter((id) => failedSet.has(id)),
+      providerSearches: querySearches,
+      hitsCount: queryHitsCount,
+    });
     for (const backend of dispatched.servedBackends) {
       if (!servedList.includes(backend)) servedList.push(backend);
     }
@@ -717,7 +740,13 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
       selected: dispatched.selected,
       runnable: dispatched.runnable,
       unavailable: dispatched.unavailable,
+      attemptedProviders: dispatched.runnable,
+      totalProviderSearches,
+      perQueryFanout,
     },
+    attemptedProviders: dispatched.runnable,
+    totalProviderSearches,
+    perQueryFanout,
     nativeAi: generatedText,
     ...(knowledge !== null ? { knowledge } : {}),
   }, envelope);

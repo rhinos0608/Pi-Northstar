@@ -104,8 +104,27 @@ test('webSearch fans out queries arrays and fuses per-query rankings', async () 
     const env = { TINYFISH_API_KEY: 'key', PI_SEARCH_WEB_BACKENDS: 'tinyfish' };
     const result = await webSearch({ queries: ['alpha', 'beta'], limit: 5 }, { env });
     assert.equal(calls, 2);
-    const details = result.details as { results: Array<{ url: string }> };
+    const details = result.details as {
+      results: Array<{ url: string }>;
+      attemptedProviders?: string[];
+      totalProviderSearches?: number;
+      perQueryFanout?: Array<{ query: string; attemptedProviders: string[]; providerSearches: number; hitsCount: number }>;
+      fusion?: {
+        attemptedProviders?: string[];
+        totalProviderSearches?: number;
+        perQueryFanout?: Array<{ query: string; attemptedProviders: string[]; providerSearches: number; hitsCount: number }>;
+      };
+    };
     assert.deepEqual(details.results.map((r) => r.url).sort(), ['https://example.com/alpha', 'https://example.com/beta']);
+    assert.deepEqual(details.attemptedProviders, ['tinyfish']);
+    assert.equal(details.totalProviderSearches, 2);
+    assert.equal(details.perQueryFanout?.length, 2);
+    assert.equal(details.perQueryFanout?.[0]?.query, 'alpha');
+    assert.deepEqual(details.perQueryFanout?.[0]?.attemptedProviders, ['tinyfish']);
+    assert.equal(details.perQueryFanout?.[0]?.providerSearches, 1);
+    assert.equal(details.perQueryFanout?.[0]?.hitsCount, 1);
+    assert.equal(details.fusion?.totalProviderSearches, 2);
+    assert.deepEqual(details.fusion?.attemptedProviders, ['tinyfish']);
   } finally {
     globalThis.fetch = saved;
   }

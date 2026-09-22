@@ -679,18 +679,14 @@ export function createOpenCliSocialWorker(exec: OpenCliExec | OpenCliWorkerOptio
     if (platform === 'linkedin' && request.action === 'search') {
       requestWarnings.push('linkedin people-search consumes LinkedIn Commercial Use Limit');
       if (request.limit > LINKEDIN_PEOPLE_SEARCH_MAX) {
-        requestWarnings.push(`limit clamped to ${LINKEDIN_PEOPLE_SEARCH_MAX} for linkedin people-search`);
+        throw new SocialError('invalid_request', `limit must be an integer 1..${LINKEDIN_PEOPLE_SEARCH_MAX}`, { platform });
       }
     }
     if (platform === 'facebook' && request.action === 'get_community') {
       requestWarnings.push('community selector is not applied; results are account-owned');
     }
 
-    const args = buildOpenCliArgs(
-      platform === 'linkedin' && request.action === 'search' && request.limit > LINKEDIN_PEOPLE_SEARCH_MAX
-        ? { ...request, limit: LINKEDIN_PEOPLE_SEARCH_MAX }
-        : request,
-    );
+    const args = buildOpenCliArgs(request);
     if (args === null) {
       throw new SocialError('unsupported_action', `${platform} ${request.action} has no OpenCLI operation`, { platform });
     }

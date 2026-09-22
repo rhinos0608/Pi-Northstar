@@ -451,13 +451,12 @@ test('linkedin people-search rows normalize to profiles with headline as bio', a
   assert.equal(validateSocialPage(page).ok, true);
 });
 
-test('linkedin people-search clamps limit above the CUL cap and warns', async () => {
+test('linkedin people-search rejects limit above the CUL cap', async () => {
   const request = makeRequest({ platform: 'linkedin', action: 'search', query: 'sre', limit: 50 });
-  const { page, argv } = await normalizeWith(request, []);
-  assert.deepEqual(page.entities, []);
-  assert.ok(page.warnings.some((warning) => warning.includes('Commercial Use Limit')));
-  assert.ok(page.warnings.some((warning) => warning.includes('clamped to 10')));
-  assert.deepEqual(argv, ['linkedin', 'people-search', 'sre', '--limit', '10', '-f', 'json']);
+  await assert.rejects(
+    () => normalizeWith(request, []),
+    (error: unknown) => error instanceof SocialError && error.code === 'invalid_request' && error.message.includes('limit must be an integer 1..10'),
+  );
 });
 
 test('linkedin posts rows normalize with reactions, reposts, impressions, and media', async () => {

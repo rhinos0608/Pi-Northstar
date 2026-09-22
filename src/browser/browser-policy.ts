@@ -363,6 +363,8 @@ export const SUPPORTED_BATCH_SUBCOMMANDS = [
   'scroll', 'tab', 'cookies', 'snapshot', 'select', 'wait', 'find',
 ] as const;
 export type BatchSubcommand = typeof SUPPORTED_BATCH_SUBCOMMANDS[number];
+export const BATCH_SUBCOMMANDS: readonly BatchSubcommand[] = SUPPORTED_BATCH_SUBCOMMANDS;
+
 
 export interface BatchCommand {
   args: string[];
@@ -376,7 +378,7 @@ export interface BatchRequest {
   maxCommands?: number;
 }
 
-const MAX_BATCH_COMMANDS = 20;
+export const MAX_BATCH_COMMANDS = 20;
 
 /** Stable allowlist-miss prefix asserted by policy tests; keep greppable. */
 export const BATCH_SUBCOMMAND_ERROR_PREFIX = 'unsupported batch subcommand';
@@ -522,6 +524,12 @@ export function validateBatchCommandArgs(index: number, sub: BatchSubcommand, ar
 export function validateBatchRequest(raw: Record<string, unknown>): BatchRequest {
   if (!Array.isArray(raw.commands) || raw.commands.length === 0) {
     throw new Error('commands is required and must be a non-empty array');
+  }
+  if (
+    raw.maxCommands !== undefined &&
+    (typeof raw.maxCommands !== 'number' || !Number.isInteger(raw.maxCommands) || raw.maxCommands < 1)
+  ) {
+    throw new Error('maxCommands must be a positive integer');
   }
   const callerMax = typeof raw.maxCommands === 'number' ? raw.maxCommands : MAX_BATCH_COMMANDS;
   // Hard cap: caller may not exceed the built-in constant

@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CHANNEL_CAPABILITIES, cookieImportProviders } from '../../src/capabilities.js';
-import { PROVIDER_DESCRIPTORS, authForChannel, findProvider, liveAuthSnapshot, providerChannels, providerSummary } from '../../src/setup/providers.js';
+import {
+  PROVIDER_DESCRIPTORS,
+  authForChannel,
+  defaultSetupCookieImportProviders,
+  findProvider,
+  isSetupCookieImportProvider,
+  liveAuthSnapshot,
+  providerChannels,
+  providerSummary,
+} from '../../src/setup/providers.js';
 
 test('descriptor availability derives from the canonical registry', () => {
   for (const desc of PROVIDER_DESCRIPTORS) {
@@ -89,16 +98,39 @@ test('twitter and xiaohongshu descriptors expose no dead env keys or import doma
   assert.ok(xiaohongshu?.loginUrl, 'xiaohongshu keeps a useful loginUrl');
 });
 
-test('cookie domains only where the backend consumes sessions', () => {
+test('cookie domains only where a real channel or setup-only backend consumes sessions', () => {
   for (const desc of PROVIDER_DESCRIPTORS) {
     const channel = CHANNEL_CAPABILITIES.find((c) => c.provider?.provider === desc.provider);
-    const consumes = channel?.provider?.consumesCookie === true;
-    if (!consumes) {
-      assert.deepEqual(desc.cookieDomains, [], `provider ${desc.provider} declares no cookie domains without a consuming backend`);
+    const channelConsumes = channel?.provider?.consumesCookie === true;
+    const setupOnlyConsumes =
+      isSetupCookieImportProvider(desc.provider)
+      && !cookieImportProviders().includes(desc.provider);
+    if (!channelConsumes && !setupOnlyConsumes) {
+      assert.deepEqual(
+        desc.cookieDomains,
+        [],
+        `provider ${desc.provider} declares no cookie domains without a consuming backend`,
+      );
     } else {
-      assert.ok(desc.cookieDomains.length > 0, `provider ${desc.provider} consumes sessions so must declare cookie domains`);
+      assert.ok(
+        desc.cookieDomains.length > 0,
+        `provider ${desc.provider} consumes sessions so must declare cookie domains`,
+      );
     }
   }
+});
+
+test('Gemini Web cookie fallback is Reach-owned and only joins bare setup when enabled', () => {
+  const desc = findProvider('vision-gemini-web');
+  assert.ok(desc);
+  assert.deepEqual(desc.cookieDomains, ['google.com']);
+  assert.equal(desc.loginFlow, 'browser_cookie');
+  assert.equal(isSetupCookieImportProvider('vision-gemini-web'), true);
+  assert.equal(defaultSetupCookieImportProviders({}).includes('vision-gemini-web'), false);
+  assert.equal(
+    defaultSetupCookieImportProviders({ PI_VISION_GEMINI_WEB_ENABLED: '1' }).includes('vision-gemini-web'),
+    true,
+  );
 });
 
 test('linkedin promises only verified model-facing reads', () => {
