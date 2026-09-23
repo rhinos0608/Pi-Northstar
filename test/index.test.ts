@@ -599,10 +599,13 @@ test('media tool removed; agent_poll registered with jobId schema', async () => 
   }
 
   assert.ok(!defs.media, 'media tool must not be registered');
-  assert.ok(defs.agent_poll, 'agent_poll must be registered');
-  const pollProps = Object.keys((defs.agent_poll.parameters.properties ?? {})).sort();
+  const agentPoll = defs.agent_poll;
+  assert.ok(agentPoll, 'agent_poll must be registered');
+  const pollProps = Object.keys((agentPoll.parameters.properties ?? {})).sort();
   assert.deepEqual(pollProps, ['jobId']);
-  assert.equal(((defs.agent_poll.parameters.properties as Record<string, Record<string, unknown>>).jobId).maxLength, 128);
+  const jobIdSchema = (agentPoll.parameters.properties as Record<string, Record<string, unknown>>).jobId;
+  assert.ok(jobIdSchema, 'agent_poll jobId schema must exist');
+  assert.equal(jobIdSchema.maxLength, 128);
 });
 
 
