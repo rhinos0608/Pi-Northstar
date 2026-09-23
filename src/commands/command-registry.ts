@@ -23,8 +23,10 @@ import { mediaSearchHandler } from './media-search-handler.js';
 import { mediaHotHandler } from './media-hot-handler.js';
 import { kgSearchHandler } from './kg-search-handler.js';
 import { kgEnhanceHandler } from './kg-enhance-handler.js';
+import { kgNativeHandler } from './kg-native-handler.js';
 import { graphQueryHandler } from './graph-query-handler.js';
 import { graphProbeHandler } from './graph-probe-handler.js';
+import { graphSchemaHandler } from './graph-schema-handler.js';
 import { fetchReadHandler } from './fetch-read-handler.js';
 import { searchWebHandler } from './search-web-handler.js';
 
@@ -58,13 +60,16 @@ const BUILTIN_HANDLERS: readonly (readonly [string, CommandHandler])[] = [
   [mediaHotHandler.commandId, mediaHotHandler],
   [kgSearchHandler.commandId, kgSearchHandler],
   [kgEnhanceHandler.commandId, kgEnhanceHandler],
+  [kgNativeHandler.commandId, kgNativeHandler],
   [graphQueryHandler.commandId, graphQueryHandler],
   [graphProbeHandler.commandId, graphProbeHandler],
+  [graphSchemaHandler.commandId, graphSchemaHandler],
   [fetchReadHandler.commandId, fetchReadHandler],
   [searchWebHandler.commandId, searchWebHandler],
 ];
 
 const handlers = new Map<string, CommandHandler>(BUILTIN_HANDLERS as Iterable<readonly [string, CommandHandler]>);
+const INTERNAL_COMMAND_IDS = new Set<string>([kgNativeHandler.commandId, graphSchemaHandler.commandId]);
 
 export function registerCommand(handler: CommandHandler): void {
   if (!/^[a-z][a-z0-9_.-]{0,63}$/.test(handler.commandId)) throw new TypeError('invalid command id');
@@ -78,7 +83,11 @@ export function commandHandler<T = unknown, R = unknown>(commandId: string): Com
   return handler as CommandHandler<T, R>;
 }
 
-export function commandSurface(): readonly string[] { return [...handlers.keys()]; }
+/** User-discoverable command surface. Internal worker transport commands stay
+ * registered for commandHandler(), but never appear in CLI/skill discovery. */
+export function commandSurface(): readonly string[] {
+  return [...handlers.keys()].filter((id) => !INTERNAL_COMMAND_IDS.has(id));
+}
 export function clearCommandRegistryForTests(): void {
   handlers.clear();
   for (const [id, handler] of BUILTIN_HANDLERS) {

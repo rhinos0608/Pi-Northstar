@@ -229,6 +229,11 @@ test('validateJobRequest rejects credentialed URL in open step', () => {
   );
 });
 
+test('validateJobRequest allows @ in path/query when URL has no credentials', () => {
+  const r = validateJobRequest({ steps: [{ kind: 'open', url: 'https://example.com/@alice?q=@team' }] });
+  assert.equal(r.steps[0]?.url, 'https://example.com/@alice?q=@team');
+});
+
 test('validateJobRequest passes non-loopback open URL', () => {
   const r = validateJobRequest({ steps: [{ kind: 'open', url: 'https://example.com' }] });
   assert.equal(r.steps.length, 1);
@@ -238,12 +243,24 @@ test('validateNoLoopbackInJob passes steps without open URLs', () => {
   validateNoLoopbackInJob([{ kind: 'click', selector: '#btn' }]);
 });
 
-test('validateJobRequest caps effective max at 20 even when caller supplies higher maxSteps', () => {
-  // maxSteps: 21 should NOT allow 21 steps; effective cap is 20
-  const steps21 = Array.from({ length: 21 }, () => ({ kind: 'snapshot' as const }));
-  assert.throws(() => validateJobRequest({ steps: steps21, maxSteps: 21 }), /too many steps/);
-  // Exactly 20 should still pass
+test('validateJobRequest rejects maxSteps above the hard cap instead of clamping it', () => {
   const steps20 = Array.from({ length: 20 }, () => ({ kind: 'snapshot' as const }));
-  const res = validateJobRequest({ steps: steps20, maxSteps: 21 });
+  assert.throws(() => validateJobRequest({ steps: steps20, maxSteps: 21 }), /maxSteps must be an integer 1\.\.20/);
+  const res = validateJobRequest({ steps: steps20, maxSteps: 20 });
   assert.equal(res.steps.length, 20);
+});
+
+test('validateJobRequest rejects unknown wrapper and cross-step fields', () => {
+  assert.throws(() => validateJobRequest({ steps: [{ kind: 'snapshot' }], bogus: true }), /unknown job field/);
+  assert.throws(() => validateJobRequest({ steps: [{ kind: 'click', selector: '#ok', url: 'https:\/\/example.com' }] }), /field url is not allowed.*click/);
+  assert.throws(() => validateJobRequest({ steps: [{ kind: 'snapshot', continueOnFailure: 'yes' }] }), /continueOnFailure must be a boolean/);
+});
+
+test('validateJobRequest preserves wait selectors/text and assert waitMs', () => {
+  const result = validateJobRequest({ steps: [
+    { kind: 'wait', selector: '#ready', text: 'Loaded', waitMs: 250 },
+    { kind: 'assert', selector: '#done', assertText: 'Done', waitMs: 500 },
+  ] });
+  assert.deepEqual(result.steps[0], { kind: 'wait', selector: '#ready', text: 'Loaded', waitMs: 250 });
+  assert.deepEqual(result.steps[1], { kind: 'assert', selector: '#done', assertText: 'Done', waitMs: 500 });
 });

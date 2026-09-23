@@ -12,7 +12,7 @@ import {
   buildNorthstarResult,
   type NorthstarResultV1,
 } from "../../src/result-contract.js";
-import { SocialError } from "../../src/social/social-contract.js";
+import { SOCIAL_ACTIONS, SocialError } from "../../src/social/social-contract.js";
 
 function ctx(env: Record<string, string | undefined> = {}) {
   return createCommandContext({
@@ -171,23 +171,26 @@ test("social.read maps envelope statuses to command outcomes", () => {
   }
 });
 
-// ── Slice coverage: all six read actions ──
+// ── Slice coverage: every canonical non-search action ──
 
-test("social.read serves get_post/thread/comments/profile/community/feed with stamp", async () => {
+test("social.read serves every canonical non-search action with stamp", async () => {
   const seen: Array<Record<string, unknown>> = [];
   setSocialReadExecutor(async (args) => {
     seen.push(args);
     return stubResult(envelopeFor("ok"));
   });
   try {
-    const cases: Array<Record<string, unknown>> = [
-      { platform: "twitter", action: "get_post", postId: "p1" },
-      { platform: "twitter", action: "get_thread", postId: "p1" },
-      { platform: "reddit", action: "get_comments", postId: "abc" },
-      { platform: "reddit", action: "get_profile", user: "u1" },
-      { platform: "reddit", action: "get_community", community: "c1" },
-      { platform: "twitter", action: "get_feed" },
-    ];
+    const cases: Array<Record<string, unknown>> = SOCIAL_ACTIONS
+      .filter((action) => action !== "search")
+      .map((action) => {
+        const base: Record<string, unknown> = { platform: "reddit", action };
+        if (["get_post", "get_thread", "get_comments"].includes(action)) base.postId = "p1";
+        if (action === "get_comment_replies") { base.postId = "p1"; base.commentId = "c1"; }
+        if (["get_profile", "get_user_posts", "get_user_comments", "get_followers", "get_following"].includes(action)) base.user = "u1";
+        if (["get_community", "get_community_posts"].includes(action)) base.community = "c1";
+        if (action === "get_topic") base.topic = "t1";
+        return base;
+      });
     for (const args of cases) {
       const result = await executeSocialRead(args, ctx());
       const command = (result.details as Record<string, unknown>)

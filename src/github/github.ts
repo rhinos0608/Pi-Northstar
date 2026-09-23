@@ -5,73 +5,54 @@ import { resultToText, type BackendCallResult, type SearchBackend } from '../bac
 import { guardText } from '../core/tool-output.js';
 import { createCommandContext } from '../commands/command-context.js';
 import { commandHandler } from '../commands/command-registry.js';
-import { GITHUB_ACTIONS, GITHUB_RUN_STATUSES, GITHUB_ACTION_FIELD_SPECS, GITHUB_LABELS_MAX, GITHUB_LIST_LIMIT_MAX, GITHUB_TRENDING_LIMIT_MAX, type GithubAction, type GithubActionField } from './github-contract.js';
+import { GITHUB_ACTIONS, GITHUB_RUN_STATUSES, GITHUB_ACTION_FIELD_SPECS, GITHUB_LABELS_MAX, GITHUB_LABEL_MAX, GITHUB_LIST_LIMIT_MAX, GITHUB_OWNER_MAX, GITHUB_PATH_MAX, GITHUB_QUERY_MAX, GITHUB_REF_MAX, GITHUB_REPO_MAX, GITHUB_TRENDING_LIMIT_MAX, validateGithubActionFields, validateGithubRequest, type GithubAction, type GithubActionField } from './github-contract.js';
 
 const fields: Record<GithubActionField, TSchema> = {
-  owner: Type.String({ description: 'GitHub user or organisation.' }),
-  repo: Type.String({ description: 'Repository name.' }),
-  repository: Type.String({ description: 'owner/repo or GitHub URL.' }),
-  path: Type.String({ description: 'File, directory, or workflow path.' }),
-  paths: Type.Array(Type.String(), { minItems: 1, maxItems: 10, description: 'File paths (file only, 1-10).' }),
-  branch: Type.String({ description: 'Git ref; agrees with ref when both set.' }),
-  ref: Type.String({ description: 'Git ref; agrees with branch when both set.' }),
+  owner: Type.String({ minLength: 1, maxLength: GITHUB_OWNER_MAX, description: 'GitHub user or organisation. XOR: use owner+repo together, or repository alone — never mix.' }),
+  repo: Type.String({ minLength: 1, maxLength: GITHUB_REPO_MAX, description: 'Repository name. XOR: use owner+repo together, or repository alone — never mix.' }),
+  repository: Type.String({ minLength: 1, description: 'owner/repo or GitHub URL. XOR: use repository alone, or owner+repo together — never mix.' }),
+  path: Type.String({ minLength: 1, maxLength: GITHUB_PATH_MAX, description: 'File, directory, or workflow path. XOR (file only): path xor paths — exactly one required at runtime.' }),
+  paths: Type.Array(Type.String({ minLength: 1, maxLength: GITHUB_PATH_MAX }), { minItems: 1, maxItems: 10, description: 'File paths (file only, 1-10). XOR: paths xor path — exactly one required at runtime.' }),
+  branch: Type.String({ minLength: 1, maxLength: GITHUB_REF_MAX, description: 'Git ref; agrees with ref when both set.' }),
+  ref: Type.String({ minLength: 1, maxLength: GITHUB_REF_MAX, description: 'Git ref; agrees with branch when both set.' }),
   recursive: Type.Boolean({ description: 'Full recursive tree.' }),
   includeReadme: Type.Boolean({ description: 'Raw README content.' }),
-  query: Type.String({ description: 'GitHub search syntax.' }),
-  language: Type.String({ description: 'Language.' }),
+  query: Type.String({ minLength: 1, maxLength: GITHUB_QUERY_MAX, description: 'GitHub search syntax.' }),
+  language: Type.String({ minLength: 1, maxLength: GITHUB_LABEL_MAX, description: 'Language.' }),
   limit: Type.Integer({ minimum: 1, maximum: GITHUB_LIST_LIMIT_MAX, description: `Max items (1-${GITHUB_LIST_LIMIT_MAX}).` }),
   perPage: Type.Integer({ minimum: 1, maximum: GITHUB_LIST_LIMIT_MAX, description: `Alias for limit; takes precedence (1-${GITHUB_LIST_LIMIT_MAX}).` }),
   number: Type.Integer({ minimum: 1, description: 'Issue, PR, or run number (positive integer).' }),
-  sha: Type.String({ description: 'Commit SHA.' }),
-  since: Type.String({ description: 'ISO date or trending window.' }),
+  sha: Type.String({ minLength: 7, maxLength: 40, description: 'Commit SHA.' }),
+  since: Type.String({ minLength: 1, description: 'ISO date or trending window.' }),
   state: StringEnum(['open', 'closed', 'all'], { description: 'Issue/PR state.' }),
-  labels: Type.Array(Type.String(), { maxItems: GITHUB_LABELS_MAX, description: 'Issue labels.' }),
-  tag: Type.String({ description: 'Release tag.' }),
+  labels: Type.Array(Type.String({ minLength: 1, maxLength: GITHUB_LABEL_MAX, pattern: '.*\\S.*' }), { maxItems: GITHUB_LABELS_MAX, description: 'Issue labels.' }),
+  tag: Type.String({ minLength: 1, maxLength: GITHUB_REF_MAX, description: 'Release tag.' }),
   latest: Type.Boolean({ description: 'Fetch latest release.' }),
   files: Type.Boolean({ description: 'Changed files for pull.' }),
-  author: Type.String({ description: 'Commit author filter.' }),
-  workflow: Type.String({ description: 'Workflow ID or file.' }),
+  author: Type.String({ minLength: 1, description: 'Commit author filter.' }),
+  workflow: Type.String({ minLength: 1, maxLength: GITHUB_PATH_MAX, description: 'Workflow ID or file.' }),
   status: StringEnum([...GITHUB_RUN_STATUSES], { description: 'Workflow run status.' }),
   jobs: Type.Boolean({ description: 'Jobs for workflow run.' }),
-  cursor: Type.String({ maxLength: 4096, description: 'Opaque continuation cursor.' }),
+  cursor: Type.String({ minLength: 1, maxLength: 4096, description: 'Opaque continuation cursor.' }),
 };
 
 function limitCapForSchema(action: GithubAction): number {
   return action === 'trending' ? GITHUB_TRENDING_LIMIT_MAX : GITHUB_LIST_LIMIT_MAX;
 }
 
-function fileBranch(): TSchema {
-  // file selector is XOR: exactly one of path / paths. Neither variant
-  // names the other field, so additionalProperties:false rejects both-together
-  // and neither. Mirrors validateGithubRequest file enforcement.
-  const base: Record<string, TSchema> = {
-    action: Type.Literal('file'),
-    owner: Type.Optional(fields.owner),
-    repo: Type.Optional(fields.repo),
-    repository: Type.Optional(fields.repository),
-    branch: Type.Optional(fields.branch!),
-    ref: Type.Optional(fields.ref!),
-  };
-  const pathBody = Type.Object({ ...base, path: fields.path! }, { description: 'file operation.', additionalProperties: false });
-  const pathsBody = Type.Object({ ...base, paths: fields.paths! }, { description: 'file operation.', additionalProperties: false });
-  const selector = Type.Union([
-    Type.Object({ owner: fields.owner, repo: fields.repo }),
-    Type.Object({ repository: fields.repository }),
-  ], { description: 'Repository: owner/repo or GitHub URL.' });
-  return Type.Union([
-    Type.Intersect([pathBody, selector], { description: 'file operation.' }),
-    Type.Intersect([pathsBody, selector], { description: 'file operation.' }),
-  ], { description: 'file operation.' });
-}
-
 function actionBranch(action: GithubAction): TSchema {
-  if (action === 'file') return fileBranch();
+  // Flat per-action object: exactly one branch per GithubAction (12 total).
+  // No Intersect/Union nesting, no $ref. All fields optional at schema;
+  // XOR + requiredness enforced at runtime by validateGithubRequest +
+  // validateGithubActionFields on RAW input before projection/dispatch.
+  // XOR docs: owner+repo vs repository (exactly one form); path vs paths
+  // (file only, exactly one). Runtime rejects neither/both and mixed forms.
   const spec = GITHUB_ACTION_FIELD_SPECS[action];
   const properties: Record<string, TSchema> = { action: Type.Literal(action) };
   const cap = limitCapForSchema(action);
   const limitSchema = Type.Integer({ minimum: 1, maximum: cap, description: `Max items (1-${cap}).` });
   const perPageSchema = Type.Integer({ minimum: 1, maximum: cap, description: `Alias for limit; takes precedence (1-${cap}).` });
-  if (spec.repoSelector === true) {
+  if (spec.repoSelector) {
     properties.owner = Type.Optional(fields.owner);
     properties.repo = Type.Optional(fields.repo);
     properties.repository = Type.Optional(fields.repository);
@@ -82,18 +63,7 @@ function actionBranch(action: GithubAction): TSchema {
     else properties[field] = Type.Optional(fields[field]!);
   }
   for (const field of spec.required) properties[field] = fields[field]!;
-  const body = Type.Object(properties, { description: `${action} operation.`, additionalProperties: false });
-  if (!spec.repoSelector) return body;
-  if (spec.repoSelector === 'optional') {
-    const pairBody = Type.Object({ ...properties, owner: fields.owner, repo: fields.repo }, { description: `${action} operation.`, additionalProperties: false });
-    const slugBody = Type.Object({ ...properties, repository: fields.repository }, { description: `${action} operation.`, additionalProperties: false });
-    return Type.Union([body, pairBody, slugBody], { description: `${action} operation.` });
-  }
-  const selector = Type.Union([
-    Type.Object({ owner: fields.owner, repo: fields.repo }),
-    Type.Object({ repository: fields.repository }),
-  ], { description: 'Repository: owner/repo or GitHub URL.' });
-  return Type.Intersect([body, selector], { description: `${action} operation.` });
+  return Type.Object(properties, { description: `${action} operation. Repo selector XOR: owner+repo vs repository. File selector XOR: path vs paths.`, additionalProperties: false });
 }
 
 export function buildGithubParameters(): TSchema {
@@ -127,6 +97,10 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const { request } = params as { request: Record<string, unknown> };
       const { action, ...rest } = request;
+      // Runtime authority on RAW input before projection/dispatch: unknown
+      // fields + selector/value validation reject before any backend dispatch.
+      validateGithubActionFields({ action, ...rest }, String(action));
+      validateGithubRequest({ action: String(action), ...rest } as never);
       const args: Record<string, unknown> = { action };
       for (const [key, value] of Object.entries(rest)) if (value !== undefined) args[key] = value;
       const commandId = typeof action === 'string' ? GITHUB_COMMAND_IDS[action] : undefined;

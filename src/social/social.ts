@@ -18,6 +18,7 @@
 // generic web fallback here; only capability-declared backends run.
 
 import type { BackendCallResult } from '../backend.js';
+import { auxSpecFor, selectorSpecFor, type SocialSelectorField } from './social-contract.js';
 import {
   SOCIAL_BACKEND_PREFERENCE,
   inferPlatformFromUrl,
@@ -444,11 +445,39 @@ function executeSocialWriteGate(
 
 // ── Integrator ──
 
+// Raw model-facing field allowlist. Unknown fields reject with invalid_request
+// before projection or worker dispatch: projection must never silently drop.
+// `payload` is admitted here only so the write gate below can inspect it; the
+// read path rejects it after the gate. `cursor` is validated strictly here
+// because validateSocialRequest does not own the cursor contract.
+const SOCIAL_RAW_INPUT_FIELDS: ReadonlySet<string> = new Set([
+  'platform', 'action', 'query', 'postId', 'commentId', 'user', 'community',
+  'topic', 'url', 'feedVariant', 'sort', 'timeRange', 'includeReplies', 'limit',
+  'cursor', 'payload',
+]);
+
+const SOCIAL_RAW_SELECTOR_FIELDS: readonly SocialSelectorField[] = [
+  'query', 'postId', 'commentId', 'user', 'community', 'topic',
+];
+
+const SOCIAL_RAW_STRING_FIELDS: readonly string[] = [
+  'query', 'postId', 'commentId', 'user', 'community', 'topic', 'url',
+  'feedVariant', 'sort', 'timeRange',
+];
+
 export async function executeSocial(
   args: Record<string, unknown>,
   options: ExecuteSocialOptions = {},
 ): Promise<BackendCallResult> {
   const env = options.env ?? process.env;
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+    throw new SocialError('invalid_request', 'request must be an object');
+  }
+  for (const key of Object.keys(args)) {
+    if (!SOCIAL_RAW_INPUT_FIELDS.has(key)) {
+      throw new SocialError('invalid_request', `unknown request field: ${key.slice(0, 32)}`);
+    }
+  }
   const platform = resolvePlatform(args);
   // Stage 8b write gate: closed write vocabulary intercepts before canonical
   // read resolution and before any worker plan construction. Default matrix
@@ -462,6 +491,51 @@ export async function executeSocial(
   // before any worker dispatch.
   const canonical = resolveCanonicalAction(platform, args);
 
+  // Strict raw-value authority: wrong-typed values and cross-action fields
+  // reject here instead of being silently dropped by projection. Selectors and
+  // aux strings must be strings when present; limit/includeReplies pass through
+  // with raw types so the owning validators (resolveSocialLimit via
+  // validateSocialRequest) reject mismatches loudly instead of defaulting.
+  for (const field of SOCIAL_RAW_STRING_FIELDS) {
+    if (args[field] !== undefined && typeof args[field] !== 'string') {
+      throw new SocialError('invalid_request', `${field} must be a string when provided`, { platform });
+    }
+  }
+  if (args.limit !== undefined && typeof args.limit !== 'number') {
+    throw new SocialError('invalid_request', 'limit must be an integer 1..100 when provided', { platform });
+  }
+  if (args.includeReplies !== undefined && typeof args.includeReplies !== 'boolean') {
+    throw new SocialError('invalid_request', 'includeReplies must be a boolean when provided', { platform });
+  }
+  if (args.cursor !== undefined && (typeof args.cursor !== 'string' || args.cursor.trim().length === 0)) {
+    throw new SocialError('invalid_request', 'cursor must be a non-empty string when provided', { platform });
+  }
+  if (args.payload !== undefined) {
+    throw new SocialError('invalid_request', `payload is not supported for ${platform} ${canonical} (read-only action)`, { platform });
+  }
+  // Cross-action authority from the code-owner registries: only selectors in
+  // the platform/action selector spec and aux fields in its aux spec are
+  // admitted. `url`/`limit`/`cursor` are universal; everything else rejects.
+  const selectorSpec = selectorSpecFor(platform, canonical);
+  const allowedSelectors = new Set([...(selectorSpec.required ?? []), ...(selectorSpec.anyOf ?? [])]);
+  for (const field of SOCIAL_RAW_SELECTOR_FIELDS) {
+    if (args[field] !== undefined && !allowedSelectors.has(field)) {
+      throw new SocialError('invalid_request', `${platform} ${canonical} does not support ${field}`, { platform });
+    }
+  }
+  const auxSpec = auxSpecFor(platform, canonical);
+  if (args.sort !== undefined && auxSpec.sort === undefined) {
+    throw new SocialError('invalid_request', `${platform} ${canonical} does not support sort`, { platform });
+  }
+  if (args.timeRange !== undefined && auxSpec.timeRange === undefined) {
+    throw new SocialError('invalid_request', `${platform} ${canonical} does not support timeRange`, { platform });
+  }
+  if (args.feedVariant !== undefined && auxSpec.feedVariant === undefined) {
+    throw new SocialError('invalid_request', `${platform} ${canonical} does not support feedVariant`, { platform });
+  }
+  if (args.includeReplies !== undefined && auxSpec.includeReplies === undefined) {
+    throw new SocialError('invalid_request', `${platform} ${canonical} does not support includeReplies`, { platform });
+  }
   const query = optionalString(args.query);
   const postId = optionalString(args.postId);
   const commentId = optionalString(args.commentId);
@@ -485,8 +559,8 @@ export async function executeSocial(
     ...(feedVariant !== undefined ? { feedVariant } : {}),
     ...(sort !== undefined ? { sort } : {}),
     ...(timeRange !== undefined ? { timeRange } : {}),
-    ...(typeof args.includeReplies === 'boolean' ? { includeReplies: args.includeReplies } : {}),
-    ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+    ...(args.includeReplies !== undefined ? { includeReplies: args.includeReplies as boolean } : {}),
+    ...(args.limit !== undefined ? { limit: args.limit as number } : {}),
   });
   const warnings = [...validationWarnings];
   const cursor = optionalString(args.cursor);

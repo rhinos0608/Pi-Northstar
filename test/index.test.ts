@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildBrowseArgs, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs, sessionFetchProbeDeps } from '../src/index.js';
 import Value from 'typebox/value';
-import { CHANNEL_CAPABILITIES, REACH_FAMILIES, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
+import { CHANNEL_CAPABILITIES, REACH_FAMILIES, canonicalActionsFor, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
 
 // Schema tests exercise explicitly enabled native tools; zero-default behavior is covered in contract.test.ts.
 process.env.PI_SEARCH_NATIVE_TOOLS = 'web_search,fetch,github,social,kg,graph,browser,desktop,agent_poll';
@@ -517,15 +517,25 @@ test('social strict schema stays canonical-only', async () => {
   assert.ok(defs.social, 'social tool must be registered');
 
   // Strict social schema ({request: branch union}): one branch per
-  // advertised platform/action with explicit selector alternatives.
+  // advertised action with per-action platform enum.
   const socialBranches = requestBranches(defs.social.parameters);
   assert.ok(socialBranches.length > 0, 'social schema must expose request branches');
   const socialProps = branchProperties(defs.social.parameters);
   for (const key of ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']) assert.ok(key in socialProps, `social schema must expose ${key}`);
-  const socialPlatforms = [...new Set(socialBranches.map((branch) => branch.properties?.platform?.const).filter(Boolean))];
-  assert.deepEqual([...socialPlatforms].sort(), [...registrySocialPlatforms()].sort());
   const socialActions = [...new Set(socialBranches.map((branch) => branch.properties?.action?.const).filter(Boolean))];
   assert.deepEqual([...new Set(socialActions)].sort(), registryActionEnum('social'));
+  const advertisedPlatformsFor = (action: string): string[] =>
+    CHANNEL_CAPABILITIES
+      .filter((channel) => channel.family === 'social' && channel.availability === 'available' && canonicalActionsFor(channel.id).includes(action))
+      .map((channel) => channel.id)
+      .sort();
+  for (const action of socialActions) {
+    const actionBranch = socialBranches.find((entry) => entry.properties?.action?.const === action);
+    assert.ok(actionBranch, `social schema must expose branch for action ${action}`);
+    assert.deepEqual([...(actionBranch.properties?.platform?.enum ?? [])].sort(), advertisedPlatformsFor(action as string), `platform enum for action ${action} must equal advertised platforms`);
+  }
+  const unionPlatforms = [...new Set(socialBranches.flatMap((entry) => entry.properties?.platform?.enum ?? []))];
+  assert.deepEqual([...unionPlatforms].sort(), [...registrySocialPlatforms()].sort());
   // Canonical-only contract: legacy aliases are never advertised.
   for (const legacy of ['tweet', 'topic', 'note', 'hot', 'popular', 'post', 'explore', 'user']) {
     assert.equal(socialActions.includes(legacy), false, `social action enum must not advertise legacy alias ${legacy}`);
@@ -591,7 +601,8 @@ test('media tool removed; agent_poll registered with jobId schema', async () => 
   assert.ok(!defs.media, 'media tool must not be registered');
   assert.ok(defs.agent_poll, 'agent_poll must be registered');
   const pollProps = Object.keys((defs.agent_poll.parameters.properties ?? {})).sort();
-  assert.deepEqual(pollProps, ['jobId', 'owner']);
+  assert.deepEqual(pollProps, ['jobId']);
+  assert.equal(((defs.agent_poll.parameters.properties as Record<string, Record<string, unknown>>).jobId).maxLength, 128);
 });
 
 
@@ -896,7 +907,7 @@ test('kg tool registered lowercase with action-aware schema', async () => {
   const branches = requestBranches(defs.kg.parameters);
   const props = branchProperties(defs.kg.parameters);
   assert.deepEqual([...new Set(branches.map((b) => b.properties?.action?.const))].sort(), ['analyze_text', 'enhance', 'search']);
-  assert.equal(branches.length, 19, 'kg schema keeps 1 search + 17 enhance (10 Person, 7 Organization) + 1 analyze_text branch');
+  assert.equal(branches.length, 4, 'kg schema keeps 1 search + 2 enhance (Person, Organization) + 1 analyze_text branch');
   for (const key of ['query', 'type', 'text', 'cursor', 'providers', 'maxProviders', 'limit', 'maxEntities', 'confidenceThreshold', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics']) {
     assert.ok(key in props, `kg schema must expose portable field ${key}`);
   }

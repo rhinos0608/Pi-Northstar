@@ -741,6 +741,12 @@ export function validateKgEnhance(input: unknown): KgEnhanceResult {
   }
   const selectors: Record<string, string> = {};
   for (const key of [...ENHANCE_SELECTOR_KEYS, ...PERSON_ONLY_KEYS]) {
+    if (input[key] === undefined) continue;
+    // Present-but-wrong-typed selectors reject explicitly instead of reading
+    // as "no selector"; blank strings stay missing so >=1 requires substance.
+    if (typeof input[key] !== 'string' || (input[key] as string).trim().length === 0) {
+      return { ok: false, code: 'invalid_input', message: `${key} must be a non-empty string` };
+    }
     const trimmed = optionalTrimmed(input[key]);
     if (trimmed !== undefined) selectors[key] = trimmed;
   }

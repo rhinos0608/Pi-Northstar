@@ -17,6 +17,7 @@ import { validateCommandResult } from '../commands/command-result.js';
 import { textResult } from '../core/tool-output.js';
 import { getProcessLocalBridgeToken } from '../chrome/chrome-profile-adapter.js';
 import { appendUserToolBinsToPath } from '../process/python-child-env.js';
+import { SOCIAL_ACTIONS } from '../social/social-contract.js';
 
 interface CliEnvelope {
   ok: boolean;
@@ -29,11 +30,11 @@ interface CliEnvelope {
 
 const GITHUB_COMMANDS: Readonly<Record<string, string>> = { file: 'github.file', repo: 'github.repo', search: 'github.search', search_repos: 'github.search_repos', issues: 'github.issues', pulls: 'github.pulls', releases: 'github.releases', commits: 'github.commits', tree: 'github.tree', trending: 'github.trending', workflows: 'github.workflows', runs: 'github.runs' };
 const RESEARCH_COMMANDS: Readonly<Record<string, string>> = { academic: 'research.search', search: 'research.search', paper: 'research.paper', citations: 'research.citations' };
-const SOCIAL_READ_ACTIONS = new Set(['get_post', 'get_thread', 'get_comments', 'get_profile', 'get_community', 'get_feed', 'get_followers', 'get_user_posts', 'get_trending', 'get_community_posts']);
+const SOCIAL_READ_ACTIONS = new Set<string>(SOCIAL_ACTIONS.filter((action) => action !== 'search'));
 const MEDIA_COMMANDS: Readonly<Record<string, string>> = { details: 'media.details', transcript: 'media.transcript', feed: 'media.feed', search: 'media.search', hot: 'media.hot' };
 export function mapCliToolToCommandId(name: string, args: Record<string, unknown>): string {
   const action = typeof args.action === 'string' ? args.action : undefined;
-  const commandId = name === 'web_search' ? 'search.web' : name === 'fetch' ? 'fetch.read' : name === 'github' && action ? GITHUB_COMMANDS[action] : name === 'research' && action ? RESEARCH_COMMANDS[action] : name === 'social' && (action === undefined || action === 'search') ? 'social.search' : name === 'social' && action !== undefined && SOCIAL_READ_ACTIONS.has(action) ? 'social.read' : name === 'media' && action ? MEDIA_COMMANDS[action] : name === 'feeds' ? 'media.feed' : name === 'kg' && action === 'search' && args.cursor !== undefined && args.providers === undefined ? 'kg.search' : name === 'graph' && (action === 'query' || action === 'probe') ? `graph.${action}` : undefined;
+  const commandId = name === 'web_search' ? 'search.web' : name === 'fetch' ? 'fetch.read' : name === 'github' && action ? GITHUB_COMMANDS[action] : name === 'research' && action ? RESEARCH_COMMANDS[action] : name === 'social' && (action === undefined || action === 'search') ? 'social.search' : name === 'social' && action !== undefined && SOCIAL_READ_ACTIONS.has(action) ? 'social.read' : name === 'media' && action ? MEDIA_COMMANDS[action] : name === 'feeds' ? 'media.feed' : name === 'kg' && (action === undefined || action === 'search' || action === 'enhance' || action === 'analyze_text') ? 'kg.native' : name === 'graph' && (action === 'query' || action === 'probe' || action === 'schema') ? `graph.${action}` : undefined;
   if (commandId === undefined) throw new Error(`CLI backend does not support tool '${name}' with requested action`);
   return commandId;
 }
@@ -158,7 +159,6 @@ export class CliSearchBackend implements SearchBackend {
       child.stdin.write(JSON.stringify({ commandId, args }));
       child.stdin.end();
       const stdoutAcc = createCliStdoutAccumulator();
-      let stderr = '';
       let timedOut = false;
       let aborted = false;
       let killTimer: NodeJS.Timeout | undefined;
@@ -190,9 +190,9 @@ export class CliSearchBackend implements SearchBackend {
       child.stdout.on('data', (chunk: Buffer) => {
         if (appendCliStdout(stdoutAcc, chunk.toString('utf8'))) terminate();
       });
-      child.stderr.on('data', (chunk: Buffer) => {
-        stderr = (stderr + chunk.toString('utf8')).slice(-MAX_CLI_OUTPUT_CHARS);
-      });
+      // Drain stderr so a noisy child cannot block, but never retain or surface
+      // it: provider CLIs may print credentials or sensitive request fragments.
+      child.stderr.on('data', () => {});
       child.on('error', (error) => {
         cleanup();
         if (aborted || signal?.aborted) {
@@ -204,28 +204,27 @@ export class CliSearchBackend implements SearchBackend {
       child.on('close', (code) => {
         cleanup();
         const output = stdoutAcc.text;
-        const diagnostics = stderr.trim();
         if (aborted || signal?.aborted) {
           reject(cliAbortError());
           return;
         }
         if (timedOut) {
-          reject(new Error(`CLI backend timed out after ${timeout}ms${diagnostics ? `\n${diagnostics}` : ''}`));
+          reject(new Error(`CLI backend timed out after ${timeout}ms`));
           return;
         }
         if (stdoutAcc.truncated) {
-          reject(new Error(`CLI backend response exceeded ${MAX_CLI_OUTPUT_CHARS} chars and was truncated; child terminated for clean failure${diagnostics ? `\n${diagnostics}` : ''}`));
+          reject(new Error(`CLI backend response exceeded ${MAX_CLI_OUTPUT_CHARS} chars and was truncated; child terminated for clean failure`));
           return;
         }
         let parsed: CliEnvelope;
         try {
           parsed = JSON.parse(output) as CliEnvelope;
         } catch (error) {
-          reject(new Error(`CLI backend returned invalid JSON: ${String(error)}${diagnostics ? `\n${diagnostics}` : ''}`));
+          reject(new Error(`CLI backend returned invalid JSON: ${String(error)}`));
           return;
         }
         if (code !== 0 && parsed.ok) {
-          reject(new Error(`CLI backend exited with code ${code ?? 1}${diagnostics ? `\n${diagnostics}` : ''}`));
+          reject(new Error(`CLI backend exited with code ${code ?? 1}`));
           return;
         }
         resolve(parsed);

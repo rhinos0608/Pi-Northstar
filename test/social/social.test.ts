@@ -534,3 +534,39 @@ test('exact and subdomain hosts infer the platform', async () => {
   assert.equal((result.details as Record<string, unknown>).platform, 'twitter');
   assert.equal((result.details as Record<string, unknown>).canonicalAction, 'get_post');
 });
+
+// ── Runtime authority: reject unknown/cross-action/wrong-typed fields before dispatch ──
+// Silent drops are a grounding hazard: every case below must throw
+// invalid_request with zero worker plans and zero backend executes.
+
+async function silentDropRejection(args: Record<string, unknown>, platform: SocialPlatform): Promise<void> {
+  const harness = stubWorker(platform, [{ backend: 'twitter-cli', authTier: 'cookie', pagination: 'none' }]);
+  await socialErrorOf('invalid_request', () => executeSocial(args, optionsFor(harness, platform)));
+  assert.equal(harness.plansCalls, 0, `${JSON.stringify(args)} must not construct plans`);
+  assert.deepEqual(harness.executes, []);
+}
+
+test('raw unknown fields reject before dispatch', async () => {
+  await silentDropRejection({ platform: 'twitter', action: 'search', query: 'x', bogus: 1 }, 'twitter');
+});
+
+test('action-mismatched selectors reject before dispatch', async () => {
+  await silentDropRejection({ platform: 'twitter', action: 'search', query: 'x', community: 'rust' }, 'twitter');
+  await silentDropRejection({ platform: 'reddit', action: 'get_profile', user: 'ada', postId: 'abc' }, 'reddit');
+});
+
+test('wrong-typed cursor/limit/includeReplies reject before dispatch', async () => {
+  await silentDropRejection({ platform: 'reddit', action: 'get_trending', cursor: 123 }, 'reddit');
+  await silentDropRejection({ platform: 'reddit', action: 'search', query: 'x', limit: '10' }, 'reddit');
+  await silentDropRejection({ platform: 'reddit', action: 'get_thread', postId: 'a', includeReplies: 'yes' }, 'reddit');
+  await silentDropRejection({ platform: 'twitter', action: 'search', query: 123 }, 'twitter');
+});
+
+test('platform-unsupported aux fields reject before dispatch', async () => {
+  await silentDropRejection({ platform: 'twitter', action: 'get_profile', user: 'ada', sort: 'top' }, 'twitter');
+  await silentDropRejection({ platform: 'reddit', action: 'get_post', postId: 'a', sort: 'hot' }, 'reddit');
+});
+
+test('read-path payload rejects before dispatch', async () => {
+  await silentDropRejection({ platform: 'twitter', action: 'search', query: 'x', payload: { text: 'hi' } }, 'twitter');
+});

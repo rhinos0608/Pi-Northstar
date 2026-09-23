@@ -76,6 +76,22 @@ test('request accepts semanticAction and batch actions', () => {
   assert.equal(validateBrowserRequest({ action: 'batch' }).action, 'batch');
 });
 
+test('browser request envelope rejects unknown, cross-action, and wrong-type fields', () => {
+  assert.throws(() => validateBrowserRequest({ action: 'click', selector: '#ok', bogus: true }), /unknown field/);
+  assert.throws(() => validateBrowserRequest({ action: 'click', selector: '#ok', url: 'https:\/\/example.com' }), /not allowed.*click/);
+  assert.throws(() => validateBrowserRequest({ action: 'click', selector: 42 }), /selector must be a string/);
+  assert.throws(() => validateBrowserRequest({ action: 'cookies', urls: ['https:\/\/example.com', 42] }), /urls must be an array of strings/);
+  assert.throws(() => validateBrowserRequest({ action: 'snapshot', compact: 'yes' }), /compact must be a boolean/);
+});
+
+test('credentialed navigation errors never echo URL userinfo', () => {
+  const secret = 'SUPER_SECRET_PASSWORD_123';
+  assert.throws(
+    () => validateNavigationUrl(`https:\/\/alice:${secret}@example.com/path`),
+    (error: unknown) => error instanceof Error && /credentials are not allowed/.test(error.message) && !error.message.includes(secret) && !error.message.includes('alice'),
+  );
+});
+
 // ── Component 9: validateSemanticActionRequest ──
 
 test('validateSemanticActionRequest rejects missing locator', () => {
@@ -382,13 +398,12 @@ test('validateBatchRequest accepts every allowlisted subcommand with valid argv'
   assert.equal(r.commands[16]!.subcommand, 'find');
 });
 
-test('validateBatchRequest caps effective max at 20 even when caller supplies higher maxCommands', () => {
-  // maxCommands: 21 should NOT allow 21 commands; effective cap is 20
-  const commands21 = Array.from({ length: 21 }, () => ({ args: ['click', '#btn'] }));
-  assert.throws(() => validateBatchRequest({ commands: commands21, maxCommands: 21 }), /too many commands/);
-  // 21 commands with maxCommands:21 must not pass — the hard cap is 20
-  // Verify exactly 20 still passes
-  const commands20 = Array.from({ length: 20 }, () => ({ args: ['click', '#btn'] }));
-  const r = validateBatchRequest({ commands: commands20, maxCommands: 21 });
+test('validateBatchRequest rejects maxCommands above the hard cap instead of clamping it', () => {
+  const commands = Array.from({ length: 20 }, () => ({ args: ['click', '#btn'] }));
+  assert.throws(
+    () => validateBatchRequest({ commands, maxCommands: 21 }),
+    /maxCommands must be an integer 1\.\.20/,
+  );
+  const r = validateBatchRequest({ commands, maxCommands: 20 });
   assert.equal(r.commands.length, 20);
 });

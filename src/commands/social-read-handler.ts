@@ -8,6 +8,7 @@ import {
 import {
   isSocialPlatform,
   selectorSpecFor,
+  SOCIAL_ACTIONS,
   SOCIAL_MAX_LIMIT,
   SocialError,
   type SocialAction,
@@ -19,21 +20,10 @@ import { attachExternalCommandFailure, cleanCommandString, commandFailure, mapEx
 
 export const SOCIAL_READ_COMMAND = 'social.read';
 
-/** Read surface: single-post/thread/comments/profile/community/feed/followers/user-posts/trending/community-posts reads. */
-const READ_ACTIONS: ReadonlySet<string> = new Set([
-  'get_post',
-  'get_thread',
-  'get_comments',
-  'get_profile',
-  'get_community',
-  'get_feed',
-  'get_followers',
-  'get_user_posts',
-  'get_trending',
-  'get_community_posts',
-]);
-
-const READ_ACTION_LIST = 'get_post, get_thread, get_comments, get_profile, get_community, get_feed, get_followers, get_user_posts, get_trending, get_community_posts';
+/** Canonical non-search social actions. Derive from the owning registry so
+ * the command/backend route cannot drift from the public social schema. */
+const READ_ACTIONS: ReadonlySet<string> = new Set(SOCIAL_ACTIONS.filter((action) => action !== 'search'));
+const READ_ACTION_LIST = SOCIAL_ACTIONS.filter((action) => action !== 'search').join(', ');
 
 const ALLOWED_FIELDS: ReadonlySet<string> = new Set([
   'platform',

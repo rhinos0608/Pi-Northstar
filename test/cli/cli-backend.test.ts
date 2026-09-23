@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appendCliStdout, buildCliEnvironment, createCliStdoutAccumulator, mapCliToolToCommandId } from '../../src/cli/cli-backend.js';
+import { appendCliStdout, buildCliEnvironment, CliSearchBackend, createCliStdoutAccumulator, mapCliToolToCommandId } from '../../src/cli/cli-backend.js';
 import { buildPythonChildEnvironment } from '../../src/process/python-child-env.js';
+import { SOCIAL_ACTIONS } from '../../src/social/social-contract.js';
 
 const SENTINEL = 'SENTINEL_DIFFBOT_TOKEN_abc123xyz';
 
@@ -39,6 +42,15 @@ test('parent maps supported tools to canonical command ids and rejects unsupport
   assert.equal(mapCliToolToCommandId('web_search', { query: 'q' }), 'search.web');
   assert.equal(mapCliToolToCommandId('fetch', { url: 'https://example.com' }), 'fetch.read');
   assert.equal(mapCliToolToCommandId('media', { action: 'details', id: 'abc' }), 'media.details');
+  for (const action of SOCIAL_ACTIONS.filter((candidate) => candidate !== 'search')) {
+    assert.equal(mapCliToolToCommandId('social', { action }), 'social.read', `social ${action}`);
+  }
+  for (const action of ['search', 'enhance', 'analyze_text']) {
+    assert.equal(mapCliToolToCommandId('kg', { action }), 'kg.native', `kg ${action}`);
+  }
+  assert.equal(mapCliToolToCommandId('graph', { action: 'query' }), 'graph.query');
+  assert.equal(mapCliToolToCommandId('graph', { action: 'probe' }), 'graph.probe');
+  assert.equal(mapCliToolToCommandId('graph', { action: 'schema' }), 'graph.schema');
   assert.throws(() => mapCliToolToCommandId('video', { action: 'details', id: 'abc' }), /does not support/);
   assert.throws(() => mapCliToolToCommandId('github', { action: 'unknown' }), /does not support/);
 });
@@ -48,6 +60,16 @@ test('compiled worker accepts closed canonical request and preserves handler res
   assert.equal(result.code, 1);
   assert.equal(result.output.ok, false);
   assert.equal((result.output.data as { details: { northstarCommand: { error: { code: string } } } }).details.northstarCommand.error.code, 'invalid_input');
+});
+
+test('compiled worker resolves full KG and graph schema transport commands', async () => {
+  const kg = await runCompiledWorker({ commandId: 'kg.native', args: { action: 'search' } });
+  assert.equal(kg.code, 1);
+  assert.equal((kg.output.data as { details: { northstarCommand: { commandId: string } } }).details.northstarCommand.commandId, 'kg.native');
+  const graph = await runCompiledWorker({ commandId: 'graph.schema', args: { action: 'schema', language: 'dql', view: 'invalid' } });
+  assert.equal(graph.code, 0);
+  assert.equal((graph.output.data as { details: { northstarCommand: { commandId: string; outcome: string } } }).details.northstarCommand.commandId, 'graph.schema');
+  assert.equal((graph.output.data as { details: { northstarCommand: { outcome: string } } }).details.northstarCommand.outcome, 'failed');
 });
 
 test('compiled worker rejects unexpected request keys', async () => {
@@ -63,6 +85,22 @@ test('compiled worker rejects the retired raw-tool protocol', async () => {
     ok: false,
     error: { code: 'invalid_worker_request', message: 'Invalid worker request.' },
   });
+});
+
+test('CLI backend never includes child stderr in thrown errors', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-atlas-cli-stderr-'));
+  const worker = join(dir, 'fake-worker.mjs');
+  const secret = 'STDERR_SECRET_TOKEN_abc123';
+  await writeFile(worker, `process.stderr.write('${secret}\\n'); process.stdout.write('not-json');\n`);
+  const backend = new CliSearchBackend({ PATH: process.env.PATH ?? '' }, worker);
+  try {
+    await assert.rejects(
+      () => backend.callTool('fetch', { url: 'https://example.com' }),
+      (error: unknown) => error instanceof Error && /invalid JSON/.test(error.message) && !error.message.includes(secret),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 const DIFFBOT_KEYS = [

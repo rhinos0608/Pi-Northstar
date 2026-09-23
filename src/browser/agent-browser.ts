@@ -510,7 +510,7 @@ export class AgentBrowserAdapter {
     if (!loopbackMode) throw new Error('navigateLoopbackTarget requires loopback mode');
     const loopbackPolicy = parseLoopbackDebugTarget(url);
     if (!loopbackPolicy) {
-      return jsonTextResult({ ok: false, error: sanitizeErrorMessage(`Loopback adapter rejected non-loopback URL: ${url}`) });
+      return jsonTextResult({ ok: false, error: 'Loopback adapter rejected non-loopback URL' });
     }
     if (loopbackPolicy.origin !== loopbackMode.origin) {
       return jsonTextResult({ ok: false, error: sanitizeErrorMessage(`Different loopback origin rejected. Expected: ${loopbackMode.origin}, got: ${loopbackPolicy.origin}`) });

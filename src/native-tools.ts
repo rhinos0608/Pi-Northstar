@@ -2,6 +2,7 @@ import type { BackendCallResult } from './backend.js';
 import { commandHandler, commandSurface } from './commands/command-registry.js';
 import { createCommandContext } from './commands/command-context.js';
 import { inferPlatformFromUrl, socialPlatforms } from './capabilities.js';
+import { SOCIAL_ACTIONS } from './social/social-contract.js';
 import {
   analyzeTextDiffbotKg,
   DIFFBOT_KG_ADAPTER_CURSOR_V,
@@ -77,7 +78,7 @@ import { GITHUB_COMMAND_IDS } from './github/github.js';
 const RESEARCH_COMMANDS: Readonly<Record<string, string>> = {
   academic: 'research.search', search: 'research.search', paper: 'research.paper', citations: 'research.citations',
 };
-const SOCIAL_READ_ACTIONS = new Set(['get_post', 'get_thread', 'get_comments', 'get_profile', 'get_community', 'get_feed', 'get_followers', 'get_user_posts', 'get_trending', 'get_community_posts']);
+const SOCIAL_READ_ACTIONS = new Set<string>(SOCIAL_ACTIONS.filter((action) => action !== 'search'));
 const MEDIA_COMMANDS: Readonly<Record<string, string>> = {
   details: 'media.details', transcript: 'media.transcript', feed: 'media.feed', search: 'media.search', hot: 'media.hot',
 };
@@ -325,11 +326,58 @@ async function routeKg(
   return runKgProviderPlan(action, requested, configured, maxProviders, execute);
 }
 
+const KG_SEARCH_FIELDS: ReadonlySet<string> = new Set([
+  'action', 'query', 'language', 'limit', 'cursor', 'providers', 'maxProviders',
+]);
+const KG_ENHANCE_FIELDS_SET: ReadonlySet<string> = new Set([
+  'action', 'type', 'id', 'name', 'url', 'email', 'phone', 'location', 'description',
+  'employer', 'title', 'school', 'fields', 'maxEntities',
+  'includeRelationships', 'includeEvidence', 'confidenceThreshold', 'providers', 'maxProviders',
+]);
+const KG_ANALYZE_FIELDS: ReadonlySet<string> = new Set([
+  'action', 'text', 'language', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics', 'providers', 'maxProviders',
+]);
+
+// RAW input admission before action-specific projections: unknown,
+// cross-action, or provider-native fields reject here so projections below
+// never silently drop input before a paid dispatch. Types/bounds stay with
+// the knowledge-contract validators; no selector/PII value is echoed.
+function admitKgArgs(action: string, args: Record<string, unknown>): void {
+  const allowed = action === 'search' ? KG_SEARCH_FIELDS : action === 'enhance' ? KG_ENHANCE_FIELDS_SET : KG_ANALYZE_FIELDS;
+  for (const key of Object.keys(args)) {
+    if (!allowed.has(key)) {
+      throw new KgContractError('invalid_input', `Unsupported field for kg ${action}.`);
+    }
+  }
+  if (args.action !== undefined && (typeof args.action !== 'string' || args.action.trim().length === 0)) {
+    throw new KgContractError('invalid_input', 'action must be a non-empty string');
+  }
+  if (args.cursor !== undefined && (typeof args.cursor !== 'string' || args.cursor.trim().length === 0)) {
+    throw new KgContractError('cursor_invalid', 'cursor must be a non-empty string');
+  }
+  if (args.maxProviders !== undefined && typeof args.maxProviders !== 'number') {
+    throw new KgContractError('invalid_input', 'maxProviders must be an integer 1..8');
+  }
+  if (action === 'search' && args.language !== undefined && typeof args.language !== 'string') {
+    throw new KgContractError('invalid_input', 'language must be a string');
+  }
+  if (args.providers !== undefined) {
+    if (!Array.isArray(args.providers) || args.providers.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)) {
+      throw new KgContractError('invalid_input', 'providers must be an array of non-empty strings');
+    }
+  }
+}
+
+export async function callNativeKgTool(args: Record<string, unknown>, options: NativeToolOptions = {}): Promise<BackendCallResult> {
+  return kg(args, options);
+}
+
 async function kg(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
   const action = typeof args.action === 'string' ? args.action : 'search';
   if (!KG_ACTIONS.includes(action)) {
     throw new Error(`Native kg only supports search, enhance and analyze_text actions, got: ${action}`);
   }
+  admitKgArgs(action, args);
   const env = options.env ?? process.env;
   // Spend resolved once per call: invalid operator config rejects before any paid call.
   const spend = resolveKgSpend(env);

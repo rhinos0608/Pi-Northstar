@@ -115,7 +115,7 @@ export function validateNavigationUrl(raw: string): string {
     throw new Error(`Disallowed URL scheme: ${url.protocol}`);
   }
   if (url.username || url.password) {
-    throw new Error(`URL credentials are not allowed: ${url.href}`);
+    throw new Error('URL credentials are not allowed');
   }
   assertPublicHostname(url.hostname);
   return url.href;
@@ -540,9 +540,10 @@ export function validateBatchRequest(raw: Record<string, unknown>): BatchRequest
   ) {
     throw new Error('maxCommands must be a positive integer');
   }
-  const callerMax = typeof raw.maxCommands === 'number' ? raw.maxCommands : MAX_BATCH_COMMANDS;
-  // Hard cap: caller may not exceed the built-in constant
-  const maxCommands = Math.min(callerMax, MAX_BATCH_COMMANDS);
+  if (typeof raw.maxCommands === 'number' && raw.maxCommands > MAX_BATCH_COMMANDS) {
+    throw new Error(`maxCommands must be an integer 1..${MAX_BATCH_COMMANDS}`);
+  }
+  const maxCommands = typeof raw.maxCommands === 'number' ? raw.maxCommands : MAX_BATCH_COMMANDS;
   if (raw.commands.length > maxCommands) {
     throw new Error(`too many commands (max ${maxCommands})`);
   }
@@ -606,7 +607,7 @@ export function validateNoLoopbackInBatch(commands: BatchCommand[]): void {
       }
       if (parseLoopbackDebugTarget(url)) {
         throw new Error(
-          `command ${i}: loopback URL '${url}' is not allowed in batch commands. Use a single navigate action instead.`,
+          `command ${i}: loopback URL is not allowed in batch commands. Use a single navigate action instead.`,
         );
       }
     }
@@ -633,47 +634,89 @@ export interface BrowserRequest {
   batch?: BatchRequest;
 }
 
+const BROWSER_ACTION_FIELDS: Record<BrowserAction, readonly string[]> = {
+  status: [], tabs: [], navigate: ['url'], evaluate: ['expression'],
+  text: ['selector'], html: ['selector'], screenshot: ['compact'],
+  click: ['selector'], type: ['selector', 'text'], scroll: ['selector', 'x', 'y'],
+  close: [], cookies: ['urls'], set_cookies: ['cookies', 'urls'], snapshot: ['compact'],
+  fill: ['selector', 'text'], select: ['selector', 'values'], wait: ['selector', 'text', 'waitMs'],
+  get_url: [], get_title: [], semanticAction: ['semanticAction'], job: ['job'], batch: ['batch'],
+};
+const BROWSER_KNOWN_FIELDS = new Set(Object.values(BROWSER_ACTION_FIELDS).flat());
+
+function validateBrowserEnvelopeFields(raw: Record<string, unknown>, action: BrowserAction, observeAlias: boolean): void {
+  const allowed = new Set(observeAlias ? (OBSERVE_FIELDS[action as ObserveWhat] ?? []) : BROWSER_ACTION_FIELDS[action]);
+  const discriminants = observeAlias ? new Set(['what']) : new Set(['action']);
+  for (const key of Object.keys(raw)) {
+    if (discriminants.has(key)) continue;
+    if (!BROWSER_KNOWN_FIELDS.has(key)) throw new Error(`unknown field: ${key}`);
+    if (!allowed.has(key as never)) {
+      if (observeAlias && (key === 'selector' || key === 'compact')) throw new Error(`${key} is not allowed for observe what '${action}'`);
+      throw new Error(`field '${key}' is not allowed for browser action '${action}'`);
+    }
+  }
+}
+
 export function validateBrowserRequest(raw: Record<string, unknown>): BrowserRequest {
+  if (raw.action !== undefined && typeof raw.action !== 'string') throw new Error('action must be a string');
+  if (raw.what !== undefined && typeof raw.what !== 'string') throw new Error('what must be a string');
+  if (raw.action !== undefined && raw.what !== undefined) throw new Error('browser request accepts action or what, not both');
+  const observeAlias = raw.action === undefined && typeof raw.what === 'string';
   const actionRaw = typeof raw.action === 'string' ? raw.action : typeof raw.what === 'string' ? raw.what : 'status';
   if (!(BROWSER_ACTIONS as readonly string[]).includes(actionRaw)) {
-    throw new Error(`Unsupported browser action: ${actionRaw}`);
-  }
-  if (typeof raw.what === 'string') {
-    const allowed = OBSERVE_FIELDS[actionRaw as ObserveWhat] ?? [];
-    if (raw.selector !== undefined && !allowed.includes('selector')) throw new Error(`selector is not allowed for observe what '${actionRaw}'`);
-    if (raw.compact !== undefined && !allowed.includes('compact')) throw new Error(`compact is not allowed for observe what '${actionRaw}'`);
+    throw new Error('Unsupported browser action');
   }
   const action = actionRaw as BrowserAction;
+  validateBrowserEnvelopeFields(raw, action, observeAlias);
 
   const request: BrowserRequest = { action };
+  const stringField = (key: 'url'|'expression'|'selector'|'text'): string | undefined => {
+    const value = raw[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string') throw new Error(`${key} must be a string`);
+    return key === 'url' ? value.trim() : value;
+  };
+  const numberField = (key: 'x'|'y'|'waitMs'): number | undefined => {
+    const value = raw[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${key} must be a finite number`);
+    return value;
+  };
 
-  if (typeof raw.url === 'string') request.url = raw.url.trim();
-  if (typeof raw.expression === 'string') request.expression = raw.expression;
-  if (typeof raw.selector === 'string') request.selector = raw.selector;
-  if (typeof raw.text === 'string') request.text = raw.text;
-  if (typeof raw.x === 'number') request.x = raw.x;
-  if (typeof raw.y === 'number') request.y = raw.y;
-  if (Array.isArray(raw.urls)) {
-    const urls = raw.urls.filter((u): u is string => typeof u === 'string');
-    request.urls = urls;
+  const url = stringField('url'); if (url !== undefined) request.url = url;
+  const expression = stringField('expression'); if (expression !== undefined) request.expression = expression;
+  const selector = stringField('selector'); if (selector !== undefined) request.selector = selector;
+  const text = stringField('text'); if (text !== undefined) request.text = text;
+  const x = numberField('x'); if (x !== undefined) request.x = x;
+  const y = numberField('y'); if (y !== undefined) request.y = y;
+  const waitMs = numberField('waitMs'); if (waitMs !== undefined) request.waitMs = waitMs;
+  if (raw.urls !== undefined) {
+    if (!Array.isArray(raw.urls) || !raw.urls.every((u): u is string => typeof u === 'string')) throw new Error('urls must be an array of strings');
+    request.urls = [...raw.urls];
   }
-  if (Array.isArray(raw.cookies)) request.cookies = raw.cookies;
-
-  if (typeof raw.waitMs === 'number') request.waitMs = raw.waitMs;
-  if (Array.isArray(raw.values)) {
-    if (!raw.values.every((v): v is string => typeof v === 'string')) throw new Error('values must be an array of strings');
+  if (raw.cookies !== undefined) {
+    if (!Array.isArray(raw.cookies)) throw new Error('cookies must be an array');
+    request.cookies = raw.cookies;
+  }
+  if (raw.values !== undefined) {
+    if (!Array.isArray(raw.values) || !raw.values.every((v): v is string => typeof v === 'string')) throw new Error('values must be an array of strings');
     request.values = [...raw.values];
   }
-  if (raw.compact === true) request.compact = true;
-  if (typeof raw.semanticAction === 'object' && raw.semanticAction !== null) {
+  if (raw.compact !== undefined) {
+    if (typeof raw.compact !== 'boolean') throw new Error('compact must be a boolean');
+    request.compact = raw.compact;
+  }
+  if (raw.semanticAction !== undefined) {
+    if (typeof raw.semanticAction !== 'object' || raw.semanticAction === null || Array.isArray(raw.semanticAction)) throw new Error('semanticAction must be an object');
     request.semanticAction = validateSemanticActionRequest(raw.semanticAction as Record<string, unknown>);
   }
-  if (typeof raw.job === 'object' && raw.job !== null) {
+  if (raw.job !== undefined) {
+    if (typeof raw.job !== 'object' || raw.job === null || Array.isArray(raw.job)) throw new Error('job must be an object');
     request.job = validateJobRequest(raw.job as Record<string, unknown>);
   }
-  if (typeof raw.batch === 'object' && raw.batch !== null) {
+  if (raw.batch !== undefined) {
+    if (typeof raw.batch !== 'object' || raw.batch === null || Array.isArray(raw.batch)) throw new Error('batch must be an object');
     request.batch = validateBatchRequest(raw.batch as Record<string, unknown>);
   }
-
   return request;
 }

@@ -5,6 +5,11 @@ import { buildGithubParameters } from '../src/github/github.js';
 import { buildFetchRoute } from '../src/index.js';
 import { buildBrowserParameters, buildDesktopParameters, buildGraphParameters, buildKgParameters, buildSocialParameters, buildWebSearchParameters } from '../src/public-tool-schemas.js';
 import { validateKgEnhance, validateKgNlp, validateKgSearch } from '../src/knowledge/knowledge-contract.js';
+import { SocialError, validateSocialRequest } from '../src/social/social-contract.js';
+
+function rejectsAtRuntime(input: Record<string, unknown>): void {
+  assert.throws(() => validateSocialRequest(input as never), SocialError);
+}
 
 test('web_search schema accepts single, batch, and agent branches', () => {
   const schema = buildWebSearchParameters();
@@ -92,6 +97,7 @@ test('graph schema rejects sparql pagination and view selector misuse', () => {
   const schema = buildGraphParameters();
   assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', pageSize: 10 }), false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', cursor: 'x' }), false);
+  assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person', cursor: '' }), false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person', pageSize: 101 }), false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person', pageSize: 1.5 }), false);
   assert.equal(Value.Check(schema, { action: 'schema', language: 'sparql', view: 'describe', name: 'x'.repeat(2001) }), false);
@@ -151,14 +157,29 @@ test('social schema accepts canonical platform/action selectors and url derivati
 test('social schema rejects missing selectors, cross-action fields, and overflow', () => {
   const schema = buildSocialParameters();
   assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 10 }), true);
-  assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 11 }), false, 'schema must mirror LinkedIn runtime cap');
+  // Delegated: one branch per action keeps the action-wide max; stricter
+  // per-platform caps reject at runtime instead.
+  assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 11 }), true, 'action-wide max admits; runtime enforces LinkedIn cap');
+  rejectsAtRuntime({ platform: 'linkedin', action: 'search', query: 'ada', limit: 11 });
   assert.equal(Value.Check(schema, { platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 50 }), true);
-  assert.equal(Value.Check(schema, { platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 51 }), false, 'schema must mirror Xiaohongshu comments cap');
+  assert.equal(Value.Check(schema, { platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 51 }), true, 'action-wide max admits; runtime enforces Xiaohongshu cap');
+  rejectsAtRuntime({ platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 51 });
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search' }), false);
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_post' }), false);
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile' }), false);
+  // Delegated: postId-or-URL / user-or-URL alternatives collapse into one
+  // branch per action (direct id optional at schema); runtime enforces one-of.
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_post' }), true, 'branch admits; runtime requires postId or URL');
+  rejectsAtRuntime({ platform: 'twitter', action: 'get_post' });
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile' }), true, 'branch admits; runtime requires user or URL');
+  rejectsAtRuntime({ platform: 'twitter', action: 'get_profile' });
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile', url: 'https://x.com/ada' }), true);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', topic: 't' }), false);
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_comment_replies', commentId: '1002' }), true);
+  // Parity: Reddit canonical URL derives commentId at runtime, so the schema
+  // must admit URL-only comment replies (Twitter still needs direct commentId).
+  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_comment_replies', url: 'https://www.reddit.com/r/rust/comments/abc/topic/def/' }), true);
+  assert.equal(validateSocialRequest({ platform: 'reddit', action: 'get_comment_replies', url: 'https://www.reddit.com/r/rust/comments/abc/topic/def/' }).request.commentId, 'def');
+  rejectsAtRuntime({ platform: 'reddit', action: 'get_comment_replies' });
+  rejectsAtRuntime({ platform: 'twitter', action: 'get_comment_replies' });
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_comment_replies', postId: '1' }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', limit: 101 }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', limit: 0 }), false);
@@ -179,7 +200,10 @@ test('social schema advertises aux fields only where honored, with closed vocabu
   assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_community_posts', community: 'rust', sort: 'rising' }), true);
   // Out-of-vocab values reject at the schema.
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', sort: 'bogus' }), false);
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', timeRange: 'last week' }), false);
+  // Delegated: timeRange accepts any non-empty string at schema (union across
+  // verbatim and date-only platforms); twitter YYYY-MM-DD rejects at runtime.
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', timeRange: 'last week' }), true, 'union admits; runtime enforces twitter date shape');
+  rejectsAtRuntime({ platform: 'twitter', action: 'search', query: 'x', timeRange: 'last week' });
   assert.equal(Value.Check(schema, { platform: 'reddit', action: 'search', query: 'x', sort: 'bogus' }), false);
   assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_community_posts', community: 'rust', sort: 'best' }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_feed', feedVariant: 'top' }), false);
@@ -327,7 +351,7 @@ test('kg schema requires enhance type with selector and Person-only fields', () 
   );
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', name: 'Analytical Engines' }), true);
   assert.equal(Value.Check(schema, { action: 'enhance', name: 'Ada' }), false);
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person' }), true, 'all selectors optional at schema; >=1 enforced at runtime');
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'person', name: 'Ada' }), false);
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', employer: 'Analytical Engines' }), false);
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', title: 'CEO', name: 'Ada' }), false);
@@ -361,4 +385,40 @@ test('kg schema-accepted requests pass runtime validators (no drift)', () => {
   assert.equal(validateKgNlp({ text: 'Ada built it.', language: 'en', extractEntities: true }).ok, true);
   // Runtime still distrusts schema: blank query passes schema minLength but fails validation.
   assert.equal(validateKgSearch({ query: ' ', language: 'dql' }).ok, false);
+});
+
+test('kg schema exposes exactly 3 canonical actions with Person/Organization enhance parity', () => {
+  const schema = buildKgParameters();
+  const branches = (schema as unknown as { anyOf: Array<{ properties: Record<string, { const?: string }> }> }).anyOf;
+  assert.equal(branches.length, 4, '1 search + 2 enhance + 1 analyze_text union members');
+  assert.deepEqual(
+    [...new Set(branches.map((branch) => branch.properties?.action?.const))].sort(),
+    ['analyze_text', 'enhance', 'search'],
+    'exactly 3 canonical actions',
+  );
+  // Positive parity: every schema-accepted enhance payload passes the runtime validator.
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', employer: 'Analytical Engines', title: 'CEO' }), true);
+  assert.equal(validateKgEnhance({ type: 'Person', employer: 'Analytical Engines', title: 'CEO' }).ok, true);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', name: 'Analytical Engines' }), true);
+  assert.equal(validateKgEnhance({ type: 'Organization', name: 'Analytical Engines' }).ok, true);
+  // No-selector enhance admits at schema (>=1 documented) but fails runtime validation.
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person' }), true);
+  assert.equal(validateKgEnhance({ type: 'Person' }).ok, false);
+  // Person-only selectors never appear on the Organization branch.
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', employer: 'X', name: 'Y' }), false);
+  assert.equal(validateKgEnhance({ type: 'Organization', employer: 'X', name: 'Y' }).ok, false);
+  // analyze_text parity.
+  assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'Ada built it.' }), true);
+  assert.equal(validateKgNlp({ text: 'Ada built it.' }).ok, true);
+});
+
+test('kg runtime validators reject the bogus direct-input corpus', () => {
+  assert.equal(validateKgSearch({ query: '', language: 'dql' }).ok, false);
+  assert.equal(validateKgSearch({ query: 'type:Person' }).ok, false);
+  assert.equal(validateKgSearch({ query: 'type:Person', language: 'sparql' }).ok, false);
+  assert.equal(validateKgEnhance({ type: 'Person', name: 5 }).ok, false, 'wrong-typed selector rejects');
+  assert.equal(validateKgEnhance({ type: 'Person', name: '' }).ok, false, 'blank selector rejects');
+  assert.equal(validateKgEnhance({ type: 'Alien', name: 'Ada' }).ok, false);
+  assert.equal(validateKgEnhance({ type: 'Organization', title: 'CEO', name: 'Ada' }).ok, false, 'Person-only on Organization rejects');
+  assert.equal(validateKgNlp({ text: '' }).ok, false);
 });

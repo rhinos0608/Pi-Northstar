@@ -1045,6 +1045,126 @@ test('callNativeTool kg rejects cursor with explicit providers', async () => {
   );
 });
 
+test('callNativeTool kg rejects unknown/cross-action/wrong-typed fields before dispatch', async () => {
+  let fetches = 0;
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { fetches += 1; return new Response('{}', { status: 200 }); }) as typeof fetch;
+  try {
+    const tokenEnv = { DIFFBOT_TOKEN: 'test-token' };
+    // Unknown provider-native field: fixed safe error, no key echo, no dispatch.
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'search', query: 'type:Person', nativeOptions: { a: 1 } }, { env: tokenEnv }),
+      /Unsupported field for kg search\./,
+    );
+    // Cross-action fields reject per action.
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'search', query: 'type:Person', name: 'Ada' }, { env: tokenEnv }),
+      /Unsupported field for kg search\./,
+    );
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'enhance', type: 'Person', name: 'Ada', query: 'type:Person' }, { env: tokenEnv }),
+      /Unsupported field for kg enhance\./,
+    );
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'analyze_text', text: 'Ada built it.', query: 'x' }, { env: tokenEnv }),
+      /Unsupported field for kg analyze_text\./,
+    );
+    // Wrong-typed enhancer selector rejects without echoing the value.
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'enhance', type: 'Person', name: 5 }, { env: tokenEnv }),
+      /name must be a non-empty string/,
+    );
+    // Malformed providers array rejects instead of filtering silently.
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'search', query: 'type:Person', providers: ['diffbot', 5] }, { env: tokenEnv }),
+      /providers must be an array of non-empty strings/,
+    );
+    assert.equal(fetches, 0, 'admission rejections must not dispatch fetch');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('callNativeTool kg unknown PII key echoes neither key nor value and never fetches', async () => {
+  let fetches = 0;
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { fetches += 1; return new Response('{}', { status: 200 }); }) as typeof fetch;
+  try {
+    const longKey = `email:person@example.com:${'k'.repeat(5000)}`;
+    const err = await callNativeTool(
+      'kg',
+      { action: 'search', query: 'type:Person', [longKey]: 'v' },
+      { env: { DIFFBOT_TOKEN: 'test-token' } },
+    ).then(() => { throw new Error('expected rejection'); }, (e: unknown) => e as Error);
+    const msg = String(err);
+    assert.match(msg, /Unsupported field for kg search\./);
+    assert.doesNotMatch(msg, /person@example\.com/);
+    assert.doesNotMatch(msg, /k{100}/);
+    assert.ok(msg.length < 500, `safe error must stay bounded, got ${msg.length} chars`);
+    const code = (err as { code?: string }).code;
+    assert.equal(code, 'invalid_input');
+    assert.equal(fetches, 0, 'PII unknown-field rejection must not dispatch fetch');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('callNativeTool kg malformed cursor rejects cursor_invalid with zero fetch', async () => {
+  // Native admission path carries cursor only with explicit providers (bare
+  // search+cursor routes to the kg.search command); malformed cursors must
+  // reject as cursor_invalid before the fanout check, never fetching.
+  let fetches = 0;
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { fetches += 1; return new Response('{}', { status: 200 }); }) as typeof fetch;
+  try {
+    const tokenEnv = { DIFFBOT_TOKEN: 'test-token' };
+    for (const cursor of [123, '', '   ', null] as unknown[]) {
+      const err = await callNativeTool(
+        'kg', { action: 'search', query: 'type:Person', providers: ['diffbot'], cursor }, { env: tokenEnv },
+      ).then(() => { throw new Error(`expected rejection for cursor=${String(cursor)}`); }, (e: unknown) => e as Error);
+      assert.match(String(err), /cursor must be a non-empty string/);
+      assert.equal((err as { code?: string }).code, 'cursor_invalid');
+    }
+    assert.equal(fetches, 0, 'malformed cursor must reject before any paid call');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('callNativeTool kg present wrong-typed maxProviders/language/action reject with zero fetch', async () => {
+  let fetches = 0;
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { fetches += 1; return new Response('{}', { status: 200 }); }) as typeof fetch;
+  try {
+    const tokenEnv = { DIFFBOT_TOKEN: 'test-token' };
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'search', query: 'type:Person', maxProviders: '3' }, { env: tokenEnv }),
+      /maxProviders must be an integer/,
+    );
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'search', query: 'type:Person', language: null }, { env: tokenEnv }),
+      /language must be a string/,
+    );
+    await assert.rejects(
+      () => callNativeTool('kg', { action: 'search', query: 'type:Person', language: 5 }, { env: tokenEnv }),
+      /language must be a string/,
+    );
+    // Present-but-wrong-typed action rejects without echoing the value.
+    const actionErr = await callNativeTool(
+      'kg', { action: 5, query: 'type:Person' }, { env: tokenEnv },
+    ).then(() => { throw new Error('expected rejection'); }, (e: unknown) => e as Error);
+    assert.match(String(actionErr), /action must be a non-empty string/);
+    assert.doesNotMatch(String(actionErr), /\b5\b.*action|action.*\b5\b/);
+    // Missing action still defaults to search (existing CLI path).
+    try {
+      await callNativeTool('kg', { query: 'type:Person' }, { env: tokenEnv });
+    } catch { /* fetch-count proves dispatch path, not success */ }
+    assert.equal(fetches, 1, 'missing action must still default to search and dispatch');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+});
+
 function mockKgFetch(payload: unknown) {
   const savedFetch = globalThis.fetch;
   globalThis.fetch = (async () =>

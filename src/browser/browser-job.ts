@@ -28,8 +28,24 @@ export const VALID_STEP_KINDS: readonly JobStepKind[] = [
 export const MAX_STEPS_DEFAULT = 20;
 export const MAX_JOB_STEPS = MAX_STEPS_DEFAULT;
 
+const JOB_FIELDS = new Set(['steps', 'maxSteps']);
+const JOB_STEP_FIELDS: Record<JobStepKind, ReadonlySet<string>> = {
+  open: new Set(['kind', 'url', 'continueOnFailure']),
+  click: new Set(['kind', 'selector', 'continueOnFailure']),
+  fill: new Set(['kind', 'selector', 'text', 'continueOnFailure']),
+  type: new Set(['kind', 'selector', 'text', 'continueOnFailure']),
+  select: new Set(['kind', 'selector', 'values', 'continueOnFailure']),
+  wait: new Set(['kind', 'selector', 'text', 'waitMs', 'continueOnFailure']),
+  assert: new Set(['kind', 'selector', 'assertText', 'waitMs', 'continueOnFailure']),
+  snapshot: new Set(['kind', 'continueOnFailure']),
+  screenshot: new Set(['kind', 'continueOnFailure']),
+};
+
 /** Validate a raw job request, throwing on invalid shape. */
 export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
+  for (const key of Object.keys(raw)) {
+    if (!JOB_FIELDS.has(key)) throw new Error(`unknown job field: ${key}`);
+  }
   if (!Array.isArray(raw.steps) || raw.steps.length === 0) {
     throw new Error('steps is required and must be a non-empty array');
   }
@@ -40,25 +56,34 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
   ) {
     throw new Error('maxSteps must be a positive integer');
   }
-  const callerMax = typeof raw.maxSteps === 'number' ? raw.maxSteps : MAX_STEPS_DEFAULT;
-  // Hard cap: caller may not exceed the built-in constant
-  const maxSteps = Math.min(callerMax, MAX_STEPS_DEFAULT);
+  if (typeof raw.maxSteps === 'number' && raw.maxSteps > MAX_STEPS_DEFAULT) {
+    throw new Error(`maxSteps must be an integer 1..${MAX_STEPS_DEFAULT}`);
+  }
+  const maxSteps = typeof raw.maxSteps === 'number' ? raw.maxSteps : MAX_STEPS_DEFAULT;
   if (raw.steps.length > maxSteps) {
     throw new Error(`too many steps (max ${maxSteps})`);
   }
 
   const steps: JobStep[] = [];
   for (let i = 0; i < raw.steps.length; i++) {
-    const s = raw.steps[i] as Record<string, unknown>;
-    if (typeof s !== 'object' || s === null) {
+    const rawStep = raw.steps[i];
+    if (typeof rawStep !== 'object' || rawStep === null || Array.isArray(rawStep)) {
       throw new Error(`step ${i}: must be an object`);
     }
+    const s = rawStep as Record<string, unknown>;
     const kind = s.kind;
     if (typeof kind !== 'string' || !(VALID_STEP_KINDS as readonly string[]).includes(kind)) {
-      throw new Error(`step ${i}: unknown kind "${String(kind)}"`);
+      throw new Error(`step ${i}: unknown kind`);
+    }
+    const stepKind = kind as JobStepKind;
+    for (const key of Object.keys(s)) {
+      if (!JOB_STEP_FIELDS[stepKind].has(key)) throw new Error(`step ${i}: field ${key} is not allowed for ${stepKind}`);
+    }
+    if (s.continueOnFailure !== undefined && typeof s.continueOnFailure !== 'boolean') {
+      throw new Error(`step ${i}: continueOnFailure must be a boolean`);
     }
 
-    const step: JobStep = { kind: kind as JobStepKind };
+    const step: JobStep = { kind: stepKind };
 
     if (kind === 'open') {
       if (typeof s.url !== 'string' || !s.url) throw new Error(`step ${i}: open requires url`);
@@ -80,15 +105,21 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
       step.values = [...(s.values as string[])];
       if (step.values.length === 0) throw new Error(`step ${i}: select requires a non-empty values array`);
     }
-    if (kind === 'wait' && typeof s.waitMs === 'number') {
+    if (kind === 'wait') {
+      if (s.selector !== undefined && typeof s.selector !== 'string') throw new Error(`step ${i}: wait selector must be a string`);
+      if (s.text !== undefined && typeof s.text !== 'string') throw new Error(`step ${i}: wait text must be a string`);
+      if (typeof s.selector === 'string') step.selector = s.selector;
+      if (typeof s.text === 'string') step.text = s.text;
+    }
+    if ((kind === 'wait' || kind === 'assert') && s.waitMs !== undefined) {
+      if (typeof s.waitMs !== 'number' || !Number.isFinite(s.waitMs)) throw new Error(`step ${i}: waitMs must be a finite number`);
       step.waitMs = s.waitMs;
     }
-    if (kind === 'assert' && typeof s.assertText === 'string') {
+    if (kind === 'assert' && s.assertText !== undefined) {
+      if (typeof s.assertText !== 'string') throw new Error(`step ${i}: assertText must be a string`);
       step.assertText = s.assertText;
     }
-    if (s.continueOnFailure === true) {
-      step.continueOnFailure = true;
-    }
+    if (s.continueOnFailure === true) step.continueOnFailure = true;
 
     steps.push(step);
   }
@@ -98,6 +129,15 @@ export function validateJobRequest(raw: Record<string, unknown>): JobRequest {
   return { steps, maxSteps };
 }
 
+function jobUrlHasCredentials(raw: string): boolean {
+  try {
+    const parsed = new URL(raw.trim());
+    return parsed.username.length > 0 || parsed.password.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Reject job steps with loopback URLs in open-step URLs (mirrors batch policy). */
 export function validateNoLoopbackInJob(steps: JobStep[]): void {
   for (let i = 0; i < steps.length; i++) {
@@ -105,14 +145,14 @@ export function validateNoLoopbackInJob(steps: JobStep[]): void {
     if (step.kind === 'open') {
       const url = step.url;
       if (typeof url === 'string') {
-        if (url.includes('@')) {
+        if (jobUrlHasCredentials(url)) {
           throw new Error(
             `step ${i}: URL with credentials is not allowed in job steps.`,
           );
         }
         if (parseLoopbackDebugTarget(url)) {
           throw new Error(
-            `step ${i}: loopback URL '${url}' is not allowed in job steps. Use a single navigate action instead.`,
+            `step ${i}: loopback URL is not allowed in job steps. Use a single navigate action instead.`,
           );
         }
       }

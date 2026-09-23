@@ -130,7 +130,7 @@ export function buildGraphParameters(languages: readonly GraphLanguage[] = [...G
       action: Type.Literal('query'), language: Type.Literal('dql'),
       query: queryText('DQL query text.'),
       pageSize: Type.Optional(Type.Integer({ minimum: GRAPH_PAGE_SIZE_MIN, maximum: GRAPH_PAGE_SIZE_MAX, description: 'Transport page size (default 10, max 100); never rewrites query text.' })),
-      cursor: Type.Optional(Type.String({ maxLength: MAX_GRAPH_CURSOR_LENGTH, description: 'Opaque base64url cursor bound to query/pageSize.' })),
+      cursor: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_GRAPH_CURSOR_LENGTH, description: 'Opaque base64url cursor bound to query/pageSize.' })),
     }, { additionalProperties: false }));
   }
   if (enabled.has('sparql')) {
@@ -205,105 +205,123 @@ import {
   canonicalActionsFor,
   MAX_SELECTOR_LENGTH as MAX_SOCIAL_SELECTOR_LENGTH,
   selectorSpecFor,
-  SOCIAL_DATE_RE,
+  SOCIAL_ACTIONS,
+  SOCIAL_MAX_CURSOR_LENGTH,
   SOCIAL_MAX_LIMIT,
   SOCIAL_PLATFORMS,
   type SocialAction,
-  type SocialAuxSpec,
   type SocialPlatform,
   type SocialSelectorField,
 } from './social/social-contract.js';
 
-// Selector length bound canonical in social-contract.ts (single source of truth).
-const MAX_SOCIAL_CURSOR_LENGTH = 4096;
+// Selector/cursor length bounds canonical in social-contract.ts (single source of truth).
 const SELECTOR_DESCRIPTIONS: Record<SocialSelectorField, string> = {
-  query: 'Platform search query.',
-  postId: 'Post or note id.',
-  commentId: 'Comment id.',
-  user: 'User handle.',
-  community: 'Community selector.',
-  topic: 'Topic id.',
+  query: 'Platform search query (required direct input; never derived from a URL).',
+  postId: 'Post or note id directly, or a canonical URL deriving it (at least one required; enforced at runtime).',
+  commentId: 'commentId direct; Reddit canonical URL can derive it; Twitter requires direct commentId',
+  user: 'User handle directly, or a canonical URL deriving it (at least one required; enforced at runtime).',
+  community: 'Community selector directly, or a canonical URL deriving it (at least one required; enforced at runtime).',
+  topic: 'Topic id directly, or a canonical URL deriving it (at least one required; enforced at runtime).',
 };
 
-function socialSelectorField(field: SocialSelectorField): TSchema {
+function socialActionSelectorField(field: SocialSelectorField): TSchema {
   return Type.String({ minLength: 1, maxLength: MAX_SOCIAL_SELECTOR_LENGTH, description: SELECTOR_DESCRIPTIONS[field] });
 }
 
-// Aux fields mirror the per-action contract registry: only honored fields are
-// advertised, with closed enums where the registry pins vocabulary. Anything
-// else rejects at schema validation instead of dropping silently at runtime.
-function socialAuxFields(aux: SocialAuxSpec): Record<string, TSchema> {
+// Platforms advertising a canonical action. Inverted from the code-owner
+// registry (SOCIAL_CANONICAL_ACTIONS via canonicalActionsFor) so the schema
+// cannot drift from runtime advertisement.
+function socialPlatformsFor(action: SocialAction): SocialPlatform[] {
+  return SOCIAL_PLATFORMS.filter((platform) => canonicalActionsFor(platform).includes(action));
+}
+
+// Aux fields unioned across the branch platforms: only fields honored by at
+// least one branch platform are advertised, with the union vocabulary where
+// the registry pins closed enums. Platform-specific subsets (e.g. twitter-only
+// sort values on a shared action) reject at runtime via auxSpecFor.
+function socialActionAuxFields(action: SocialAction, platforms: readonly SocialPlatform[]): Record<string, TSchema> {
   const fields: Record<string, TSchema> = {};
-  if (aux.sort !== undefined) fields.sort = Type.Optional(StringEnum([...aux.sort], { description: 'Result ordering; unsupported values reject.' }));
-  if (aux.timeRange !== undefined) {
-    fields.timeRange = aux.timeRange === 'date'
-      ? Type.Optional(Type.String({ pattern: SOCIAL_DATE_RE.source, description: 'Earliest date as YYYY-MM-DD.' }))
-      : Type.Optional(Type.String({ minLength: 1, description: 'Upstream time filter passed verbatim.' }));
+  const sortUnion: string[] = [];
+  let timeRangeVerbatim = false;
+  const feedVariantUnion: string[] = [];
+  let hasIncludeReplies = false;
+  for (const platform of platforms) {
+    const aux = auxSpecFor(platform, action);
+    for (const value of aux.sort ?? []) {
+      if (!sortUnion.includes(value)) sortUnion.push(value);
+    }
+    if (aux.timeRange === true) timeRangeVerbatim = true;
+    else if (aux.timeRange === 'date' && !timeRangeVerbatim) {
+      // Date-only branch noted below; verbatim wins when any branch forwards raw.
+    }
+    for (const value of aux.feedVariant ?? []) {
+      if (!feedVariantUnion.includes(value)) feedVariantUnion.push(value);
+    }
+    if (aux.includeReplies !== undefined) hasIncludeReplies = true;
   }
-  if (aux.feedVariant !== undefined) fields.feedVariant = Type.Optional(StringEnum([...aux.feedVariant], { description: 'Feed or notification variant.' }));
-  if (aux.includeReplies !== undefined) fields.includeReplies = Type.Optional(Type.Boolean({ description: 'Include nested replies; false keeps top-level items only.' }));
+  if (sortUnion.length > 0) {
+    fields.sort = Type.Optional(StringEnum(sortUnion, { description: `Result ordering for ${action} (union across supporting platforms; platform-specific subsets reject at runtime).` }));
+  }
+  const actionHasTimeRange = platforms.some((platform) => auxSpecFor(platform, action).timeRange !== undefined);
+  if (actionHasTimeRange) {
+    fields.timeRange = Type.Optional(Type.String({
+      minLength: 1,
+      description: timeRangeVerbatim
+        ? `Upstream time filter for ${action} passed verbatim (date-only platforms enforce YYYY-MM-DD at runtime).`
+        : `Earliest date for ${action} as YYYY-MM-DD (enforced at runtime).`,
+    }));
+  }
+  if (feedVariantUnion.length > 0) {
+    fields.feedVariant = Type.Optional(StringEnum(feedVariantUnion, { description: `Feed or notification variant for ${action} (union across supporting platforms; platform-specific subsets reject at runtime).` }));
+  }
+  if (hasIncludeReplies) {
+    fields.includeReplies = Type.Optional(Type.Boolean({ description: `Include nested replies for ${action} (platforms without support reject at runtime; false keeps top-level items only).` }));
+  }
   return fields;
 }
 
-function socialBody(
-  platform: SocialPlatform,
-  action: SocialAction,
-  allowed: readonly SocialSelectorField[],
-  requiredFields: ReadonlySet<string>,
-  maxLimit: number,
-): TSchema {
-  const properties: Record<string, TSchema> = {
-    platform: Type.Literal(platform),
-    action: Type.Literal(action),
-    url: requiredFields.has('url')
-      ? Type.String({ minLength: 1, description: 'Canonical platform URL (selectors derived from closed path shapes).' })
-      : Type.Optional(Type.String({ minLength: 1, description: 'Canonical platform URL (selectors derived from closed path shapes).' })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: maxLimit, description: `Max items 1..${maxLimit}. Out-of-range values reject.` })),
-    cursor: Type.Optional(Type.String({ maxLength: MAX_SOCIAL_CURSOR_LENGTH, description: 'Opaque pagination cursor.' })),
-    ...socialAuxFields(auxSpecFor(platform, action)),
-  };
-  for (const field of allowed) {
-    properties[field] = requiredFields.has(field)
-      ? socialSelectorField(field)
-      : Type.Optional(socialSelectorField(field));
-  }
-  return Type.Object(properties, { additionalProperties: false, description: `${platform} ${action} request.` });
-}
-
 /**
- * Strict social parameters: one branch per advertised platform/action from
- * selectorSpecFor. anyOf selectors expand into explicit alternatives
- * (each selector directly, or a canonical URL deriving it), mirroring the
- * nested-union pattern in src/github/github.ts.
+ * Strict social parameters: ONE branch per canonical social action (17 from
+ * the SOCIAL_ACTIONS registry). Each branch pins its action literal, restricts
+ * `platform` to the platforms advertising that action, and carries only the
+ * selector/aux fields meaningful to the action (unioned across its platforms).
+ * No platform bags, no flat parameter soup, no $ref; every branch is
+ * additionalProperties:false so cross-action fields reject at the schema.
+ *
+ * Requiredness: only `query` (search) is schema-required because no
+ * canonical URL derives it on any branch platform. `commentId`
+ * (get_comment_replies) stays schema-optional: Reddit canonical URLs derive
+ * it, while Twitter requires it direct; the runtime (validateSocialRequest)
+ * rejects a missing selector after URL extraction. Other direct IDs stay
+ * optional alongside `url`; the runtime enforces "direct id or deriving
+ * URL". Stricter per-platform limit caps likewise reject at runtime. Schema
+ * tests pin these delegations explicitly.
  */
 export function buildSocialParameters(): TSchema {
-  const branches: TSchema[] = [];
-  for (const platform of SOCIAL_PLATFORMS) {
-    for (const action of canonicalActionsFor(platform)) {
+  const branches = SOCIAL_ACTIONS.map((action) => {
+    const platforms = socialPlatformsFor(action);
+    const selectors = new Set<SocialSelectorField>();
+    let maxLimit = 1;
+    for (const platform of platforms) {
       const spec = selectorSpecFor(platform, action);
-      const allowed = [...(spec.required ?? []), ...(spec.anyOf ?? [])].filter(
-        (field, index, all) => all.indexOf(field) === index,
-      );
-      const required = new Set<string>(spec.required ?? []);
-      const maxLimit = spec.maxLimit ?? SOCIAL_MAX_LIMIT;
-      if (spec.anyOf !== undefined && spec.anyOf.length > 0) {
-        for (const field of spec.anyOf) {
-          branches.push(socialBody(platform, action, allowed, new Set([...required, field]), maxLimit));
-        }
-        branches.push(socialBody(platform, action, allowed, new Set([...required, 'url']), maxLimit));
-      } else {
-        branches.push(socialBody(platform, action, allowed, required, maxLimit));
-        // URL-only alternative when the canonical URL extractor can supply
-        // every required selector (it derives postId/commentId/user/community/
-        // topic, never query). Runtime fills missing selectors from the URL
-        // and rejects unrecognized shapes with invalid_request.
-        if (required.size > 0 && [...required].every((field) => field !== 'query' && field !== 'url')) {
-          branches.push(socialBody(platform, action, allowed, new Set(['url']), maxLimit));
-        }
-      }
+      for (const field of [...(spec.required ?? []), ...(spec.anyOf ?? [])]) selectors.add(field);
+      maxLimit = Math.max(maxLimit, spec.maxLimit ?? SOCIAL_MAX_LIMIT);
     }
-  }
-  return Type.Union(branches, { description: 'Platform-specific social request.' });
+    const properties: Record<string, TSchema> = {
+      platform: StringEnum(platforms, { description: `Platforms supporting ${action}: ${platforms.join(', ')}. Other platforms reject.` }),
+      action: Type.Literal(action),
+      url: Type.Optional(Type.String({ minLength: 1, description: 'Canonical platform URL deriving selectors (postId/commentId/user/community/topic, never query). Unrecognized shapes reject at runtime.' })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: maxLimit, description: `Max items 1..${maxLimit}. Stricter platform caps reject at runtime.` })),
+      cursor: Type.Optional(Type.String({ minLength: 1, maxLength: SOCIAL_MAX_CURSOR_LENGTH, description: 'Opaque pagination cursor; must be a non-empty string when provided.' })),
+      ...socialActionAuxFields(action, platforms),
+    };
+    for (const field of selectors) {
+      const required = action === 'search' && field === 'query';
+      properties[field] = required ? socialActionSelectorField(field) : Type.Optional(socialActionSelectorField(field));
+    }
+    return Type.Object(properties, { additionalProperties: false, description: `${action} social request.` });
+  });
+  return Type.Union(branches, { description: 'One canonical social action request (platform restricted to supporting platforms).' });
 }
 
 import {
@@ -458,9 +476,10 @@ export function buildBrowserParameters(): TSchema {
 // ── kg parameters: discriminated action union from knowledge-contract vocabulary ──
 // Mirrors validateKgSearch/validateKgEnhance/validateKgNlp bounds so the
 // model-facing schema cannot drift from runtime validation. Search pins
-// language 'dql' with integer limit 1..50; enhance splits Person/Organization
-// into per-selector required branches (Person-only employer/title/school never
-// advertised on Organization); analyze_text bounds text 1..KG_NLP_MAX_CHARS with
+// language 'dql' with integer limit 1..50; enhance keeps one Person branch and one
+// Organization branch with all legitimate selectors optional (>=1 required,
+// enforced at runtime; Person-only employer/title/school never advertised
+// on Organization); analyze_text bounds text 1..KG_NLP_MAX_CHARS with
 // ISO 639-1-or-auto language. Runtime still re-validates every request.
 //
 // Returns the request-body union; registration wraps it as
@@ -485,24 +504,6 @@ function kgEnhanceModifiers(): Record<string, TSchema> {
   };
 }
 
-function kgEnhanceBranch(
-  type: 'Person' | 'Organization',
-  requiredSelector: string,
-  allowed: readonly string[],
-): TSchema {
-  const selectorField = (field: string): TSchema =>
-    Type.String({ minLength: 1, description: `Enhance selector: ${field}.` });
-  const properties: Record<string, TSchema> = {
-    action: Type.Literal('enhance'),
-    type: Type.Literal(type),
-    ...kgEnhanceModifiers(),
-  };
-  for (const field of allowed) {
-    properties[field] = field === requiredSelector ? selectorField(field) : Type.Optional(selectorField(field));
-  }
-  return Type.Object(properties, { additionalProperties: false, description: `kg enhance ${type} request (selector ${requiredSelector} required).` });
-}
-
 export function buildKgParameters(): TSchema {
   const searchBranch = Type.Object({
     action: Type.Literal('search'),
@@ -512,10 +513,17 @@ export function buildKgParameters(): TSchema {
     cursor: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_KG_CURSOR_LENGTH, description: 'Opaque base64url cursor.' })),
     ...kgSharedSelectorFields(),
   }, { additionalProperties: false, description: 'kg search request.' });
-  const enhanceBranches: TSchema[] = [
-    ...KG_PERSON_SELECTORS.map((selector) => kgEnhanceBranch('Person', selector, KG_PERSON_SELECTORS)),
-    ...ENHANCE_SELECTOR_KEYS.map((selector) => kgEnhanceBranch('Organization', selector, ENHANCE_SELECTOR_KEYS)),
-  ];
+  const enhanceBranch = (type: 'Person' | 'Organization', allowed: readonly string[]): TSchema => {
+    const properties: Record<string, TSchema> = {
+      action: Type.Literal('enhance'),
+      type: Type.Literal(type),
+      ...kgEnhanceModifiers(),
+    };
+    for (const field of allowed) {
+      properties[field] = Type.Optional(Type.String({ minLength: 1, description: `Enhance selector: ${field}.` }));
+    }
+    return Type.Object(properties, { additionalProperties: false, description: `kg enhance ${type} request (at least one selector required; enforced at runtime).` });
+  };
   const analyzeBranch = Type.Object({
     action: Type.Literal('analyze_text'),
     text: Type.String({ minLength: 1, maxLength: KG_NLP_MAX_CHARS, description: `Source text 1..${KG_NLP_MAX_CHARS} chars (sent with consent).` }),
@@ -528,7 +536,10 @@ export function buildKgParameters(): TSchema {
     extractSentiment: Type.Optional(Type.Boolean()),
     extractTopics: Type.Optional(Type.Boolean()),
   }, { additionalProperties: false, description: 'kg analyze_text request.' });
-  return Type.Union([searchBranch, ...enhanceBranches, analyzeBranch], { description: 'One canonical kg action request.' });
+  return Type.Union(
+    [searchBranch, enhanceBranch('Person', KG_PERSON_SELECTORS), enhanceBranch('Organization', ENHANCE_SELECTOR_KEYS), analyzeBranch],
+    { description: 'One canonical kg action request (search/enhance/analyze_text).' },
+  );
 }
 
 // ── fetch parameters: 5-branch union mirroring web-fetch-route.ts ──

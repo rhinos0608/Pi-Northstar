@@ -347,6 +347,13 @@ function cleanField(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+/** Present wrong-type optional strings reject pre-projection (no silent drop, no value echo). */
+function requireOptionalString(raw: unknown, field: string): void {
+  if (raw !== undefined && typeof raw !== 'string') {
+    throw githubError('invalid_request', `${field} must be a string when provided`);
+  }
+}
+
 const GITHUB_ISSUE_STATES: ReadonlySet<string> = new Set(['open', 'closed', 'all']);
 
 export const GITHUB_RUN_STATUSES = [
@@ -365,15 +372,38 @@ export function validateGithubRequest(input: GithubRequestInput): { request: Git
   const warnings: string[] = [];
   const action = resolveGithubAction(input.action);
 
-  // Owner/repo: explicit fields win; repository slug fills when both absent.
+  for (const [raw, field] of [
+    [input.owner, 'owner'],
+    [input.repo, 'repo'],
+    [input.repository, 'repository'],
+    [input.path, 'path'],
+    [input.branch, 'branch'],
+    [input.ref, 'ref'],
+    [input.query, 'query'],
+    [input.language, 'language'],
+    [input.sha, 'sha'],
+    [input.since, 'since'],
+    [input.state, 'state'],
+    [input.tag, 'tag'],
+    [input.author, 'author'],
+    [input.workflow, 'workflow'],
+    [input.status, 'status'],
+    [input.cursor, 'cursor'],
+  ] as const) requireOptionalString(raw, field);
+
+  // Owner/repo: repository alone or owner+repo together — never mixed.
   let owner = cleanField(input.owner);
   let repo = cleanField(input.repo);
-  if ((owner === undefined || repo === undefined) && typeof input.repository === 'string') {
-    const slug = cleanField(input.repository);
-    if (slug === undefined) throw githubError('invalid_request', 'repository must be a non-empty string when provided');
-    const parsed = parseRepositorySlug(slug);
+  const repositorySlug = cleanField(input.repository);
+  if (repositorySlug !== undefined && (owner !== undefined || repo !== undefined)) {
+    throw githubError('invalid_request', 'repository is mutually exclusive with owner/repo: use one form');
+  }
+  if ((owner === undefined || repo === undefined) && repositorySlug !== undefined) {
+    const parsed = parseRepositorySlug(repositorySlug);
     owner ??= parsed.owner;
     repo ??= parsed.repo;
+  } else if ((owner === undefined || repo === undefined) && typeof input.repository === 'string') {
+    if (cleanField(input.repository) === undefined) throw githubError('invalid_request', 'repository must be a non-empty string when provided');
   }
   const needsRepo = action !== 'trending' && action !== 'search_repos' && action !== 'search';
   const scopedSearch = action === 'search' && (owner !== undefined || repo !== undefined);

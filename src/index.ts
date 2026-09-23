@@ -729,20 +729,19 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'agent_poll',
     label: 'Agent Poll',
-    description: 'Poll a parent-owned agent job created by web_search mode:"agent". Params {jobId, owner?}: returns the byte-stable canonical snapshot (running/ready/failed). Closed with a static pointer when no unexpired job matches; never lists, never leaks other owners\' jobs.',
+    description: 'Poll a parent-owned agent job created by web_search mode:"agent". Params {jobId}: returns the byte-stable canonical snapshot (running/ready/failed). Closed with a static pointer when no unexpired job matches; never lists or leaks owner-bound jobs.',
     promptGuidelines: [
       'Poll agent_poll with the jobId returned by web_search mode:"agent"; the snapshot is byte-stable for identical job state.',
       'Agent poll never lists jobs and never leaks other owners\' jobs: unknown, expired, and foreign jobIds all close identically.',
     ],
     parameters: Type.Object({
-      jobId: Type.String({ minLength: 1, description: 'Agent job id from the web_search mode:"agent" pointer.' }),
-      owner: Type.Optional(Type.String({ minLength: 1, description: 'Owner binding when the job was created with one.' })),
+      jobId: Type.String({ minLength: 1, maxLength: 128, description: 'Agent job id from the web_search mode:"agent" pointer.' }),
     }, { additionalProperties: false }),
     async execute(_toolCallId, params, _signal): Promise<AgentToolResult<unknown>> {
       try {
-        const current = (params ?? {}) as { jobId?: unknown; owner?: unknown };
-        if (typeof current.jobId !== 'string' || current.jobId.trim() === '') return closedAgentPollResult();
-        const snapshot = getAgentJobSnapshot(current.jobId, typeof current.owner === 'string' ? current.owner : undefined);
+        const current = (params ?? {}) as { jobId?: unknown };
+        if (typeof current.jobId !== 'string' || current.jobId.trim() === '' || current.jobId.length > 128) return closedAgentPollResult();
+        const snapshot = getAgentJobSnapshot(current.jobId);
         return {
           content: [{ type: 'text', text: guardText(snapshot, { env }) }],
           details: { action: 'agent_poll', jobId: current.jobId, status: 'ok' },
@@ -1449,7 +1448,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'social',
     label: 'Social',
-    description: 'Platform discussion lookup (read-only in practice; no write capability). Canonical platform + action only; unknown/legacy spellings rejected before dispatch. Twitter/X, Reddit, V2EX (zero-config), XiaoHongShu, Facebook, Instagram (no post-detail/download), LinkedIn via OpenCLI. Use for platform-native threads/profiles; use web_search for broad discovery, fetch for URL reads. Cursors pin backend; schema-visible and provider-specific limit caps reject out-of-range values. Normalized social_* entities.',
+    description: 'Platform discussion lookup (read-only in practice; no write capability). Canonical platform + action only; unknown/legacy spellings rejected before dispatch. Twitter/X, Reddit, V2EX (zero-config), XiaoHongShu, Facebook, Instagram (no post-detail/download), LinkedIn via OpenCLI. Use for platform-native threads/profiles; use web_search for broad discovery, fetch for URL reads. Cursors pin backend; action-wide schema limit caps admit with stricter platform/action runtime caps rejecting overflow. Normalized social_* entities.',
     promptGuidelines: [
       'Use social for platform-specific discussion; pair platform + canonical action, then narrow selectors (query/postId/user/community/topic, url for canonical shapes).',
       'For login-backed platforms run /reach-status social <action> first; V2EX is zero-config native.',
@@ -1542,14 +1541,14 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       const request = ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>;
       let wireArgs = request;
       if (request.op === 'observe') {
+        const { op: _op, what, ...rest } = request;
+        wireArgs = { ...rest, action: what };
         try {
-          validateBrowserRequest({ ...request, action: request.what });
+          validateBrowserRequest(wireArgs);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           return { content: [{ type: 'text', text: guardText(JSON.stringify({ error: message }), { env }) }], details: { error: message } };
         }
-        const { op: _op, what, ...rest } = request;
-        wireArgs = { ...rest, action: what };
       }
       const result = await browser(wireArgs, opts);
       // Preserve full content array (may include image items)
