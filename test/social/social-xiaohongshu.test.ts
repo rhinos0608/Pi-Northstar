@@ -55,12 +55,17 @@ function fakeRunner(steps: FakeStep[]): { runner: SocialProcessRunner; runs: Fak
 }
 
 function request(input: Partial<SocialRequest> & { action: SocialAction }): SocialRequest {
+  const selectorSpec = selectorSpecFor('xiaohongshu', input.action);
+  const allowedSelectors = new Set([
+    ...(selectorSpec.required ?? []),
+    ...(selectorSpec.anyOf ?? []),
+  ]);
   return validateSocialRequest({
     platform: 'xiaohongshu',
     action: input.action,
-    ...(input.query !== undefined ? { query: input.query } : {}),
-    ...(input.postId !== undefined ? { postId: input.postId } : {}),
-    ...(input.user !== undefined ? { user: input.user } : {}),
+    ...(allowedSelectors.has('query') && input.query !== undefined ? { query: input.query } : {}),
+    ...(allowedSelectors.has('postId') && input.postId !== undefined ? { postId: input.postId } : {}),
+    ...(allowedSelectors.has('user') && input.user !== undefined ? { user: input.user } : {}),
     ...(input.url !== undefined ? { url: input.url } : {}),
     ...(input.includeReplies !== undefined ? { includeReplies: input.includeReplies } : {}),
     ...(input.feedVariant !== undefined ? { feedVariant: input.feedVariant } : {}),
@@ -201,17 +206,21 @@ test('unadvertised actions are rejected before dispatch, at both layers', async 
 // ── Closed argv mappings ──
 
 test('opencli argv matches the verified 1.8.6 command shapes and always uses -f json', () => {
-  const base = request({ action: 'search', query: '咖啡', postId: 'a'.repeat(24), user: 'u1' });
-  assert.deepEqual(opencliArgvFor('search', base, 20), ['xiaohongshu', 'search', '咖啡', '--limit', '20', '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_post', base, 20), ['xiaohongshu', 'note', `https://www.xiaohongshu.com/explore/${'a'.repeat(24)}`, '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_comments', base, 20), ['xiaohongshu', 'comments', `https://www.xiaohongshu.com/explore/${'a'.repeat(24)}`, '--limit', '20', '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_comments', base, 100), ['xiaohongshu', 'comments', `https://www.xiaohongshu.com/explore/${'a'.repeat(24)}`, '--limit', '50', '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_user_posts', base, 20), ['xiaohongshu', 'user', 'u1', '--limit', '20', '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_feed', base, 20), ['xiaohongshu', 'feed', '--limit', '20', '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_saved', base, 20), ['xiaohongshu', 'saved', '--limit', '20', '-f', 'json']);
-  assert.deepEqual(opencliArgvFor('get_notifications', base, 20), ['xiaohongshu', 'notifications', '--limit', '20', '-f', 'json']);
+  const search = request({ action: 'search', query: '咖啡' });
+  const post = request({ action: 'get_post', postId: 'a'.repeat(24) });
+  const comments = request({ action: 'get_comments', postId: 'a'.repeat(24) });
+  const user = request({ action: 'get_user_posts', user: 'u1' });
+  const feed = request({ action: 'get_feed' });
+  assert.deepEqual(opencliArgvFor('search', search, 20), ['xiaohongshu', 'search', '咖啡', '--limit', '20', '-f', 'json']);
+  assert.deepEqual(opencliArgvFor('get_post', post, 20), ['xiaohongshu', 'note', `https://www.xiaohongshu.com/explore/${'a'.repeat(24)}`, '-f', 'json']);
+  assert.deepEqual(opencliArgvFor('get_comments', comments, 20), ['xiaohongshu', 'comments', `https://www.xiaohongshu.com/explore/${'a'.repeat(24)}`, '--limit', '20', '-f', 'json']);
+  assert.deepEqual(opencliArgvFor('get_comments', comments, 100), ['xiaohongshu', 'comments', `https://www.xiaohongshu.com/explore/${'a'.repeat(24)}`, '--limit', '50', '-f', 'json']);
+  assert.deepEqual(opencliArgvFor('get_user_posts', user, 20), ['xiaohongshu', 'user', 'u1', '--limit', '20', '-f', 'json']);
+  assert.deepEqual(opencliArgvFor('get_feed', feed, 20), ['xiaohongshu', 'feed', '--limit', '20', '-f', 'json']);
+  assert.deepEqual(opencliArgvFor('get_saved', request({ action: 'get_saved' }), 20), ['xiaohongshu', 'saved', '--limit', '20', '-f', 'json']);
+  assert.deepEqual(opencliArgvFor('get_notifications', request({ action: 'get_notifications' }), 20), ['xiaohongshu', 'notifications', '--limit', '20', '-f', 'json']);
   for (const action of SOCIAL_CANONICAL_ACTIONS.xiaohongshu) {
-    const argv = opencliArgvFor(action, base, 20);
+    const argv = opencliArgvFor(action, request({ action, query: 'q', postId: 'a'.repeat(24), user: 'u1' }), 20);
     if (argv === undefined) continue;
     assert.deepEqual(argv.slice(-2), ['-f', 'json'], action);
   }
@@ -243,27 +252,26 @@ test('opencli get_comments includeReplies adds --with-replies', () => {
 });
 
 test('xhs-cli argv matches the verified 0.1.4 command shapes', () => {
-  const base = request({ action: 'search', query: '咖啡', postId: 'a'.repeat(24), user: 'u1' });
-  assert.deepEqual(xhsCliArgvFor('search', base, 20), ['search', '咖啡', '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_post', base, 20), ['read', 'a'.repeat(24), '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_comments', base, 20), ['read', 'a'.repeat(24), '--comments', '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_profile', base, 20), ['user', 'u1', '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_user_posts', base, 20), ['user-posts', 'u1', '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_followers', base, 20), ['followers', 'u1', '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_following', base, 20), ['following', 'u1', '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_feed', base, 20), ['feed', '--json']);
-  assert.deepEqual(xhsCliArgvFor('get_saved', base, 100), ['favorites', '--max', '100', '--json']);
+  assert.deepEqual(xhsCliArgvFor('search', request({ action: 'search', query: '咖啡' }), 20), ['search', '咖啡', '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_post', request({ action: 'get_post', postId: 'a'.repeat(24) }), 20), ['read', 'a'.repeat(24), '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_comments', request({ action: 'get_comments', postId: 'a'.repeat(24) }), 20), ['read', 'a'.repeat(24), '--comments', '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_profile', request({ action: 'get_profile', user: 'u1' }), 20), ['user', 'u1', '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_user_posts', request({ action: 'get_user_posts', user: 'u1' }), 20), ['user-posts', 'u1', '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_followers', request({ action: 'get_followers', user: 'u1' }), 20), ['followers', 'u1', '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_following', request({ action: 'get_following', user: 'u1' }), 20), ['following', 'u1', '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_feed', request({ action: 'get_feed' }), 20), ['feed', '--json']);
+  assert.deepEqual(xhsCliArgvFor('get_saved', request({ action: 'get_saved' }), 100), ['favorites', '--max', '100', '--json']);
 });
 
 test('xhs-cli get_comments never dispatches xhs comments or xhs hot', () => {
-  const base = request({ action: 'get_comments', query: 'q', postId: 'a'.repeat(24), user: 'u1' });
+  const base = request({ action: 'get_comments', postId: 'a'.repeat(24) });
   const argv = xhsCliArgvFor('get_comments', base, 20)!;
   assert.equal(argv[0], 'read');
   assert.ok(argv.includes('--comments'));
   assert.ok(!argv.includes('comments'));
   assert.ok(!argv.includes('hot'));
   for (const action of SOCIAL_CANONICAL_ACTIONS.xiaohongshu) {
-    const candidate = xhsCliArgvFor(action, { ...base, action }, 20);
+    const candidate = xhsCliArgvFor(action, request({ action, query: 'q', postId: 'a'.repeat(24), user: 'u1' }), 20);
     if (candidate === undefined) continue;
     assert.ok(!candidate.includes('hot'), action);
     assert.ok(!candidate.includes('download'), action);

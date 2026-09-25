@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { AgentBrowserAdapter } from '../../src/browser/agent-browser.js';
+import type { DnsLookup } from '../../src/network-policy.js';
 
 function makeSentinel(prefix: string): string {
   return `${prefix}_` + Math.random().toString(36).slice(2, 8);
 }
 
-async function makeAdapterWithFake(fakeContent: string, opts: { loopback?: boolean } = {}) {
+async function makeAdapterWithFake(fakeContent: string, opts: { loopback?: boolean; dnsLookup?: DnsLookup } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pi-atlas-boundary-'));
   const runtimeRoot = join(root, 'runtime');
   const executablePath = join(root, 'agent-browser.cjs');
@@ -17,8 +18,8 @@ async function makeAdapterWithFake(fakeContent: string, opts: { loopback?: boole
   await writeFile(executablePath, fakeContent, { mode: 0o700 });
   await chmod(executablePath, 0o700);
   const adapter = opts.loopback
-    ? new AgentBrowserAdapter({ executablePath, runtimeRoot, loopbackMode: { proxyUrl: 'http://127.0.0.1:9999', origin: 'http://127.0.0.1:8765' } })
-    : new AgentBrowserAdapter({ executablePath, runtimeRoot });
+    ? new AgentBrowserAdapter({ executablePath, runtimeRoot, loopbackMode: { proxyUrl: 'http://127.0.0.1:9999', origin: 'http://127.0.0.1:8765' }, ...(opts.dnsLookup ? { dnsLookup: opts.dnsLookup } : {}) })
+    : new AgentBrowserAdapter({ executablePath, runtimeRoot, ...(opts.dnsLookup ? { dnsLookup: opts.dnsLookup } : {}) });
   return { adapter, root };
 }
 
@@ -102,7 +103,7 @@ process.stdout.write(JSON.stringify({success:true,data:{}})+'\\n');
 });
 
 // Cheap invalidation coverage
-test('invalidation: no-URL navigate success invalidates stale refs', async () => {
+test('invalidation: navigation success invalidates stale refs', async () => {
   const fake = `#!/usr/bin/env node
 const args=process.argv.slice(2);
 if(args[0]==='--version'){process.stdout.write('agent-browser 0.37.1\\n');process.exit(0);}
@@ -113,10 +114,11 @@ else if(args[0]==='click'){out({success:true,data:{}});}
 else if(args[0]==='close'){out({success:true,data:{}});}
 else out({success:true,data:{}});
 `;
-  const { adapter, root } = await makeAdapterWithFake(fake);
+  const dnsLookup: DnsLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+  const { adapter, root } = await makeAdapterWithFake(fake, { dnsLookup });
   try {
     await adapter.execute({ action: 'snapshot' }, { env: { PATH: process.env.PATH } });
-    const nav = await adapter.execute({ action: 'navigate' } as unknown as Record<string, unknown>, { env: { PATH: process.env.PATH } });
+    const nav = await adapter.execute({ action: 'navigate', url: 'https://example.com/next' }, { env: { PATH: process.env.PATH } });
     assert.equal((nav.details as { ok?: boolean })?.ok, true);
     const click = await adapter.execute({ action: 'click', selector: '@e1' }, { env: { PATH: process.env.PATH } });
     assert.equal((click.details as Record<string, unknown>).staleRef, true);

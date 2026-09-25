@@ -614,7 +614,7 @@ export function validateNoLoopbackInBatch(commands: BatchCommand[]): void {
   }
 }
 
-// ── Browser request envelope ──
+// ── Browser request validation ──
 
 export interface BrowserRequest {
   action: BrowserAction;
@@ -641,6 +641,18 @@ const BROWSER_ACTION_FIELDS: Record<BrowserAction, readonly string[]> = {
   close: [], cookies: ['urls'], set_cookies: ['cookies', 'urls'], snapshot: ['compact'],
   fill: ['selector', 'text'], select: ['selector', 'values'], wait: ['selector', 'text', 'waitMs'],
   get_url: [], get_title: [], semanticAction: ['semanticAction'], job: ['job'], batch: ['batch'],
+};
+const BROWSER_REQUIRED_FIELDS: Partial<Record<BrowserAction, readonly string[]>> = {
+  navigate: ['url'],
+  evaluate: ['expression'],
+  click: ['selector'],
+  type: ['selector', 'text'],
+  set_cookies: ['cookies'],
+  fill: ['selector', 'text'],
+  select: ['selector', 'values'],
+  semanticAction: ['semanticAction'],
+  job: ['job'],
+  batch: ['batch'],
 };
 const BROWSER_KNOWN_FIELDS = new Set(Object.values(BROWSER_ACTION_FIELDS).flat());
 
@@ -717,6 +729,12 @@ export function validateBrowserRequest(raw: Record<string, unknown>): BrowserReq
   if (raw.batch !== undefined) {
     if (typeof raw.batch !== 'object' || raw.batch === null || Array.isArray(raw.batch)) throw new Error('batch must be an object');
     request.batch = validateBatchRequest(raw.batch as Record<string, unknown>);
+  }
+  for (const field of BROWSER_REQUIRED_FIELDS[action] ?? []) {
+    const value = (request as unknown as Record<string, unknown>)[field];
+    if (value === undefined || (typeof value === 'string' && value.length === 0)) {
+      throw new Error(`${field} is required for browser action '${action}'`);
+    }
   }
   return request;
 }

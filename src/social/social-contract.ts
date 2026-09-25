@@ -333,11 +333,21 @@ export function validateSocialRequest(input: SocialRequestInput): { request: Soc
   }
   const platform: SocialPlatform = rawInput.platform;
   const action = resolveSocialAction(platform, input.action);
+  const spec = SOCIAL_ACTION_SELECTORS[platform][action] ?? {};
+  const allowedDirectSelectors = new Set<SocialSelectorField>([
+    ...(spec.required ?? []),
+    ...(spec.anyOf ?? []),
+  ]);
 
   // Selectors: explicit values win; URL extraction fills missing fields.
+  // Direct selectors that are irrelevant to the selected action reject
+  // instead of riding downstream as silently ignored baggage.
   const selectors: Partial<Record<SocialSelectorField, string>> = {};
   for (const field of SELECTOR_FIELDS) {
     const raw = input[field];
+    if (raw !== undefined && !allowedDirectSelectors.has(field)) {
+      throw new SocialError('invalid_request', `${platform} ${action} does not support selector: ${field}`);
+    }
     if (typeof raw === 'string' && raw.trim().length === 0) {
       throw new SocialError('invalid_request', `${field} must be a non-empty string when provided`);
     }
@@ -366,7 +376,6 @@ export function validateSocialRequest(input: SocialRequestInput): { request: Soc
     }
   }
 
-  const spec = SOCIAL_ACTION_SELECTORS[platform][action] ?? {};
   const missingRequired = (spec.required ?? []).filter((field) => selectors[field] === undefined);
   if (missingRequired.length > 0) {
     throw new SocialError(

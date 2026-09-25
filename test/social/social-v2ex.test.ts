@@ -126,8 +126,13 @@ test('every advertised v2ex action has at least one plan with a PAT present', as
 
 test('anonymous legacy plan precedes api_key plan when both exist', async () => {
   const { worker } = workerWithFetch(() => [], { pat: PAT });
+  const selectors = {
+    get_topic: { topic: '1' },
+    get_comments: { postId: '1' },
+    get_community_posts: { community: 'programmer' },
+  } as const;
   for (const action of ['get_topic', 'get_comments', 'get_community_posts'] as const) {
-    const plans = await worker.plans(req(action, { postId: '1', topic: '1', community: 'programmer' }), {});
+    const plans = await worker.plans(req(action, selectors[action]), {});
     assert.equal(plans.length, 2, `${action} should declare legacy + v2 plans`);
     assert.equal(plans[0]!.backend, V2EX_BACKEND_LEGACY);
     assert.equal(plans[0]!.authTier, 'anonymous');
