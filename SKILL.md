@@ -29,7 +29,7 @@ Use this root skill to choose the right surface. Then read the matching `skills/
 | platform-native discussion/profile reads | `social` | `northstar social ...` → `skills/social/SKILL.md` |
 | structured entity search/enrichment | `kg` | `northstar kg ...` → `skills/kg/SKILL.md` |
 | provider-native graph query/cardinality | `graph` | `northstar graph ...` → `skills/graph/SKILL.md` |
-| multi-step adaptive research job | `web_search` with `mode:"agent"`, then `agent_poll` | agent runtime |
+| multi-step adaptive research job | `agent` with `{query, depth?}`, then `agent` with `{jobId}` | agent runtime |
 | web UI interaction | `browser` | browser runtime, no standalone migrated domain skill |
 | OS-window interaction | `desktop` | desktop runtime, opt-in |
 | video metadata/transcript/feed acquisition | internal/fetch path | `northstar media ...` → `skills/media/SKILL.md` |
@@ -38,7 +38,7 @@ Use this root skill to choose the right surface. Then read the matching `skills/
 
 Use `web_search` first when you need candidate sources. Plain search fuses configured provider rankings deterministically. Provider selection is environment-only; do not ask for or invent a provider flag.
 
-`mode:"agent"` creates a parent-owned adaptive job for multi-step research. Poll only the returned job with `agent_poll`. Unknown, expired, or foreign job identifiers fail closed rather than enumerating jobs. Staged steering uses the operator-selected `/northstar model provider/model` (or `PI_NORTHSTAR_MODEL` override) after `/northstar agent on`; legacy `PI_NORTHSTAR_LEAF_MODEL` remains a compatibility fallback. Negotiation failure or exact `PI_NORTHSTAR_AGENT_STEERING=0` keeps the deterministic/evidence-only path.
+`agent` with `{query, depth?}` creates a parent-owned adaptive job for multi-step research. Poll only the returned job with `agent` and `{jobId}`. Unknown, expired, or foreign job identifiers fail closed rather than enumerating jobs. Staged steering uses the operator-selected `/northstar model provider/model` (or `PI_NORTHSTAR_MODEL` override) after `/northstar agent on`; legacy `PI_NORTHSTAR_LEAF_MODEL` remains a compatibility fallback. Negotiation failure or exact `PI_NORTHSTAR_AGENT_STEERING=0` keeps the deterministic/evidence-only path.
 
 For academic literature and public-data sources, use the research category in Pi or the dedicated CLI domain. The research registry covers 12 source-specific adapters and does not substitute generic web on source failure.
 

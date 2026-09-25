@@ -1,6 +1,5 @@
-// Agent-job seam (Plan A5): the interface Plan C implements. buildSearchRoute
-// routes mode:'agent' here; the jobs registry owns the runtime. No
-// agent_jobs_unavailable throw ships on the green gate.
+// Agent-job seam: the standalone public agent tool creates jobs here; the
+// jobs registry owns execution and polling state.
 
 import { createAgentJobEntry, UNSUPPORTED_AGENT_JOB_FIELDS } from './agent-jobs.js';
 import type { AgentJobDepth } from './agent-jobs.js';

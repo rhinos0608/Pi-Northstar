@@ -1,9 +1,6 @@
 import { validateWebRequest } from './web-contract.js';
-import { createAgentJob } from './agent/agent-job-seam.js';
-import { DEFAULT_WEB_AGENT_TIMEOUT_MS } from './web-agent-report.js';
 
-// Discriminated model-facing shape (hard cutover, no legacy flat adapter):
-// single {query} | batch {queries[1..8]} | agent {query, mode:"agent"}.
+// Model-facing shape: single {query} or batch {queries[1..8]}.
 // Cursor/category/source stay field-level value constraints enforced below.
 interface SearchFilterFields {
   category?: string | undefined;
@@ -20,36 +17,14 @@ interface SearchFilterFields {
 export interface SingleSearchParams extends SearchFilterFields {
   query: string;
   queries?: undefined;
-  mode?: undefined;
 }
 
 export interface BatchSearchParams extends SearchFilterFields {
   queries: string[];
   query?: undefined;
-  mode?: undefined;
 }
 
-export interface AgentSearchParams {
-  query: string;
-  mode: 'agent';
-  queries?: undefined;
-  cursor?: undefined;
-  source?: undefined;
-  knowledge?: undefined;
-  category?: string | undefined;
-  yearFrom?: number | undefined;
-  limit?: number | undefined;
-  recency?: string | undefined;
-  domains?: string[] | undefined;
-  /**
-   * Optional agent-job gather depth ('balanced' default when absent).
-   * Supported end-to-end: validated by the web contract, forwarded to the
-   * job seam. Never added to the agent-mode rejection list below.
-   */
-  depth?: 'balanced' | 'deep' | undefined;
-}
-
-export type SearchRouteParams = SingleSearchParams | BatchSearchParams | AgentSearchParams;
+export type SearchRouteParams = SingleSearchParams | BatchSearchParams;
 
 export interface SearchRoute {
   tool: string;
@@ -69,17 +44,9 @@ interface SearchContractInput {
   category?: string;
   cursor?: string;
   knowledge?: unknown;
-  mode?: unknown;
-  depth?: unknown;
 }
 
 function assertSupportedSearchCombination(params: SearchRouteParams): void {
-  if (params.mode === 'agent' && (params.category === 'research' || params.category === 'academic')) {
-    throw new Error(`mode "agent" is not supported with category "${params.category}"`);
-  }
-  if (params.mode === 'agent' && params.knowledge !== undefined) {
-    throw new Error('knowledge is not supported with mode "agent"');
-  }
   // Knowledge composition is web-only; reject research/academic combinations
   // before dispatch. Mirrors isResearchCategory in web-contract (not exported;
   // web-contract must stay untouched) so academic cannot slip to the web route
@@ -95,9 +62,7 @@ function assertSupportedSearchCombination(params: SearchRouteParams): void {
   // includeContent/recency/domains refine plain search only: the research
   // backend takes query/source/limit/yearFrom/cursor. Reject research use
   // here so direct route callers fail loudly instead of silent drop.
-  // includeContent is not on AgentSearchParams (agent mode rejects it); the
-  // `in` guard keeps the union access type-safe.
-  if (params.category === 'research' && 'includeContent' in params && params.includeContent !== undefined) {
+  if (params.category === 'research' && params.includeContent !== undefined) {
     throw new Error('includeContent is not supported with category "research"');
   }
   if (params.category === 'research' && params.recency !== undefined) {
@@ -129,12 +94,6 @@ function buildSearchContractInput(params: SearchRouteParams): SearchContractInpu
   // Cursor rides route-level only: the web contract rejects every cursor
   // (research cursors belong to the research adapters). Single-query only.
   if (params.knowledge !== undefined) contractInput.knowledge = params.knowledge;
-  if (params.mode !== undefined) contractInput.mode = params.mode;
-  // Depth rides to the web contract for validation (fail closed on non-agent
-  // mode, reject-not-drop on the value). The contract owns the rules; the
-  // route only forwards.
-  const rawDepth = (params as { depth?: unknown }).depth;
-  if (rawDepth !== undefined) contractInput.depth = rawDepth;
   return contractInput;
 }
 
@@ -176,9 +135,6 @@ function buildResearchRoute(params: SearchRouteParams, contractInput: SearchCont
 
 function buildCanonicalSearchRoute(params: SearchRouteParams, contractInput: SearchContractInput): SearchRoute {
   const { request } = validateWebRequest(contractInput);
-  // Agent jobs retain the historical agent deadline ceiling; ordinary search
-  // uses the normal web route timeout.
-  const timeout = request.agentMode ? DEFAULT_WEB_AGENT_TIMEOUT_MS : 120_000;
   const single = request.queries.length === 1 ? request.queries[0]! : undefined;
   return {
     tool: 'web_search',
@@ -193,46 +149,21 @@ function buildCanonicalSearchRoute(params: SearchRouteParams, contractInput: Sea
       ...(request.domains !== undefined ? { domains: [...request.domains] } : {}),
       ...(request.yearFrom !== undefined ? { yearFrom: request.yearFrom } : {}),
       ...(params.knowledge !== undefined ? { knowledge: params.knowledge } : {}),
-      ...(request.agentMode ? { mode: 'agent' } : {}),
     },
-    timeout,
+    timeout: 120_000,
   };
 }
 
 export function buildSearchRoute(params: SearchRouteParams | Record<string, unknown>): SearchRoute {
   const normalized = params as SearchRouteParams & Record<string, unknown>;
+  if (normalized.mode !== undefined || normalized.depth !== undefined) {
+    throw new Error('web_search no longer supports agent mode or depth; use the agent tool');
+  }
   assertSupportedSearchCombination(normalized as SearchRouteParams);
   const contractInput = buildSearchContractInput(normalized as SearchRouteParams);
   assertSingleQueryCursor(normalized as SearchRouteParams);
   if (normalized.category === 'research') {
     return buildResearchRoute(normalized as SearchRouteParams, contractInput);
-  }
-  // Agent branch constructs via the agent-job seam into the parent-owned
-  // jobs registry. buildCanonicalSearchRoute stays untouched for non-agent
-  // paths. No inline report generation here: the parent-owned adaptive job
-  // runs through the agent controller; poll serves the canonical snapshot.
-  if (normalized.mode === 'agent') {
-    // Admission before registration: the job runtime takes a bare query
-    // string, so search constraints cannot be honored end-to-end. Reject
-    // them here (static reason, no value echo) before validation defaults
-    // them and drops them silently. Mirrors UNSUPPORTED_JOB_FIELDS in
-    // agent-job-seam.ts, which stays as defense-in-depth behind this check.
-    for (const field of ['limit', 'category', 'yearFrom', 'recency', 'domains', 'includeContent'] as const) {
-      if (normalized[field] !== undefined) {
-        throw new Error(`mode "agent" rejects search constraint "${field}": unsupported by the agent runtime`);
-      }
-    }
-    // Depth is supported end-to-end (contract-validated, seam-forwarded) and
-    // stays OUT of the rejection list above.
-    const { request } = validateWebRequest({ ...contractInput, mode: 'agent' });
-    const single = request.queries[0]!;
-    // request.depth is always set on the agent branch ('balanced' default);
-    // conditional spread keeps exactOptionalPropertyTypes happy.
-    const pointer = createAgentJob({
-      query: single,
-      ...(request.depth !== undefined ? { depth: request.depth } : {}),
-    });
-    return { tool: 'agent_job', args: { jobId: pointer.jobId }, timeout: DEFAULT_WEB_AGENT_TIMEOUT_MS };
   }
   return buildCanonicalSearchRoute(normalized as SearchRouteParams, contractInput);
 }

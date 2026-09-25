@@ -312,7 +312,7 @@ export function buildFetchRoute(params: FetchRouteParams | Record<string, unknow
   const record: Record<string, unknown> = params;
   for (const key of FETCH_LEGACY_KEYS) {
     if (record[key] !== undefined) {
-      throw new Error(`fetch no longer accepts '${key}': pass a 5-branch union {url}|{urls}|{url,siteMap:true}|{responseId}|{responseId,claims}`);
+      throw new Error(`fetch no longer accepts '${key}': use one flat request family {url}|{urls}|{url,siteMap:true}|{responseId}|{responseId,claims}`);
     }
   }
   // Claim-check branch first: claims present selects it, offset/limit/findText

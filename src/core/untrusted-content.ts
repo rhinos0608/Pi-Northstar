@@ -16,7 +16,7 @@ export const EXTERNAL_TOOL_NAMES = [
   'github',
   'graph',
   'kg',
-  'agent_poll',
+  'agent',
   'social',
   'web_search',
   'browser',

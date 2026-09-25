@@ -1,5 +1,4 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { Type } from 'typebox';
 import { createSearchBackend, resultToText, type BackendCallResult, type SearchBackend } from './backend.js';
 import { normalizeProviderPayload } from './core/payload.js';
 import { registerGitHubTool } from './github/github.js';
@@ -40,6 +39,7 @@ import { ANSWER_MAX_OUTPUT_TOKENS, type PageQueryMessages } from './web/page-que
 import { buildSearchRoute } from './web/web-search-route.js';
 import { diffbotConfigured } from './diffbot/diffbot-search.js';
 import {
+  buildAgentParameters,
   buildBrowserParameters,
   buildDesktopParameters,
   buildFetchParameters,
@@ -51,6 +51,7 @@ import {
 import { WebSearchLedger, type LedgerFailureCode, type WebSearchLedgerOptions } from './web/web-search-ledger.js';
 import { desktopEnabled } from './desktop/desktop-policy.js';
 import { getAgentJobSnapshot, setAgentSteeringEnv } from './web/agent/agent-jobs.js';
+import { createAgentJob } from './web/agent/agent-job-seam.js';
 import { setLeafRuntimeProvider, shutdownLeafRuntime } from './web/agent/agent-rpc.js';
 import { LeafRuntimeClient } from './runtime/leaf-runtime-client.js';
 import {
@@ -91,7 +92,7 @@ function pickLedgerBoolean(params: Record<string, unknown>, out: WebSearchLedger
   if (typeof value === 'boolean') out[key] = value;
 }
 
-function pickLedgerString(params: Record<string, unknown>, out: WebSearchLedgerOptions, key: 'recency' | 'mode' | 'category' | 'source'): void {
+function pickLedgerString(params: Record<string, unknown>, out: WebSearchLedgerOptions, key: 'recency' | 'category' | 'source'): void {
   const value = params[key];
   if (typeof value === 'string') out[key] = value;
 }
@@ -119,7 +120,6 @@ export function searchLedgerOptions(params: Record<string, unknown>): WebSearchL
   pickLedgerDomains(params, out);
   pickLedgerNumber(params, out, 'yearFrom');
   pickLedgerString(params, out, 'recency');
-  pickLedgerString(params, out, 'mode');
   pickLedgerString(params, out, 'category');
   pickLedgerString(params, out, 'source');
   pickLedgerKnowledge(params, out);
@@ -246,23 +246,12 @@ export function priorSearchResult(reason: 'suppressed' | 'blocked', pointer?: Pr
   };
 }
 
-/** Job-pointer envelope for mode:'agent' routes: the job runs
- *  sync-inside-job; the caller polls agent_poll for the snapshot. */
-function agentJobPointerResult(route: { args: Record<string, unknown> }): AgentToolResult<unknown> {
-  const jobId = typeof route.args.jobId === 'string' ? route.args.jobId : '';
-  const text = `Agent job started: jobId "${jobId}". Poll with agent_poll {"jobId":"${jobId}"} for the byte-stable snapshot (running/ready/failed).`;
+/** Closed agent poll envelope: static pointer, never lists or leaks jobs. */
+function closedAgentResult(): AgentToolResult<unknown> {
+  const text = 'Agent poll closed: no unexpired agent job matches this jobId. Start a new job with agent {query}.';
   return {
     content: [{ type: 'text', text: guardText(text, {}) }],
-    details: { action: 'agent', jobId },
-  };
-}
-
-/** Closed poll envelope: static pointer, never lists, never leaks other owners' jobs. */
-function closedAgentPollResult(): AgentToolResult<unknown> {
-  const text = 'Agent poll closed: no unexpired agent job matches this jobId. Run web_search with mode "agent" to start one, then poll its jobId.';
-  return {
-    content: [{ type: 'text', text: guardText(text, {}) }],
-    details: { action: 'agent_poll', status: 'closed' },
+    details: { action: 'agent', operation: 'poll', status: 'closed' },
   };
 }
 
@@ -292,13 +281,6 @@ async function runLedgeredSearch({
     // Validation never ran: drop in-flight tracking without a failure record.
     ledger.cancel(key);
     throw error;
-  }
-  // Agent-job seam: mode:'agent' routes never reach the MCP child. The job
-  // already runs (sync-inside-job); return the pointer immediately.
-  if (route.tool === 'agent_job') {
-    const result = agentJobPointerResult(route);
-    ledger.completeSuccess(key, result);
-    return result;
   }
   try {
     const result = await callPiSearchHandler(client, route.tool, route.args, signal, route.timeout, env, toolCallId);
@@ -346,7 +328,6 @@ export function createWebSearchExecute(
     // continuations (paged research reads) bypass the ledger.
     if (queries.length === 0 || typeof current.cursor === 'string') {
       const route = buildSearchRoute(current);
-      if (route.tool === 'agent_job') return agentJobPointerResult(route);
       return callPiSearchHandler(client, route.tool, route.args, signal, route.timeout, env, toolCallId);
     }
     const options = searchLedgerOptions(current);
@@ -393,7 +374,7 @@ export function createWebSearchExecute(
 }
 
 /** Session-scoped Pi fetch dispatch: buildFetchRoute validates the public
- *  5-branch union first (reject-on-overflow preserved), then the canonical
+ *  flat request against its five runtime families first, then the canonical
  *  fetch.read handler executes with surface 'pi' and the tool-call invocation
  *  id. Test-only context deps (lookup/fetchPageText) ride the command context;
  *  production leaves them absent. Never touches SearchBackend/MCP/native
@@ -508,7 +489,7 @@ export function createFetchExecute(
   deps: FetchExecuteDeps = {},
 ): (toolCallId: string, params: unknown, signal: AbortSignal | undefined) => Promise<AgentToolResult<unknown>> {
   return async (toolCallId, params, signal) => {
-    const current = (((params as { request?: unknown }).request ?? params) ?? {}) as Record<string, unknown>;
+    const current = (params ?? {}) as Record<string, unknown>;
     const route = buildFetchRoute(current as unknown as FetchRouteParams);
     const context = createCommandContext({
       surface: 'pi',
@@ -695,59 +676,77 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'web_search',
     label: 'Web Search',
-    description: 'Broad web discovery before fetch/social/kg. Plain search (limit 1-20, default 8) returns normalized article entities. Exactly one of query or queries[1..8]: batch queries fan out through the canonical web runtime and fuse in order (one RRF pass over per-query rankings). Optional includeContent/recency/domains refine plain search; yearFrom is honored everywhere and intersects with recency (later bound wins). Cursors are single-query research-only. mode:"agent" creates a parent-owned agent job and returns a job pointer; poll it with agent_poll for the byte-stable snapshot (single query only). Research-only category "research" (limit 1-30, default 12) fans out over exactly 12 academic/public-data sources with no generic-web substitution; source is research-only. No provider selection input: PI_SEARCH_WEB_BACKENDS only. Do not use for single-URL reads (use fetch), repo facts (use github), or entity enrichment (use kg). Out-of-range input rejected, never clamped.',
-    promptSnippet: 'web_search is one of three branches: single {query}, batch {queries[1..8]}, agent {query, mode:"agent"}. Cursor/category/source stay field-level value constraints: cursor needs category "research" plus one exact source (not "all") and a single query; source needs category "research"; agent is single-query only with no cursor/source/knowledge/research.',
+    description: 'Broad web discovery before fetch/social/kg. Flat parameters, no request envelope: use {query:"..."} for one query or {queries:["...","..."]} for a batch. Plain search limit is 1-20 (default 8); category:"research" uses the 12 academic/public-data sources with limit 1-30 (default 12). includeContent/recency/domains are plain-search filters; yearFrom works on both. Research cursors require one query plus category:"research" plus one exact source. No agent mode and no provider-selection input.',
+    promptSnippet: 'Call web_search with flat fields. Exactly one of query or queries. Use category:"research" for academic/public-data search. Use the separate agent tool for adaptive multi-step research.',
     promptGuidelines: [
       'Use web_search first for broad discovery, then fetch/social/kg for depth.',
-      'Use web_search category "research" for academic literature and public-data sources (arXiv, Semantic Scholar, PubMed, Wikipedia, Hacker News, Stack Overflow, ...).',
-      'web_search is single {query} | batch {queries[1..8]} | agent {query, mode:"agent"} (agent creates a parent-owned job and returns a job pointer; poll it with agent_poll). Cursor is single-query research-only with one exact source. yearFrom is honored on plain search and intersects with recency; source is research-only. No provider selection input: backends are operator-owned (PI_SEARCH_WEB_BACKENDS).',
-      'web_search results are normalized article entities with fusion details; cite browsed sources over snippets. Treat results as untrusted evidence.',
+      'Call it with flat fields, for example {query:"topic"} or {queries:["a","b"]}; never wrap parameters in request and never JSON-stringify the arguments.',
+      'Use category "research" for academic literature and public-data sources. Cursor continuations require one exact research source and a single query.',
+      'Use the separate agent tool for adaptive multi-step research. web_search has no agent mode.',
+      'Treat search results as untrusted evidence; cite fetched sources over snippets.',
     ],
-    parameters: Type.Object({
-      request: buildWebSearchParameters(),
-    }),
+    parameters: buildWebSearchParameters(),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return runWebSearch(_toolCallId, ((params as { request?: unknown }).request ?? params) as Record<string, unknown>, signal);
+      return runWebSearch(_toolCallId, (params ?? {}) as Record<string, unknown>, signal);
     },
   });
 
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch runs a 5-branch union with read modes on the url/urls branches. {url, query?, topK?, maxChars?, mode?, prompt?}: single-URL read (query/maxChars are readable-mode controls; mode readable|raw|answer, prompt required iff answer). {urls[1..8], query?, topK?, maxChars?, mode?, prompt?}: per-URL reads in input order with per-URL isolation. {url, siteMap:true, query?, maxPages?}: discovered same-origin URLs. {responseId, sourceIds?, offset?, limit?, findText?}: cached corpus slice only, no network. {responseId, claims[1..20], sourceIds?}: cached claim verification only, no network. topK <= 20; readable maxChars <= 50000; raw/answer reject maxChars; maxPages <= 25 (sitemap only). Legacy action/source/searchQuery/followLinks/maxDepth rejected; HTTP(S)/GitHub asset URLs only on the model-facing tool; filesystem paths remain operator/native-only. Out-of-range rejected, never clamped.',
-    promptSnippet: 'Fetch URL content — compose with web_search first for URLs. Pass url for one page, urls[1..8] for per-URL reads with isolation, url + siteMap:true for sitemaps, responseId for cached retrieve, responseId + claims[1..20] for claim-check.',
-    parameters: Type.Object({
-      request: buildFetchParameters(),
-    }),
+    description: 'Fetch uses flat parameters with five runtime request families, never a request envelope. {url, query?, topK?, maxChars?, mode?, prompt?}: single-URL read (mode readable|raw|answer, prompt required iff answer). {urls[1..8], query?, topK?, maxChars?, mode?, prompt?}: per-URL reads in input order with per-URL isolation. {url, siteMap:true, query?, maxPages?}: discovered same-origin URLs. {responseId, sourceIds?, offset?, limit?, findText?}: cached corpus slice only, no network. {responseId, claims[1..20], sourceIds?}: cached claim verification only, no network. Runtime rejects incompatible cross-family fields and legacy action/source/searchQuery/followLinks/maxDepth. HTTP(S)/GitHub asset URLs only; filesystem paths are not model-addressable. Out-of-range input rejects, never clamps.',
+    promptSnippet: 'Use flat fields, never {request:{...}}. Pass url for one page, urls[1..8] for isolated reads, url + siteMap:true for sitemaps, responseId for cached retrieve, or responseId + claims[1..20] for claim-check.',
+    parameters: buildFetchParameters(),
     async execute(_toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
       return createFetchExecute(env, sessionFetchProbeDeps(ctx, signal, env))(_toolCallId, params, signal);
     },
   });
 
-  // Ninth slot (freed by media removal): startup-registered poll, always
-  // registered; returns closed pointer when no unexpired job matches. Approved name agent_poll.
+  // Ninth slot: standalone adaptive research surface. web_search has no
+  // agent branch; this tool owns both job creation and polling.
   pi.registerTool({
-    name: 'agent_poll',
-    label: 'Agent Poll',
-    description: 'Poll a parent-owned agent job created by web_search mode:"agent". Params {jobId}: returns the byte-stable canonical snapshot (running/ready/failed). Closed with a static pointer when no unexpired job matches; never lists or leaks owner-bound jobs.',
+    name: 'agent',
+    label: 'Agent',
+    description: 'Start or poll an adaptive research job. Flat parameters, no request envelope. Start with {query, depth?}; poll with {jobId}. Exactly one of query or jobId. depth is valid only when starting a job. Unknown, expired, and foreign jobIds close identically.',
+    promptSnippet: 'agent has two flat forms: {query:"...", depth?} starts adaptive research; {jobId:"..."} polls that job. Never send both selectors.',
     promptGuidelines: [
-      'Poll agent_poll with the jobId returned by web_search mode:"agent"; the snapshot is byte-stable for identical job state.',
-      'Agent poll never lists jobs and never leaks other owners\' jobs: unknown, expired, and foreign jobIds all close identically.',
+      'Use agent {query} for adaptive multi-step research; optional depth is "balanced" or "deep".',
+      'Use agent {jobId} to poll the returned job. Unknown, expired, and foreign jobIds fail closed without enumeration.',
+      'Never wrap parameters in request; web_search has no agent branch.',
     ],
-    parameters: Type.Object({
-      jobId: Type.String({ minLength: 1, maxLength: 128, description: 'Agent job id from the web_search mode:"agent" pointer.' }),
-    }, { additionalProperties: false }),
+    parameters: buildAgentParameters(),
     async execute(_toolCallId, params, _signal): Promise<AgentToolResult<unknown>> {
+      const current = (params ?? {}) as { query?: unknown; depth?: unknown; jobId?: unknown };
+      const hasQuery = typeof current.query === 'string' && current.query.trim() !== '';
+      const hasJobId = typeof current.jobId === 'string' && current.jobId.trim() !== '';
+      if (hasQuery === hasJobId) throw new Error('agent requires exactly one of query or jobId');
+
+      if (hasQuery) {
+        if (current.jobId !== undefined) throw new Error('agent start does not accept jobId');
+        if (current.depth !== undefined && current.depth !== 'balanced' && current.depth !== 'deep') {
+          throw new Error('agent depth must be "balanced" or "deep"');
+        }
+        const pointer = createAgentJob({
+          query: current.query as string,
+          ...(current.depth !== undefined ? { depth: current.depth as 'balanced' | 'deep' } : {}),
+        });
+        const text = `Agent job started: jobId "${pointer.jobId}". Poll with agent {"jobId":"${pointer.jobId}"} for the byte-stable snapshot (running/ready/failed).`;
+        return {
+          content: [{ type: 'text', text: guardText(text, { env }) }],
+          details: { action: 'agent', operation: 'start', jobId: pointer.jobId, status: 'running' },
+        };
+      }
+
+      if (current.depth !== undefined) throw new Error('agent depth is only valid with query');
+      if (typeof current.jobId !== 'string' || current.jobId.length > 128) return closedAgentResult();
       try {
-        const current = (params ?? {}) as { jobId?: unknown };
-        if (typeof current.jobId !== 'string' || current.jobId.trim() === '' || current.jobId.length > 128) return closedAgentPollResult();
         const snapshot = getAgentJobSnapshot(current.jobId);
         return {
           content: [{ type: 'text', text: guardText(snapshot, { env }) }],
-          details: { action: 'agent_poll', jobId: current.jobId, status: 'ok' },
+          details: { action: 'agent', operation: 'poll', jobId: current.jobId, status: 'ok' },
         };
       } catch {
-        return closedAgentPollResult();
+        return closedAgentResult();
       }
     },
   });
@@ -755,14 +754,13 @@ export default function (pi: ExtensionAPI): void {
   if (desktop) {
     pi.registerTool({
       name: 'desktop', label: 'Desktop',
-      description: 'Native desktop observation/interaction via manually installed Cua Driver (opt-in PI_SEARCH_DESKTOP_AUTOMATION=1). Use only for OS-window control fetch/browser cannot reach. Observe AX-only first; mutations need fresh stateId, never retried after dispatch. Closed actions; bounded AX/output; type_text/press_key require explicit human TUI confirmation and fail closed headless; scroll/click ungated; screenshots may expose PII.',
+      description: 'Native desktop observation/interaction with flat parameters and no request envelope via manually installed Cua Driver (opt-in PI_SEARCH_DESKTOP_AUTOMATION=1). Use only for OS-window control fetch/browser cannot reach. Observe AX-only first; mutations need fresh stateId, never retried after dispatch. Closed actions; bounded AX/output; type_text/press_key require explicit human TUI confirmation and fail closed headless; scroll/click ungated; screenshots may expose PII.',
+      promptSnippet: 'Use flat fields, e.g. {action:"status"} or {action:"observe_window", pid:123, windowId:"w1"}. Never wrap arguments in request.',
       promptGuidelines: ['Use desktop to observe AX-only first; desktop screenshots may expose PII or credentials.', 'Desktop mutations require fresh stateId and are never retried after dispatch; OUTCOME_UNKNOWN needs fresh desktop observation.'],
-      parameters: Type.Object({
-      request: buildDesktopParameters(),
-    }),
+      parameters: buildDesktopParameters(),
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         return await desktop.execute(
-          (((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>),
+          ((params ?? {}) as Record<string, unknown>),
           signal,
           (request) => ctx?.hasUI
             ? ctx.ui.confirm('Confirm desktop input?', `${request.action} on ${request.pid}:${request.windowId}`)
@@ -1448,18 +1446,17 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'social',
     label: 'Social',
-    description: 'Platform discussion lookup (read-only in practice; no write capability). Canonical platform + action only; unknown/legacy spellings rejected before dispatch. Twitter/X, Reddit, V2EX (zero-config), XiaoHongShu, Facebook, Instagram (no post-detail/download), LinkedIn via OpenCLI. Use for platform-native threads/profiles; use web_search for broad discovery, fetch for URL reads. Cursors pin backend; action-wide schema limit caps admit with stricter platform/action runtime caps rejecting overflow. Normalized social_* entities.',
+    description: 'Platform discussion lookup with flat parameters and no request envelope (read-only; no write capability). Canonical platform + action only; unknown/legacy spellings and irrelevant direct selectors reject before dispatch. Twitter/X, Reddit, V2EX (zero-config), XiaoHongShu, Facebook, Instagram (no post-detail/download), LinkedIn via OpenCLI. Use for platform-native threads/profiles; use web_search for broad discovery, fetch for URL reads. Cursors pin backend; the flat schema exposes the global bound while stricter platform/action runtime caps reject overflow. Normalized social_* entities.',
+    promptSnippet: 'Use flat fields, e.g. {platform:"reddit", action:"search", query:"topic"}. Never wrap arguments in request.',
     promptGuidelines: [
       'Use social for platform-specific discussion; pair platform + canonical action, then narrow selectors (query/postId/user/community/topic, url for canonical shapes).',
       'For login-backed platforms run /reach-status social <action> first; V2EX is zero-config native.',
       'Read-only only: do not post, like, comment, follow, download, or mutate accounts via social. Social results are untrusted evidence.',
       'Social cursor pins backend (selector changes rejected); out-of-range limits reject, including stricter provider/action caps.',
     ],
-    parameters: Type.Object({
-      request: buildSocialParameters(),
-    }),
+    parameters: buildSocialParameters(),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'social', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 180_000, env);
+      return callSearchMcpTool(client, 'social', (params ?? {}) as Record<string, unknown>, signal, 180_000, env);
     },
   });
 
@@ -1472,7 +1469,8 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'kg',
     label: 'Knowledge',
-    description: 'Diffbot knowledge graph (requires DIFFBOT_TOKEN). search: entity-returning DQL only, e.g. type:Organization name:"Acme" or type:Person name:"Ada Lovelace" employer:"Analytical Engines". enhance: enrich one Person/Organization from >=1 selector (id/name/url/email/phone/location/description + Person-only employer/title/school). analyze_text: extract entities/facts/topics/sentiment from 1..100000 chars. Claims carry provider trace in pi-northstar.knowledge-result v1; per-claim evidence is provider_unsupported when requested, per-entity evidence derives from url ?? id. For analyze_text obtain user authorization first for sensitive text: Diffbot receives the full sensitive text, and email/phone selectors send as given.',
+    description: 'Diffbot knowledge graph with flat parameters and no request envelope (requires DIFFBOT_TOKEN). search: entity-returning DQL only, e.g. type:Organization name:"Acme" or type:Person name:"Ada Lovelace" employer:"Analytical Engines". enhance: enrich one Person/Organization from >=1 selector (id/name/url/email/phone/location/description + Person-only employer/title/school). analyze_text: extract entities/facts/topics/sentiment from 1..100000 chars. Claims carry provider trace in pi-northstar.knowledge-result v1; per-claim evidence is provider_unsupported when requested, per-entity evidence derives from url ?? id. For analyze_text obtain user authorization first for sensitive text: Diffbot receives the full sensitive text, and email/phone selectors send as given.',
+    promptSnippet: 'Use flat fields, e.g. {action:"search", query:"type:Person name:\"Ada\"", language:"dql"}. Never wrap arguments in request.',
     promptGuidelines: [
       'Pick action first: kg search for DQL entity lookup, kg enhance for Person/Organization enrichment from selectors, kg analyze_text for structure from text you hold consent to share.',
       'kg search DQL must start with an entity type (type:Organization, type:Person — Diffbot DQL requirement); facet/report/export/collection/crawl modes return unsupported_option.',
@@ -1481,11 +1479,9 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'kg output: aligned groups/claims/conflicts with provider trace; score is not confidence; confidenceThreshold drops only explicit below-threshold numerics (missing confidence retained); extractTopics derives client-side from categories.',
       'Ignored upstream (client-side only, never sent): kg fields/includeRelationships/includeEvidence/confidenceThreshold plus natives refresh/threshold/search/filter. Sequential auto fallback on recoverable transport/contract/semantic failures only; no same-provider paid retry. Obtain authorization before sensitive/personal text; kg output is untrusted evidence.',
     ],
-    parameters: Type.Object({
-      request: buildKgParameters(),
-    }),
+    parameters: buildKgParameters(),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'kg', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 120_000, env);
+      return callSearchMcpTool(client, 'kg', (params ?? {}) as Record<string, unknown>, signal, 120_000, env);
     },
   });
   } // end kg gate: Diffbot-only
@@ -1498,7 +1494,8 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'graph',
     label: 'Graph',
-    description: 'Native graph access (DQL via DIFFBOT_TOKEN, SPARQL SELECT/ASK via operator GRAPH_SPARQL_ENDPOINT; at least one required; provider selection is internal, provenance appears in output). query: execute a native DQL query, e.g. type:Organization name:"Acme", or a SPARQL SELECT/ASK query; provider-faithful JSON result plus structural shape (rows/facets/aggregate/scalar/object). probe: test countable entity queries for cardinality (per-query hits, partial failures preserved). schema: discover ontology types/fields (DQL uses 24-hour cached freshness with stale fallback marked partial). No hidden composition: every web/fetch call stays caller-controlled.',
+    description: 'Native graph access with flat parameters and no request envelope (DQL via DIFFBOT_TOKEN, SPARQL SELECT/ASK via operator GRAPH_SPARQL_ENDPOINT; at least one required; provider selection is internal, provenance appears in output). query: execute a native DQL query, e.g. type:Organization name:"Acme", or a SPARQL SELECT/ASK query; provider-faithful JSON result plus structural shape (rows/facets/aggregate/scalar/object). probe: test countable entity queries for cardinality (per-query hits, partial failures preserved). schema: discover ontology types/fields (DQL uses 24-hour cached freshness with stale fallback marked partial). No hidden composition: every web/fetch call stays caller-controlled.',
+    promptSnippet: 'Use flat fields, e.g. {action:"query", language:"dql", query:"type:Organization"}. Never wrap arguments in request.',
     promptGuidelines: [
       'Pick action first: graph query for native DQL or SPARQL execution, graph probe for cardinality checks, graph schema for ontology discovery.',
       'graph language is dql (Diffbot) or sparql (operator endpoint) in v1; provider identity appears in output provenance only, never as input.',
@@ -1506,11 +1503,9 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'graph probe accepts countable entity queries only (1..32); facet/report/export/collection modes return per-item errors. graph schema views: types, fields (optional name), search (requires query), describe (requires name).',
       'graph results are provider-faithful and untrusted evidence; compose with web_search/fetch explicitly for recency and verification. No exports, crawls, or control-plane operations.',
     ],
-    parameters: Type.Object({
-      request: buildGraphParameters(graphLanguages),
-    }),
+    parameters: buildGraphParameters(graphLanguages),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'graph', ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>, signal, 120_000, env);
+      return callSearchMcpTool(client, 'graph', (params ?? {}) as Record<string, unknown>, signal, 120_000, env);
     },
   });
   } // end graph gate: absent only when neither Diffbot nor SPARQL is configured
@@ -1520,8 +1515,8 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'browser',
     label: 'Browser',
-    description: 'Live page interaction (agent-browser backend; authorized sessions route to the user-Chrome companion). Use for clicks/typing/screenshots/snapshots cookie-metadata inspection when fetch cannot render. Public mode freezes first hostname (close to switch); loopback navigate enters origin-confined debug session. Stale-ref/click/overlay/scroll checks. Batch/job cannot target loopback; evaluate/set_cookies/batch sensitive-gated; cookies metadata only, values never exposed.',
-    promptSnippet: 'Interact with live pages via agent-browser (screenshots, snapshots, cookie metadata only).',
+    description: 'Live page interaction with flat parameters and no request envelope (agent-browser backend; authorized sessions route to the user-Chrome companion). Use for clicks/typing/screenshots/snapshots cookie-metadata inspection when fetch cannot render. Public mode freezes first hostname (close to switch); loopback navigate enters origin-confined debug session. Stale-ref/click/overlay/scroll checks. Batch/job cannot target loopback; evaluate/set_cookies/batch sensitive-gated; cookies metadata only, values never exposed.',
+    promptSnippet: 'Use flat fields, e.g. {action:"navigate", url:"https://example.com"} or {op:"observe", what:"snapshot"}. Never wrap arguments in request.',
     promptGuidelines: [
       'Browser uses the agent-browser backend.',
       'Browser respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out.',
@@ -1531,24 +1526,22 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       'Browser evaluate and set_cookies are gated by policy classification (PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1 to enable).',
       'Browser cookies returns metadata only (values never exposed).',
     ],
-    parameters: Type.Object({
-      request: buildBrowserParameters(),
-    }),
+    parameters: buildBrowserParameters(),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const { browser } = await import('./browser/browser-tools.js');
       const opts: { signal?: AbortSignal; env?: Record<string, string | undefined> } = { env };
       if (signal) opts.signal = signal;
-      const request = ((params as { request?: Record<string, unknown> }).request ?? params) as Record<string, unknown>;
+      const request = (params ?? {}) as Record<string, unknown>;
       let wireArgs = request;
       if (request.op === 'observe') {
         const { op: _op, what, ...rest } = request;
         wireArgs = { ...rest, action: what };
-        try {
-          validateBrowserRequest(wireArgs);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return { content: [{ type: 'text', text: guardText(JSON.stringify({ error: message }), { env }) }], details: { error: message } };
-        }
+      }
+      try {
+        wireArgs = validateBrowserRequest(wireArgs) as unknown as Record<string, unknown>;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: 'text', text: guardText(JSON.stringify({ error: message }), { env }) }], details: { error: message } };
       }
       const result = await browser(wireArgs, opts);
       // Preserve full content array (may include image items)

@@ -77,10 +77,10 @@ Phase 4 order per plan: remaining GitHub → research-source → graph/KG → so
 
 Gap count: 0 capability rows with Phase 4 legacy semantic fork. Residual cleanup items (browse and unmigrated dispatch paths in `src/native-tools.ts` / `src/cli/cli-backend.ts`) are scheduled for Phase 7 authority deletion.
 
-Migrated command breakdown: 28 command IDs total (20 dual + 8 CLI+skill). Workflow-only rows (by design, not gaps): 1 (agent orchestration; agent_poll poller is explicit native-tool-only support for it).
+Migrated command breakdown: 28 command IDs total (20 dual + 8 CLI+skill). Workflow-only rows (by design, not gaps): 1 (agent orchestration; agent poller is explicit native-tool-only support for it).
 
 ## Notes / uncertainty flags
 
-- `browser`/`desktop`/`agent_poll` remain Phase 5 or workflow surfaces, not migrated Phase 4 command ids. Broker/jobs local-development grammar is reachable and tested, while production stateful release claims remain gated on the privileged installer/isolation/Tier-2 proof. No broker/job command becomes a model tool by being CLI-reachable.
+- `browser`/`desktop`/`agent` remain Phase 5 or workflow surfaces, not migrated Phase 4 command ids. Broker/jobs local-development grammar is reachable and tested, while production stateful release claims remain gated on the privileged installer/isolation/Tier-2 proof. No broker/job command becomes a model tool by being CLI-reachable.
 - Social per-platform auth tiers are registry/provider concerns and were not changed by this audit.
 - `browse` and residual branches in `src/native-tools.ts` remain internal cleanup targets for Phase 7 after zero-import proof.

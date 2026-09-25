@@ -33,7 +33,6 @@ export interface WebSearchLedgerOptions {
   domains?: readonly string[];
   yearFrom?: number;
   knowledge?: Record<string, boolean>;
-  mode?: string;
   category?: string;
   source?: string;
 }
@@ -141,7 +140,6 @@ function canonicalOptions(options: WebSearchLedgerOptions | undefined): string {
     domains: domains ?? null,
     yearFrom: source.yearFrom ?? null,
     knowledge: knowledge ?? null,
-    mode: source.mode ?? null,
     category: source.category ?? null,
     source: source.source ?? null,
   });

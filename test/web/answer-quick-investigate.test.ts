@@ -320,10 +320,8 @@ test('answerModel rejected end-to-end: route, schema, dispatch', async () => {
     /answerModel/,
   );
   const { buildFetchParameters } = await import('../../src/public-tool-schemas.js');
-  const schema = buildFetchParameters() as { anyOf: Array<{ properties?: Record<string, unknown> }> };
-  for (const branch of schema.anyOf) {
-    assert.ok(!Object.hasOwn(branch.properties ?? {}, 'answerModel'), 'no branch may advertise answerModel');
-  }
+  const schema = buildFetchParameters() as { properties?: Record<string, unknown> };
+  assert.ok(!Object.hasOwn(schema.properties ?? {}, 'answerModel'), 'fetch schema must not advertise answerModel');
   const { dispatchFetch } = await import('../../src/native-fetch.js');
   await assert.rejects(
     () => dispatchFetch(

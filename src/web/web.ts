@@ -79,7 +79,7 @@ import {
   type WebAccessRecency,
 } from './access/web-access-contract.js';
 import { passesWebAccessDomainFilter } from './access/web-access-domain.js';
-import { runAgentReport } from './web-agent-report.js';
+
 import { runSitemap } from './web-sitemap.js';
 import { firecrawlSearchAdapter } from './providers/firecrawl.js';
 import { jinaSearchAdapter } from './providers/jina.js';
@@ -511,6 +511,9 @@ const UNAVAILABLE_KNOWLEDGE: WebKnowledgeResult = {
 };
 
 export async function webSearch(args: Record<string, unknown>, options: WebToolOptions = {}): Promise<BackendCallResult> {
+  if (args.mode !== undefined || args.depth !== undefined) {
+    throw new Error('web_search no longer supports agent mode or depth; use the agent tool');
+  }
   const action = resolveWebActionForTool('web_search', args);
   const category = typeof args.category === 'string' ? args.category : undefined;
   const searchInput: { action: string; query?: string; queries?: unknown; limit?: number; includeContent?: unknown; recency?: unknown; domains?: unknown; yearFrom?: unknown; category?: string; cursor?: string; topK?: number; maxPages?: number; maxChars?: number; knowledge?: unknown } = { action };
@@ -527,18 +530,6 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
   if (typeof args.maxPages === 'number') searchInput.maxPages = args.maxPages;
   if (typeof args.maxChars === 'number') searchInput.maxChars = args.maxChars;
   if (args.knowledge !== undefined) searchInput.knowledge = args.knowledge;
-  if (args.mode !== undefined) (searchInput as { mode?: unknown }).mode = args.mode;
-  // Agent admission: the report runtime takes a bare query string, so search
-  // constraints cannot be honored end-to-end. Reject fail-closed here (static
-  // reason) instead of validating defaults and dropping them silently.
-  // Mirrors the agent-branch admission in web-search-route.ts.
-  if ((searchInput as { mode?: unknown }).mode === 'agent') {
-    for (const field of ['limit', 'category', 'yearFrom', 'recency', 'domains'] as const) {
-      if (searchInput[field] !== undefined) {
-        throw new Error(`mode "agent" rejects search constraint "${field}": unsupported by the agent runtime`);
-      }
-    }
-  }
   const { request } = validateWebRequest(searchInput);
   const query = request.query ?? request.queries[0]!;
   const limit = request.limit;
@@ -549,37 +540,6 @@ export async function webSearch(args: Record<string, unknown>, options: WebToolO
     ...(request.domains !== undefined ? { domains: request.domains } : {}),
     ...(request.yearFrom !== undefined ? { yearFrom: request.yearFrom } : {}),
   };
-  if (request.agentMode && request.queries.length > 1) {
-    throw new Error('mode "agent" supports a single query only');
-  }
-  if (request.agentMode) {
-    const result = await runAgentReport(query, env, options.signal);
-    options.signal?.throwIfAborted();
-    const articles: WebArticleV1[] = [];
-    for (const source of result.sources) {
-      const article: WebArticleV1 = {
-        version: 1,
-        kind: 'article',
-        id: source.url,
-        url: source.url,
-        source: result.provider,
-        backend: result.provider,
-        title: source.title || source.url,
-      };
-      if (validateWebEntity(article).ok) articles.push(article);
-    }
-    const agentEnvelope = buildNorthstarResult({
-      request: { tool: 'web_search', channel: 'web', action: 'search' },
-      outcomes: [{ source: 'web', backend: result.provider, entities: northstarArticles(articles) }],
-      pagination: { supported: false, limit, hasMore: false },
-    });
-    return northstarTextResult(result.text, {
-      query,
-      effectiveQuery: query,
-      results: result.sources.map((source) => ({ title: source.title, url: source.url, source: result.provider })),
-      report: { status: 'ok', provider: result.provider, sources: result.sources.map((source) => ({ url: source.url, title: source.title })) },
-    }, agentEnvelope);
-  }
   const withCategoryHint = (text: string): string =>
     category && CATEGORY_HINTS[category] ? `${text} ${CATEGORY_HINTS[category]}` : text;
   const effectiveQuery = withCategoryHint(query);

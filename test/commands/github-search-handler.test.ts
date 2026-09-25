@@ -278,7 +278,7 @@ test('Pi github search routes through the handler', async () => {
   };
   registerGitHubTool(pi as never, { callTool: async () => ({}), close: async () => {} } as never, {});
   const outcome = await withFetch(async () => jsonResponse(CODE_ITEMS), () =>
-    execute('id', { request: { action: 'search', query: 'alpha', limit: 3 } }));
+    execute('id', { action: 'search', query: 'alpha', limit: 3 }));
   const wrapped = (outcome as { details: { details: Record<string, unknown> } }).details;
   const command = wrapped.details.northstarCommand as { commandId: string; outcome: string };
   assert.equal(command.commandId, 'github.search');

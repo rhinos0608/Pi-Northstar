@@ -84,7 +84,7 @@ PI_SEARCH_NATIVE_TOOLS=""
 PI_SEARCH_NATIVE_TOOLS="web_search,fetch,github"
 
 # Maximum current profile
-PI_SEARCH_NATIVE_TOOLS="web_search,fetch,github,social,kg,graph,browser,desktop,agent_poll"
+PI_SEARCH_NATIVE_TOOLS="web_search,fetch,github,social,kg,graph,browser,desktop,agent"
 ```
 
 `PI_SEARCH_NATIVE_TOOLS` accepts exact canonical names only. Unknown, duplicate, legacy, internal, or malformed entries fail at startup. CLI commands remain available independently.

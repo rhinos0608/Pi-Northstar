@@ -14,7 +14,7 @@ import { SOCIAL_CANONICAL_ACTIONS as STAGE2_CANONICAL_ACTIONS } from './social/s
 
 export type ReachFamily = 'social' | 'media' | 'web' | 'dev' | 'research' | 'browser';
 
-export const PUBLIC_TOOL_NAMES = ['web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent_poll'] as const;
+export const PUBLIC_TOOL_NAMES = ['web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent'] as const;
 export type PublicToolName = typeof PUBLIC_TOOL_NAMES[number];
 
 /** Registry marker for internal-acquisition channels with no public tool surface. */

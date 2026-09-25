@@ -13,7 +13,7 @@
 
 ## Current-state anchors (verified)
 - Fetch router mode-discriminated in `src/web/web-fetch-route.ts:81-124`; `buildSemanticSource` at `:342`; re-exported `src/index.ts:883`. Native dispatch `semantic_crawl`/`agentic_browse` in `src/native-tools.ts:70-98`.
-- Search router is `buildSearchRoute` in `src/web/web-search-route.ts:189` (public); `buildCanonicalSearchRoute` at `:163` is internal. No `agent_poll` symbol exists.
+- Search router is `buildSearchRoute` in `src/web/web-search-route.ts:189` (public); `buildCanonicalSearchRoute` at `:163` is internal. No `agent` symbol exists.
 - Content store is a process-global singleton `Map` in `src/web/access/web-access-content-store.ts:73-76` with `get(responseId)` / `put(entry)` and no owner param.
 - GitHub is REST-only single `github-api` backend (`src/github/github-contract.ts:829-842`, `src/github/github-domain.ts:33-34`); fetch via `githubFetch` `:188-201`; `decodeFilePayload` `:304-315` decodes base64 then caps, no pre-decode byte gate, no binary sniff.
 - Agent report is sync Tavily SSE (`src/web/web-agent-report.ts:26-37`, `src/web/providers/web-tavily.ts:41-43`); no jobs/poll.
@@ -44,6 +44,6 @@
 - [ ] `docs/plans/2026-09-14-northstar-github-acquisition-plan.md` (Plan E)
 
 ## Known unknowns (master-level defaults)
-- Poll tool name: `agent_poll` is a **proposed default needing approval**, not decided. Pivot: approver renames; seam interface isolates the name to one line.
+- Poll tool name: `agent` is a **proposed default needing approval**, not decided. Pivot: approver renames; seam interface isolates the name to one line.
 - Evidence budgets (report chars, source counts, fetch rounds): all numbers in C/D are proposed defaults needing approval; operator-lower-only applies only after approval.
 - Session/owner id source for store binding: decided in Plan B Task 1 before any consumer merges (per-entry owner, not per-store id).

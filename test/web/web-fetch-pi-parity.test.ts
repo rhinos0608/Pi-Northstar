@@ -50,7 +50,7 @@ test('pi fetch executes canonical handler with surface pi + invocation id, zero 
   });
   // createFetchExecute takes (env, deps) only: no SearchBackend/MCP/native dispatcher exists by construction.
   assert.equal(createFetchExecute.length, 1, 'fetch execute factory takes env (+optional deps), never a backend client');
-  const result = await execute('call-fetch-1', { request: { url: 'https://example.com/hello' } }, undefined);
+  const result = await execute('call-fetch-1', { url: 'https://example.com/hello' }, undefined);
   const command = commandOf(result);
   assert.equal(command.commandId, 'fetch.read');
   assert.equal(command.invocationId, 'call-fetch-1');

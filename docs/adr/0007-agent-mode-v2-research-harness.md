@@ -10,7 +10,7 @@ Baseline at commit `026c24fc03a0229d7525b441a21e795763846681`: typecheck green, 
 
 ## Decision
 
-Agent Mode v2 keeps the existing outer contract (`mode:"agent"` → `agent_job` → `agent_poll`, registry, TTL/ownership, canonical JSON, fail-closed RPC, provenance redaction) unchanged, and replaces the machinery behind `AgentResultV1` with a deterministic research harness with an LLM steering wheel.
+Agent Mode v2 keeps the existing outer contract (`mode:"agent"` → `agent_job` → `agent`, registry, TTL/ownership, canonical JSON, fail-closed RPC, provenance redaction) unchanged, and replaces the machinery behind `AgentResultV1` with a deterministic research harness with an LLM steering wheel.
 
 Spine: **PLAN → GATHER → EVALUATE → REFINE → SYNTHESIZE** (+ VERIFY in Phase 4). The controller is a small state machine; models propose, deterministic code validates and executes; stopping is a hard policy, never a model opinion.
 

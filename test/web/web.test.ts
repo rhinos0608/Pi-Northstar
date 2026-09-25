@@ -3,8 +3,6 @@ import { createServer, type Server } from 'node:http';
 import { test } from 'node:test';
 import { callNativeTool } from '../../src/native-tools.js';
 import { fetchReadablePage, fuseWebSearchRankings, webSearch } from '../../src/web/web.js';
-import { buildSearchRoute } from '../../src/web/web-search-route.js';
-import { __setAgentJobCreator } from '../../src/web/agent/agent-job-seam.js';
 
 function invalidRequestCode(err: unknown): string | undefined {
   return (err as { code?: string })?.code;
@@ -1251,57 +1249,7 @@ test('external fetch without token never triggers on ineligible 404 failure', as
   assert.equal(firecrawlCalls, 0, 'ineligible 404 must never reach remote vendors without a token either');
 });
 
-test('native web_search agent mode returns report text with details.report, no fusion', async () => {
-  await withFetch(async (input, init) => {
-    const url = String(input);
-    if (url === 'https://api.tavily.com/research' && init?.method === 'POST') {
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      assert.deepEqual(body, { input: 'deep topic', model: 'pro', stream: true });
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          for (const chunk of [
-            'data: {"choices": [{"delta": {"content": "Agent report "}}]}\n\n',
-            'data: {"choices": [{"delta": {"content": "body", "sources": [{"url": "https://a.example/x", "title": "A"}, {"url": "https://b.example/y", "title": "B"}]}}]}\n\n',
-            'event: done\ndata: {}\n\n',
-          ]) controller.enqueue(encoder.encode(chunk));
-          controller.close();
-        },
-      });
-      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    }
-    throw new Error(`unexpected fetch ${url}`);
-  }, async () => {
-    const result = await callNativeTool('web_search', { query: 'deep topic', mode: 'agent' }, { env: { TAVILY_API_KEY: 'k', ...NO_EMBEDDING } });
-    const text = (result.content as Array<{ text?: string }>).map((c: { text?: string }) => c.text ?? '').join('');
-    assert.ok(text.includes('Agent report body'));
-    const details = result.details as Record<string, unknown>;
-    const report = details.report as { status: string; provider: string; sources: Array<{ url: string; title: string }> };
-    assert.equal(report.status, 'ok');
-    assert.equal(report.provider, 'tavily');
-    assert.equal(report.sources.length, 2);
-    assert.ok(!('fusion' in details));
-    assert.ok(!('nativeAi' in details));
-    assert.ok(!('knowledge' in details));
-  });
-});
-
-test('native web_search agent mode rejects knowledge and research category before fetch', async () => {
-  let fetched = false;
-  await withFetch(async () => {
-    fetched = true;
-    return new Response('{}', { status: 200 });
-  }, async () => {
-    await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'agent', knowledge: { entities: true } }, { env: { TAVILY_API_KEY: 'k' } }));
-    await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'agent', category: 'research' }, { env: { TAVILY_API_KEY: 'k' } }));
-    await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'bogus' }, { env: { TAVILY_API_KEY: 'k' } }));
-  });
-  assert.equal(fetched, false);
-});
-
-test('native web_search agent mode unconfigured provider errors', async () => {
-  await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'agent' }, { env: { ...NO_EMBEDDING } }), /No report-capable/);
-});
+test('native web_search rejects removed agent mode before fetch', async () => { let fetched = false; await withFetch(async () => { fetched = true; return new Response('{}', { status: 200 }); }, async () => { await assert.rejects(() => callNativeTool('web_search', { query: 'q', mode: 'agent' }, { env: { TAVILY_API_KEY: 'k' } }), /no longer supports agent mode or depth/); }); assert.equal(fetched, false); });
 
 test('native fetch siteMap returns ordered URL list with details.siteMap', async () => {
   await withFetch(async (input, init) => {
@@ -1479,62 +1427,4 @@ test('brave 401 beside a healthy provider fuses hits and still records degradati
   });
 });
 
-// ── agent admission: unsupported search constraints reject, never drop ──
-
-test('agent route rejects unsupported search constraints before validation', async () => {
-  const cases: Array<Record<string, unknown>> = [
-    { query: 'q', mode: 'agent', limit: 5 },
-    { query: 'q', mode: 'agent', category: 'news' },
-    { query: 'q', mode: 'agent', yearFrom: 2020 },
-    { query: 'q', mode: 'agent', recency: 'week' },
-    { query: 'q', mode: 'agent', domains: ['example.com'] },
-  ];
-  for (const params of cases) {
-    assert.throws(
-      () => buildSearchRoute(params),
-      /mode "agent" rejects search constraint "(limit|category|yearFrom|recency|domains)"/,
-      `${JSON.stringify(params)} must reject, never silently drop`,
-    );
-  }
-});
-
-test('agent route still admits a bare query to the job seam', async () => {
-  __setAgentJobCreator(() => ({ jobId: 'job-admission-1' }));
-  try {
-    const route = buildSearchRoute({ query: 'deep topic', mode: 'agent' });
-    assert.equal(route.tool, 'agent_job');
-    assert.deepEqual(route.args, { jobId: 'job-admission-1' });
-  } finally {
-    __setAgentJobCreator(undefined);
-  }
-});
-
-test('webSearch agent mode rejects unsupported search constraints before any provider call', async () => {
-  const cases: Array<Record<string, unknown>> = [
-    { query: 'q', mode: 'agent', limit: 5 },
-    { query: 'q', mode: 'agent', category: 'news' },
-    { query: 'q', mode: 'agent', yearFrom: 2020 },
-    { query: 'q', mode: 'agent', recency: 'week' },
-    { query: 'q', mode: 'agent', domains: ['example.com'] },
-  ];
-  for (const args of cases) {
-    let calls = 0;
-    await withFetch(async () => {
-      calls++;
-      return new Response('{}', { status: 200 });
-    }, async () => {
-      await assert.rejects(
-        () => webSearch(args, { env: {} }),
-        /mode "agent" rejects search constraint "(limit|category|yearFrom|recency|domains)"/,
-        `${JSON.stringify(args)} must reject, never silently drop`,
-      );
-    });
-    assert.equal(calls, 0, `${JSON.stringify(args)} must not reach any provider`);
-  }
-});
-
-test('webSearch agent mode with a bare query still reaches the report provider', async () => {
-  // Empty env: no report provider configured, so admission passes and the
-  // provider resolution throws — proving the bare-query path is untouched.
-  await assert.rejects(() => webSearch({ query: 'q', mode: 'agent' }, { env: {} }), /No report-capable/);
-});
+test('webSearch rejects removed agent fields before provider dispatch', async () => { let calls = 0; await withFetch(async () => { calls++; return new Response('{}', { status: 200 }); }, async () => { await assert.rejects(() => webSearch({ query: 'q', mode: 'agent' }, { env: {} }), /no longer supports agent mode or depth/); await assert.rejects(() => webSearch({ query: 'q', depth: 'deep' }, { env: {} }), /no longer supports agent mode or depth/); }); assert.equal(calls, 0); });

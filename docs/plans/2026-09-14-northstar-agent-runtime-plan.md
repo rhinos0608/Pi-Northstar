@@ -42,7 +42,7 @@
 **Outcome:** Startup-registered poll tool active only while an unexpired job exists.
 
 **Files:**
-- Modify: `src/index.ts` (poll-add lines only; proposed name `agent_poll` — needs approval; execute rejects closed with static pointer when no unexpired job, never lists, never leaks other owners' jobs)
+- Modify: `src/index.ts` (poll-add lines only; proposed name `agent` — needs approval; execute rejects closed with static pointer when no unexpired job, never lists, never leaks other owners' jobs)
 - Modify: `test/index.test.ts` (9-tool budget gate via `assertPublicToolBudget`, no fixed-length assertion)
 
 **Checks:**

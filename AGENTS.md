@@ -52,7 +52,7 @@ Northstar has intentionally separate authority surfaces:
 
 `src/capabilities.ts` owns the Pi tool vocabulary:
 
-`web_search`, `fetch`, `github`, `social`, `kg`, `graph`, `browser`, `desktop`, `agent_poll`.
+`web_search`, `fetch`, `github`, `social`, `kg`, `graph`, `browser`, `desktop`, `agent`.
 
 `media` is CLI/internal acquisition, not a tenth public tool. CLI availability never implies model authority. A provider being configured never implies its Pi tool is exposed.
 

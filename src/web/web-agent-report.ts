@@ -1,4 +1,4 @@
-// Internal report provider for web_search mode:"agent" jobs.
+// Internal report provider for adaptive agent jobs.
 // Demoted to internal provider: no direct route reaches this module.
 // src/web/agent/agent-report-route.ts wraps it opaquely (sync-inside-job)
 // and the jobs registry owns execution; poll serves the snapshot.

@@ -158,7 +158,7 @@ test('Pi github trending routes through the handler', async () => {
   };
   registerGitHubTool(pi as never, { callTool: async () => ({}), close: async () => {} } as never, {});
   const outcome = await withFetch(async () => textResponse(TRENDING_HTML), () =>
-    execute('id', { request: { action: 'trending', since: 'monthly', limit: 2 } }),
+    execute('id', { action: 'trending', since: 'monthly', limit: 2 }),
   );
   const wrapped = (outcome as { details: { details: Record<string, unknown> } }).details;
   const command = wrapped.details.northstarCommand as { commandId: string; outcome: string };

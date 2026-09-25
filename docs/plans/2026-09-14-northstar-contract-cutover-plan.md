@@ -86,4 +86,4 @@
 
 ## Known unknowns / defaults / pivots
 - RSS/Atom reads move to fetch read branch (HTTP). Pivot: if `web-access-specialization.ts` lacks RSS handling → add internal RSS specialization, no new tool.
-- Poll tool name `agent_poll`: proposed default, needs approval; isolated to seam + Plan C registration.
+- Poll tool name `agent`: proposed default, needs approval; isolated to seam + Plan C registration.
