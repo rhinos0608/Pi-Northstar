@@ -36,7 +36,6 @@ import {
   createAgentJob,
   type CreateAgentJobParams,
 } from '../../../src/web/agent/agent-job-seam.js';
-import { buildSearchRoute } from '../../../src/web/web-search-route.js';
 import { runAdaptiveCore } from '../../../src/web/agent/agent-core.js';
 import { snapshotForJob } from '../../../src/web/agent/agent-capabilities.js';
 
@@ -733,17 +732,19 @@ test('seam rejects unsupported search constraints fail-closed', () => {
   }
 });
 
-test('agent route validates before creating a job', () => {
+test('agent seam validates before creating a job', () => {
   __resetAgentJobs();
   let creations = 0;
   __setAgentJobCreator(() => { creations += 1; return { jobId: 'route-job-1' }; });
   try {
-    assert.throws(() => buildSearchRoute({ query: '   ', mode: 'agent' }), /non-empty|invalid_request/);
-    assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', limit: 10_000 }), /mode "agent" rejects search constraint "limit"/);
+    assert.throws(() => createAgentJob({ query: '   ' }), /non-empty/);
+    assert.throws(
+      () => createAgentJob({ query: 'q', limit: 10_000 } as unknown as CreateAgentJobParams),
+      /unsupported by the job runtime/,
+    );
     assert.equal(creations, 0, 'invalid requests register no job');
-    assert.equal(hasUnexpiredJob(), false);
-    const route = buildSearchRoute({ query: 'valid topic', mode: 'agent' });
-    assert.equal(route.tool, 'agent_job');
+    const pointer = createAgentJob({ query: 'valid topic' });
+    assert.equal(pointer.jobId, 'route-job-1');
     assert.equal(creations, 1);
   } finally {
     __setAgentJobCreator(undefined);

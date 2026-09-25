@@ -3,83 +3,56 @@ import { test } from 'node:test';
 import Value from 'typebox/value';
 import { buildGithubParameters } from '../src/github/github.js';
 import { buildFetchRoute } from '../src/index.js';
-import { buildBrowserParameters, buildDesktopParameters, buildGraphParameters, buildKgParameters, buildSocialParameters, buildWebSearchParameters } from '../src/public-tool-schemas.js';
+import { buildAgentParameters, buildBrowserParameters, buildDesktopParameters, buildGraphParameters, buildKgParameters, buildSocialParameters, buildWebSearchParameters } from '../src/public-tool-schemas.js';
 import { validateKgEnhance, validateKgNlp, validateKgSearch } from '../src/knowledge/knowledge-contract.js';
+import { validateGraphRequest } from '../src/graph/graph-contract.js';
+import { validatePolicy as validateDesktopPolicy } from '../src/desktop/desktop-policy.js';
+import { validateBrowserRequest } from '../src/browser/browser-policy.js';
 import { SocialError, validateSocialRequest } from '../src/social/social-contract.js';
 
 function rejectsAtRuntime(input: Record<string, unknown>): void {
   assert.throws(() => validateSocialRequest(input as never), SocialError);
 }
 
-test('web_search schema accepts single, batch, and agent branches', () => {
+test('web_search schema is flat and rejects legacy agent/envelope fields', () => {
   const schema = buildWebSearchParameters();
   assert.equal(Value.Check(schema, { query: 'pi coding agent' }), true);
   assert.equal(Value.Check(schema, { queries: ['a', 'b'] }), true);
-  assert.equal(Value.Check(schema, { query: 'report', mode: 'agent' }), true);
-});
-
-test('web_search schema enforces exactly-one-of query/queries and agent rules', () => {
-  const schema = buildWebSearchParameters();
-  assert.equal(Value.Check(schema, { query: 'a', queries: ['b'] }), false);
-  assert.equal(Value.Check(schema, {}), false);
-  assert.equal(Value.Check(schema, { query: 'a', mode: 'agent', cursor: 'c' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', mode: 'agent', queries: ['b'] }), false);
+  assert.equal(Value.Check(schema, { request: { query: 'a' } }), false);
+  assert.equal(Value.Check(schema, { query: 'a', mode: 'agent' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', depth: 'deep' }), false);
   assert.equal(Value.Check(schema, { unknownField: 1, query: 'a' }), false);
 });
 
-test('web_search schema mirrors internal bounds', () => {
+test('web_search schema keeps simple field bounds; cross-field rules stay runtime-owned', () => {
   const schema = buildWebSearchParameters();
   assert.equal(Value.Check(schema, { query: 'a', limit: 20 }), true);
-  assert.equal(Value.Check(schema, { query: 'a', limit: 21 }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', limit: 21 }), true);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', limit: 30 }), true);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', limit: 31 }), false);
+  assert.equal(Value.Check(schema, { query: 'a', limit: 30 }), true);
   assert.equal(Value.Check(schema, { query: 'a', limit: 31 }), false);
   assert.equal(Value.Check(schema, { query: 'a', limit: 0 }), false);
   assert.equal(Value.Check(schema, { query: 'a', limit: 1.5 }), false);
-  assert.equal(Value.Check(schema, { query: 'a', yearFrom: 2000.5 }), false);
-  assert.equal(Value.Check(schema, { query: 'a', cursor: 'opaque' }), false);
   assert.equal(Value.Check(schema, { query: '' }), false);
   assert.equal(Value.Check(schema, { queries: [] }), false);
   assert.equal(Value.Check(schema, { queries: Array.from({ length: 9 }, (_, i) => `q${i}`) }), false);
   assert.equal(Value.Check(schema, { query: 'a', yearFrom: 1899 }), false);
+  assert.equal(Value.Check(schema, { query: 'a', yearFrom: 2000.5 }), false);
   assert.equal(Value.Check(schema, { query: 'a', recency: 'decade' }), false);
   assert.equal(Value.Check(schema, { query: 'a', knowledge: {} }), false);
   assert.equal(Value.Check(schema, { query: 'a', knowledge: { facts: true } }), true);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'video', limit: 20 }), true);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'video', limit: 21 }), false);
-});
-
-test('web_search research continuation requires single query + exact source + cursor', () => {
-  const schema = buildWebSearchParameters();
-  // Valid continuation: single query, category research, one exact source, cursor.
   assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque' }), true);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque', limit: 30 }), true);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque', limit: 31 }), false);
-  // Invalid combos: cursor alone, without source, with aggregate source,
-  // with batch queries, with agent mode, empty cursor, wrong category.
-  assert.equal(Value.Check(schema, { query: 'a', cursor: 'opaque' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', cursor: 'opaque' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'all', cursor: 'opaque' }), false);
-  assert.equal(Value.Check(schema, { queries: ['a'], category: 'research', source: 'arxiv', cursor: 'opaque' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', mode: 'agent', cursor: 'opaque' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: '' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'news', cursor: 'opaque' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'nope', cursor: 'opaque' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'nope' }), false);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', cursor: '' }), false);
 });
 
-test('web_search schema narrows source/knowledge to their branches', () => {
-  const schema = buildWebSearchParameters();
-  // source is research-only: plain single/batch branches carry no source.
-  assert.equal(Value.Check(schema, { query: 'a', source: 'arxiv' }), false);
-  assert.equal(Value.Check(schema, { queries: ['a'], source: 'arxiv' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'news', source: 'arxiv' }), false);
-  // knowledge is web-only: research branches carry no knowledge.
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', knowledge: { facts: true } }), false);
-  assert.equal(Value.Check(schema, { queries: ['a'], category: 'research', knowledge: { facts: true } }), false);
-  // Each field still validates on its home branch.
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv' }), true);
-  assert.equal(Value.Check(schema, { query: 'a', knowledge: { facts: true } }), true);
+test('agent schema has flat start and poll fields with no legacy aliases', () => {
+  const schema = buildAgentParameters();
+  assert.equal(Value.Check(schema, { query: 'deep topic' }), true);
+  assert.equal(Value.Check(schema, { query: 'deep topic', depth: 'deep' }), true);
+  assert.equal(Value.Check(schema, { jobId: 'job-1' }), true);
+  assert.equal(Value.Check(schema, { query: 'q', mode: 'agent' }), false);
+  assert.equal(Value.Check(schema, { request: { query: 'q' } }), false);
+  assert.equal(Value.Check(schema, { query: 'q', depth: 'ultra' }), false);
+  assert.equal(Value.Check(schema, { jobId: '' }), false);
 });
 
 test('graph schema accepts dql and sparql query/probe/schema branches', () => {
@@ -93,20 +66,22 @@ test('graph schema accepts dql and sparql query/probe/schema branches', () => {
   assert.equal(Value.Check(schema, { action: 'schema', language: 'sparql', view: 'describe', name: 'Person' }), true);
 });
 
-test('graph schema rejects sparql pagination and view selector misuse', () => {
+test('graph flat schema keeps field bounds while runtime owns action combinations', () => {
   const schema = buildGraphParameters();
-  assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', pageSize: 10 }), false);
-  assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', cursor: 'x' }), false);
+  assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', pageSize: 10 }), true);
+  assert.equal(validateGraphRequest({ action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', pageSize: 10 }).ok, false);
+  assert.equal(Value.Check(schema, { action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', cursor: 'x' }), true);
+  assert.equal(validateGraphRequest({ action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', cursor: 'x' }).ok, false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person', cursor: '' }), false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person', pageSize: 101 }), false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person', pageSize: 1.5 }), false);
   assert.equal(Value.Check(schema, { action: 'schema', language: 'sparql', view: 'describe', name: 'x'.repeat(2001) }), false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: '' }), false);
   assert.equal(Value.Check(schema, { action: 'probe', language: 'dql', queries: [] }), false);
-  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'types', name: 'Person' }), false);
-  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'search' }), false);
-  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'describe' }), false);
-  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'fields', query: 'x' }), false);
+  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'types', name: 'Person' }), true);
+  assert.equal(validateGraphRequest({ action: 'schema', language: 'dql', view: 'types', name: 'Person' }).ok, false);
+  assert.equal(Value.Check(schema, { action: 'schema', language: 'dql', view: 'search' }), true);
+  assert.equal(validateGraphRequest({ action: 'schema', language: 'dql', view: 'search' }).ok, false);
   assert.equal(Value.Check(schema, { action: 'schema', language: 'graphql', view: 'types' }), false);
   assert.equal(Value.Check(schema, { action: 'query', language: 'dql', query: 'type:Person', extra: 1 }), false);
 });
@@ -125,15 +100,17 @@ test('desktop schema accepts all nine contract actions with their fields', () =>
   assert.equal(Value.Check(schema, { action: 'scroll', pid: 123, windowId: 'w1', stateId: 's1', deltaY: -100 }), true);
 });
 
-test('desktop schema enforces per-action required fields and rejects extras', () => {
+test('desktop flat schema keeps field bounds while runtime policy owns action combinations', () => {
   const schema = buildDesktopParameters();
-  assert.equal(Value.Check(schema, { action: 'observe_window', pid: 123 }), false);
-  assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1' }), false);
-  assert.equal(Value.Check(schema, { action: 'type_text', pid: 123, windowId: 'w1', stateId: 's1' }), false);
-  assert.equal(Value.Check(schema, { action: 'press_key', pid: 123, windowId: 'w1', stateId: 's1' }), false);
-  assert.equal(Value.Check(schema, { action: 'status', pid: 123 }), false);
-  assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1', stateId: 's1', text: 'nope' }), false);
-  assert.equal(Value.Check(schema, { action: 'observe_window', pid: 123, windowId: 'w1', stateId: 's1' }), false);
+  const runtime = (input: Record<string, unknown>) => validateDesktopPolicy(input, { PI_SEARCH_DESKTOP_AUTOMATION: '1' });
+  assert.equal(Value.Check(schema, { action: 'observe_window', pid: 123 }), true);
+  assert.throws(() => runtime({ action: 'observe_window', pid: 123 }), /pid and windowId required/);
+  assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1' }), true);
+  assert.throws(() => runtime({ action: 'click', pid: 123, windowId: 'w1' }), /stateId/);
+  assert.equal(Value.Check(schema, { action: 'status', pid: 123 }), true);
+  assert.throws(() => runtime({ action: 'status', pid: 123 }), /field pid not valid/);
+  assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1', stateId: 's1', text: 'nope' }), true);
+  assert.throws(() => runtime({ action: 'click', pid: 123, windowId: 'w1', stateId: 's1', text: 'nope' }), /field text not valid/);
   assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1', stateId: 's1', bogus: 1 }), false);
   assert.equal(Value.Check(schema, { action: 'click', pid: -5, windowId: 'w1', stateId: 's1' }), false);
   assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1', stateId: 's'.repeat(201) }), false);
@@ -141,6 +118,7 @@ test('desktop schema enforces per-action required fields and rejects extras', ()
   assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1', stateId: 's1', timeoutMs: 60001 }), false);
   assert.equal(Value.Check(schema, { action: 'click', pid: 123, windowId: 'w1', stateId: 's1', x: 100001 }), false);
   assert.equal(Value.Check(schema, {}), false);
+  assert.equal(Value.Check(schema, { request: { action: 'status' } }), false);
 });
 
 test('social schema accepts canonical platform/action selectors and url derivation', () => {
@@ -154,64 +132,42 @@ test('social schema accepts canonical platform/action selectors and url derivati
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', limit: 100 }), true);
 });
 
-test('social schema rejects missing selectors, cross-action fields, and overflow', () => {
+test('social flat schema keeps scalar bounds while runtime owns selector/action rules', () => {
   const schema = buildSocialParameters();
   assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 10 }), true);
-  // Delegated: one branch per action keeps the action-wide max; stricter
-  // per-platform caps reject at runtime instead.
-  assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 11 }), true, 'action-wide max admits; runtime enforces LinkedIn cap');
+  assert.equal(Value.Check(schema, { platform: 'linkedin', action: 'search', query: 'ada', limit: 11 }), true);
   rejectsAtRuntime({ platform: 'linkedin', action: 'search', query: 'ada', limit: 11 });
-  assert.equal(Value.Check(schema, { platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 50 }), true);
-  assert.equal(Value.Check(schema, { platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 51 }), true, 'action-wide max admits; runtime enforces Xiaohongshu cap');
-  rejectsAtRuntime({ platform: 'xiaohongshu', action: 'get_comments', postId: '1', limit: 51 });
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search' }), false);
-  // Delegated: postId-or-URL / user-or-URL alternatives collapse into one
-  // branch per action (direct id optional at schema); runtime enforces one-of.
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_post' }), true, 'branch admits; runtime requires postId or URL');
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search' }), true);
+  rejectsAtRuntime({ platform: 'twitter', action: 'search' });
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_post' }), true);
   rejectsAtRuntime({ platform: 'twitter', action: 'get_post' });
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile' }), true, 'branch admits; runtime requires user or URL');
-  rejectsAtRuntime({ platform: 'twitter', action: 'get_profile' });
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile', url: 'https://x.com/ada' }), true);
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', topic: 't' }), false);
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_comment_replies', commentId: '1002' }), true);
-  // Parity: Reddit canonical URL derives commentId at runtime, so the schema
-  // must admit URL-only comment replies (Twitter still needs direct commentId).
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', topic: 't' }), true);
+  rejectsAtRuntime({ platform: 'twitter', action: 'search', query: 'x', topic: 't' });
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_comment_replies', postId: '1' }), true);
+  rejectsAtRuntime({ platform: 'twitter', action: 'get_comment_replies', postId: '1' });
   assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_comment_replies', url: 'https://www.reddit.com/r/rust/comments/abc/topic/def/' }), true);
   assert.equal(validateSocialRequest({ platform: 'reddit', action: 'get_comment_replies', url: 'https://www.reddit.com/r/rust/comments/abc/topic/def/' }).request.commentId, 'def');
-  rejectsAtRuntime({ platform: 'reddit', action: 'get_comment_replies' });
-  rejectsAtRuntime({ platform: 'twitter', action: 'get_comment_replies' });
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_comment_replies', postId: '1' }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', limit: 101 }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', limit: 0 }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', limit: 1.5 }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'nope', query: 'x' }), false);
   assert.equal(Value.Check(schema, { platform: 'tumblr', action: 'search', query: 'x' }), false);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', bogus: 1 }), false);
+  assert.equal(Value.Check(schema, { request: { platform: 'twitter', action: 'search', query: 'x' } }), false);
 });
 
-test('social schema advertises aux fields only where honored, with closed vocabularies', () => {
+test('social flat schema uses global aux vocabularies; runtime owns platform/action subsets', () => {
   const schema = buildSocialParameters();
-  // Honored fields with valid values pass.
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', sort: 'latest' }), true);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', timeRange: '2026-01-01' }), true);
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_feed', feedVariant: 'following' }), true);
-  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'search', query: 'x', sort: 'comments', timeRange: 'week' }), true);
   assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_thread', postId: 'a', includeReplies: false }), true);
-  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_community_posts', community: 'rust', sort: 'rising' }), true);
-  // Out-of-vocab values reject at the schema.
   assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', sort: 'bogus' }), false);
-  // Delegated: timeRange accepts any non-empty string at schema (union across
-  // verbatim and date-only platforms); twitter YYYY-MM-DD rejects at runtime.
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', timeRange: 'last week' }), true, 'union admits; runtime enforces twitter date shape');
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'search', query: 'x', timeRange: 'last week' }), true);
   rejectsAtRuntime({ platform: 'twitter', action: 'search', query: 'x', timeRange: 'last week' });
-  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'search', query: 'x', sort: 'bogus' }), false);
-  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_community_posts', community: 'rust', sort: 'best' }), false);
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_feed', feedVariant: 'top' }), false);
-  // Unhonored fields are not advertised per action.
-  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile', user: 'ada', sort: 'top' }), false);
-  assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_post', postId: 'a', sort: 'hot' }), false);
-  assert.equal(Value.Check(schema, { platform: 'v2ex', action: 'get_topic', topic: '1', sort: 'hot' }), false);
-  assert.equal(Value.Check(schema, { platform: 'facebook', action: 'get_feed', feedVariant: 'top' }), false);
+  assert.equal(Value.Check(schema, { platform: 'twitter', action: 'get_profile', user: 'ada', sort: 'top' }), true);
+  rejectsAtRuntime({ platform: 'twitter', action: 'get_profile', user: 'ada', sort: 'top' });
   assert.equal(Value.Check(schema, { platform: 'reddit', action: 'get_thread', postId: 'a', includeReplies: 'yes' }), false);
 });
 
@@ -231,26 +187,22 @@ test('browser semanticAction accepts closed locators/verbs with nth-index and fi
   assert.equal(Value.Check(schema, { action: 'semanticAction', semanticAction: { locator: 'role', query: '', verb: 'click' } }), false);
 });
 
-test('README tool examples validate against registered schemas (no drift)', () => {
-  // github requires the request envelope; the flat form crashes execute.
+test('README tool examples validate against flat registered schemas (no drift)', () => {
   const github = buildGithubParameters();
-  assert.equal(Value.Check(github, { request: { action: 'releases', repository: 'owner/repo' } }), true);
-  assert.equal(Value.Check(github, { action: 'releases', repository: 'owner/repo' }), false);
-  // fetch read-query examples route via the 5-branch union (no mode/source).
-  // Single url+query enters the canonical fetch dispatcher (singular ranking
-  // branch), never the removed agentic_browse native symbol.
+  assert.equal(Value.Check(github, { action: 'releases', repository: 'owner/repo' }), true);
+  assert.equal(Value.Check(github, { request: { action: 'releases', repository: 'owner/repo' } }), false);
   const readQuery = buildFetchRoute({ url: 'https://example.com', query: 'pricing tiers' });
   assert.equal(readQuery.tool, 'fetch');
   const multiQuery = buildFetchRoute({ urls: ['https://example.com'], query: 'How does React concurrent rendering work?' });
   assert.equal(multiQuery.tool, 'fetch');
   assert.throws(() => buildFetchRoute({ mode: 'crawl', query: 'pricing tiers' } as never));
-  // Builder stays flat (request union); registration wraps it as {request}: pin the README forms.
   const graph = buildGraphParameters();
   assert.equal(Value.Check(graph, { action: 'query', language: 'dql', query: 'type:Organization name:"Acme"' }), true);
   assert.equal(Value.Check(graph, { action: 'schema', language: 'dql', view: 'types' }), true);
+  assert.equal(Value.Check(graph, { request: { action: 'schema', language: 'dql', view: 'types' } }), false);
 });
 
-test('browser parameters keep bounded action branches and reject unknown fields', () => {
+test('browser flat schema keeps nested bounds; runtime owns action requiredness', () => {
   const schema = buildBrowserParameters();
   assert.equal(Value.Check(schema, { action: 'navigate', url: 'https://example.com' }), true);
   assert.equal(Value.Check(schema, { action: 'click', selector: '#ok' }), true);
@@ -276,24 +228,21 @@ test('browser parameters keep bounded action branches and reject unknown fields'
   assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'open', url: 'https://example.com' }], maxSteps: 0 } }), false);
   assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'open', url: 'https://example.com' }], maxSteps: 21 } }), false);
   assert.equal(Value.Check(schema, { action: 'job', job: { steps: [{ kind: 'open', url: 'https://example.com' }], maxSteps: 1.5 } }), false);
-  assert.equal(Value.Check(schema, { action: 'navigate' }), false);
+  assert.equal(Value.Check(schema, { action: 'navigate' }), true);
+  assert.throws(() => validateBrowserRequest({ action: 'navigate' }), /url/i);
   assert.equal(Value.Check(schema, { action: 'navigate', url: 'https://example.com', bogus: 1 }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'navigate', url: 'https://example.com' } }), false);
   assert.equal(Value.Check(schema, { action: 'dance' }), false);
 });
 
-test('web_search research branches drop includeContent/recency/domains (no silent drop)', () => {
+test('web_search flat schema advertises filter fields while runtime owns research combinations', () => {
   const schema = buildWebSearchParameters();
-  // Plain branches keep the filters.
   assert.equal(Value.Check(schema, { query: 'a', includeContent: true }), true);
   assert.equal(Value.Check(schema, { query: 'a', recency: 'week' }), true);
   assert.equal(Value.Check(schema, { query: 'a', domains: ['example.com'] }), true);
-  // Research branches reject them: route/backend take query/source/limit/yearFrom/cursor only.
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', includeContent: true }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', recency: 'week' }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', domains: ['example.com'] }), false);
-  assert.equal(Value.Check(schema, { queries: ['a'], category: 'research', includeContent: true }), false);
-  assert.equal(Value.Check(schema, { query: 'a', category: 'research', source: 'arxiv', cursor: 'opaque', recency: 'week' }), false);
-  // yearFrom stays honored everywhere.
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', includeContent: true }), true);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', recency: 'week' }), true);
+  assert.equal(Value.Check(schema, { query: 'a', category: 'research', domains: ['example.com'] }), true);
   assert.equal(Value.Check(schema, { query: 'a', category: 'research', yearFrom: 2020 }), true);
 });
 
@@ -327,12 +276,12 @@ test('web_search route rejects research + includeContent/recency/domains loudly'
   assert.equal(routed.tool, 'web_search');
 });
 
-test('kg schema pins search language dql with integer limit bounds', () => {
+test('kg flat schema keeps search field bounds; runtime pins language and requiredness', () => {
   const schema = buildKgParameters();
   assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql' }), true);
-  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 10 }), true);
   assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 10, providers: ['diffbot'], maxProviders: 2 }), true);
-  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person' }), false);
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person' }), true);
+  assert.equal(validateKgSearch({ query: 'type:Person' }).ok, false);
   assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'sparql' }), false);
   assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 0 }), false);
   assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', limit: 51 }), false);
@@ -341,21 +290,18 @@ test('kg schema pins search language dql with integer limit bounds', () => {
   assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql', nativeOptions: {} }), false);
 });
 
-test('kg schema requires enhance type with selector and Person-only fields', () => {
+test('kg flat schema keeps enhance bounds; runtime owns type/selector compatibility', () => {
   const schema = buildKgParameters();
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada Lovelace' }), true);
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', employer: 'Analytical Engines' }), true);
-  assert.equal(
-    Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', fields: 'professional', maxEntities: 5, includeRelationships: true, includeEvidence: false, confidenceThreshold: 0.8 }),
-    true,
-  );
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', name: 'Analytical Engines' }), true);
-  assert.equal(Value.Check(schema, { action: 'enhance', name: 'Ada' }), false);
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person' }), true, 'all selectors optional at schema; >=1 enforced at runtime');
+  assert.equal(Value.Check(schema, { action: 'enhance', name: 'Ada' }), true);
+  assert.equal(validateKgEnhance({ name: 'Ada' }).ok, false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person' }), true);
+  assert.equal(validateKgEnhance({ type: 'Person' }).ok, false);
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'person', name: 'Ada' }), false);
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', employer: 'Analytical Engines' }), false);
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', title: 'CEO', name: 'Ada' }), false);
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', school: 'MIT', name: 'Ada' }), false);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', employer: 'Analytical Engines' }), true);
+  assert.equal(validateKgEnhance({ type: 'Organization', employer: 'Analytical Engines' }).ok, false);
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', maxEntities: 0 }), false);
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', maxEntities: 11 }), false);
   assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada', maxEntities: 2.5 }), false);
@@ -387,28 +333,15 @@ test('kg schema-accepted requests pass runtime validators (no drift)', () => {
   assert.equal(validateKgSearch({ query: ' ', language: 'dql' }).ok, false);
 });
 
-test('kg schema exposes exactly 3 canonical actions with Person/Organization enhance parity', () => {
+test('kg flat schema exposes exactly the canonical actions and rejects the legacy envelope', () => {
   const schema = buildKgParameters();
-  const branches = (schema as unknown as { anyOf: Array<{ properties: Record<string, { const?: string }> }> }).anyOf;
-  assert.equal(branches.length, 4, '1 search + 2 enhance + 1 analyze_text union members');
-  assert.deepEqual(
-    [...new Set(branches.map((branch) => branch.properties?.action?.const))].sort(),
-    ['analyze_text', 'enhance', 'search'],
-    'exactly 3 canonical actions',
-  );
-  // Positive parity: every schema-accepted enhance payload passes the runtime validator.
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', employer: 'Analytical Engines', title: 'CEO' }), true);
-  assert.equal(validateKgEnhance({ type: 'Person', employer: 'Analytical Engines', title: 'CEO' }).ok, true);
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', name: 'Analytical Engines' }), true);
-  assert.equal(validateKgEnhance({ type: 'Organization', name: 'Analytical Engines' }).ok, true);
-  // No-selector enhance admits at schema (>=1 documented) but fails runtime validation.
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person' }), true);
-  assert.equal(validateKgEnhance({ type: 'Person' }).ok, false);
-  // Person-only selectors never appear on the Organization branch.
-  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Organization', employer: 'X', name: 'Y' }), false);
-  assert.equal(validateKgEnhance({ type: 'Organization', employer: 'X', name: 'Y' }).ok, false);
-  // analyze_text parity.
+  assert.equal(Value.Check(schema, { action: 'search', query: 'type:Person', language: 'dql' }), true);
+  assert.equal(Value.Check(schema, { action: 'enhance', type: 'Person', name: 'Ada' }), true);
   assert.equal(Value.Check(schema, { action: 'analyze_text', text: 'Ada built it.' }), true);
+  assert.equal(Value.Check(schema, { action: 'nope' }), false);
+  assert.equal(Value.Check(schema, { request: { action: 'search', query: 'type:Person', language: 'dql' } }), false);
+  assert.equal(validateKgEnhance({ type: 'Person', employer: 'Analytical Engines', title: 'CEO' }).ok, true);
+  assert.equal(validateKgEnhance({ type: 'Organization', employer: 'X', name: 'Y' }).ok, false);
   assert.equal(validateKgNlp({ text: 'Ada built it.' }).ok, true);
 });
 

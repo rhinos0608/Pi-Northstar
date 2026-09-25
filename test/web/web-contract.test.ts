@@ -310,43 +310,6 @@ test('plan ordering: complete before degraded, tier then preference', () => {
   );
 });
 
-test('web contract: mode omitted means agentMode false', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  const { request } = mod.validateWebRequest({ action: 'search', query: 'q' });
-  assert.equal(request.agentMode, false);
-});
-
-test('web contract: mode agent accepted', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  const { request } = mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent' });
-  assert.equal(request.agentMode, true);
-});
-
-test('web contract: mode other values reject invalid_request', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  for (const mode of ['auto', '', 1, true, null]) {
-    assert.throws(
-      () => mod.validateWebRequest({ action: 'search', query: 'q', mode }),
-      (err: unknown) => (err as { code?: string }).code === 'invalid_request',
-      `mode ${String(mode)} must reject`,
-    );
-  }
-});
-
-test('web contract: agent mode rejects knowledge and research categories', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  assert.throws(
-    () => mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', knowledge: { entities: true } }),
-    (err: unknown) => (err as { code?: string }).code === 'invalid_request',
-  );
-  for (const category of ['research', 'academic']) {
-    assert.throws(
-      () => mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', category }),
-      (err: unknown) => (err as { code?: string }).code === 'invalid_request',
-    );
-  }
-});
-
 test('video is a provider-neutral discovery category capped at the plain limit', async () => {
   const mod = await import('../../src/web/web-contract.js');
   assert.ok((mod.SEARCH_CATEGORY_NAMES as readonly string[]).includes('video'));
@@ -365,41 +328,3 @@ test('fetch tool maps to read without query-path crawl inference', async () => {
   assert.equal(mod.resolveWebActionForTool('web_search', {}), 'search');
 });
 
-test('web contract: depth absent means balanced default on agent mode', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  const { request } = mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent' });
-  assert.equal(request.agentMode, true);
-  assert.equal(request.depth, 'balanced');
-});
-
-test('web contract: depth accepts balanced and deep on agent mode', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  for (const depth of ['balanced', 'deep'] as const) {
-    const { request } = mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', depth });
-    assert.equal(request.depth, depth);
-  }
-});
-
-test('web contract: depth rejects unknown values without echo', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  for (const depth of ['ultra', '', 2, null, {}]) {
-    const err = webError(
-      'invalid_request',
-      () => mod.validateWebRequest({ action: 'search', query: 'q', mode: 'agent', depth }),
-    );
-    assert.equal(err.message, 'depth must be "balanced" or "deep"');
-  }
-});
-
-test('web contract: depth without agent mode rejects fail-closed', async () => {
-  const mod = await import('../../src/web/web-contract.js');
-  // Omitted mode, non-search actions, batch queries: depth never silently ignored.
-  webError('invalid_request', () => mod.validateWebRequest({ action: 'search', query: 'q', depth: 'deep' }));
-  webError('invalid_request', () =>
-    mod.validateWebRequest({ action: 'search', queries: ['a', 'b'], depth: 'balanced' }),
-  );
-  const err = webError('invalid_request', () =>
-    mod.validateWebRequest({ action: 'read', url: 'https://example.com', depth: 'deep' }),
-  );
-  assert.equal(err.message, 'depth is only supported with mode "agent"');
-});

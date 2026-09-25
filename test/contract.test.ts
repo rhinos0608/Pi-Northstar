@@ -11,7 +11,7 @@ const DIFFBOT_TOOL_NAMES = [
 ] as const;
 
 const CONFIGURED_TOOL_NAMES = [
-  'web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent_poll',
+  'web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent',
 ] as const;
 
 const EXPECTED_COMMAND_NAMES = [

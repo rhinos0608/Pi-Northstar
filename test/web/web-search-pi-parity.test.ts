@@ -120,15 +120,15 @@ test('pi batch plain search fuses in deterministic input order', async () => {
   assert.equal((client as unknown as { calls: unknown[] }).calls.length, 0, 'batch must not reach the MCP child');
 });
 
-test('pi agent routing still returns the parent-owned job pointer', async () => {
+test('pi web_search rejects the removed agent mode before dispatch', async () => {
   const client = stubClient(() => ({ ok: true, marker: 'mcp-child' }));
   const execute = createWebSearchExecute(client, ENV, new WebSearchLedger());
-  const result = await execute('call-agent-1', { query: 'agent probe' , mode: 'agent' }, undefined);
-  const details = result.details as { action: string; jobId: string };
-  assert.equal(details.action, 'agent');
-  assert.ok(typeof details.jobId === 'string' && details.jobId.length > 0, 'agent pointer carries a jobId');
-  assert.equal(fetchCalls, 0, 'agent route dispatches no provider fetch');
-  assert.equal((client as unknown as { calls: unknown[] }).calls.length, 0, 'agent route never reaches the MCP child');
+  await assert.rejects(
+    () => execute('call-agent-1', { query: 'agent probe', mode: 'agent' }, undefined),
+    /no longer supports agent mode or depth/,
+  );
+  assert.equal(fetchCalls, 0);
+  assert.equal((client as unknown as { calls: unknown[] }).calls.length, 0);
 });
 
 test('pi research routing executes canonical handler without MCP dispatch', async () => {

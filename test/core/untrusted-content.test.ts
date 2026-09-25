@@ -12,7 +12,7 @@ import {
 } from '../../src/core/untrusted-content.js';
 
 test('external tool set matches the registered external-content tools', () => {
-  assert.deepEqual([...EXTERNAL_TOOL_NAMES].sort(), ['agent_poll', 'browser', 'desktop', 'fetch', 'github', 'graph', 'kg', 'social', 'web_search']);
+  assert.deepEqual([...EXTERNAL_TOOL_NAMES].sort(), ['agent', 'browser', 'desktop', 'fetch', 'github', 'graph', 'kg', 'social', 'web_search']);
   assert.ok(isExternalToolName('web_search'));
   assert.ok(isExternalToolName('browser'));
   assert.ok(isExternalToolName('kg'));

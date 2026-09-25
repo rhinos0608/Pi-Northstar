@@ -70,10 +70,13 @@ test('request action union and no-op sensitive classification', () => {
   assert.equal(isSensitiveAction('text'), false);
 });
 
-test('request accepts semanticAction and batch actions', () => {
-  assert.equal(validateBrowserRequest({ action: 'semanticAction' }).action, 'semanticAction');
-  assert.equal(validateBrowserRequest({ action: 'job' }).action, 'job');
-  assert.equal(validateBrowserRequest({ action: 'batch' }).action, 'batch');
+test('request accepts semanticAction/job/batch only with their required payloads', () => {
+  assert.throws(() => validateBrowserRequest({ action: 'semanticAction' }), /semanticAction is required/);
+  assert.throws(() => validateBrowserRequest({ action: 'job' }), /job is required/);
+  assert.throws(() => validateBrowserRequest({ action: 'batch' }), /batch is required/);
+  assert.equal(validateBrowserRequest({ action: 'semanticAction', semanticAction: { locator: 'role', query: 'button', verb: 'click' } }).action, 'semanticAction');
+  assert.equal(validateBrowserRequest({ action: 'job', job: { steps: [{ kind: 'snapshot' }] } }).action, 'job');
+  assert.equal(validateBrowserRequest({ action: 'batch', batch: { commands: [{ args: ['snapshot'] }] } }).action, 'batch');
 });
 
 test('browser request envelope rejects unknown, cross-action, and wrong-type fields', () => {

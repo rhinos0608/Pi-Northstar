@@ -531,9 +531,9 @@ test('media channels are internal-acquisition with no public tool surface', asyn
   }
 });
 
-test('PublicToolName is the 8-tool set plus agent_poll, media removed', async () => {
+test('PublicToolName is the 8-tool set plus agent, media removed', async () => {
   const mod = await import('../src/capabilities.js');
-  const names: readonly string[] = ['web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent_poll'];
+  const names: readonly string[] = ['web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent'];
   assert.equal(names.length, 9);
   assert.ok(!names.includes('media'));
   assert.equal(mod.MAX_PUBLIC_TOOLS, 9);

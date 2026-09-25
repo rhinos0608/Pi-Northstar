@@ -132,7 +132,6 @@ test('searchLedgerOptions carries safe filters only, never cursor or bodies', ()
     recency: 'week',
     domains: ['example.com', '-blocked.com'],
     yearFrom: 2020,
-    mode: 'agent',
     category: 'news',
     knowledge: { entities: true, facts: false },
     cursor: 'opaque-continuation-token',
@@ -143,7 +142,6 @@ test('searchLedgerOptions carries safe filters only, never cursor or bodies', ()
     recency: 'week',
     domains: ['example.com', '-blocked.com'],
     yearFrom: 2020,
-    mode: 'agent',
     category: 'news',
     knowledge: { entities: true },
   });

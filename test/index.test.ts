@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildBrowseArgs, buildSearchRoute, buildFetchRoute, reachStatusCommandArgs, sessionFetchProbeDeps } from '../src/index.js';
 import Value from 'typebox/value';
-import { CHANNEL_CAPABILITIES, REACH_FAMILIES, canonicalActionsFor, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
+import { CHANNEL_CAPABILITIES, REACH_FAMILIES, socialPlatforms as registrySocialPlatforms } from '../src/capabilities.js';
 
 // Schema tests exercise explicitly enabled native tools; zero-default behavior is covered in contract.test.ts.
-process.env.PI_SEARCH_NATIVE_TOOLS = 'web_search,fetch,github,social,kg,graph,browser,desktop,agent_poll';
+process.env.PI_SEARCH_NATIVE_TOOLS = 'web_search,fetch,github,social,kg,graph,browser,desktop,agent';
 
 function registryActionEnum(family: string): string[] {
   return [...new Set(
@@ -13,14 +13,6 @@ function registryActionEnum(family: string): string[] {
       .filter((channel) => channel.family === family && channel.availability === 'available')
       .flatMap((channel) => channel.actions.map((action) => action.action)),
   )].sort();
-}
-
-function requestBranches(parameters: Record<string, any>): Record<string, any>[] {
-  return parameters.properties?.request?.anyOf ?? parameters.properties?.request?.oneOf ?? parameters.anyOf ?? parameters.oneOf ?? [];
-}
-
-function branchProperties(parameters: Record<string, any>): Record<string, any> {
-  return Object.assign({}, ...requestBranches(parameters).map((branch) => branch.properties ?? {}));
 }
 
 test('buildBrowseArgs uses supported agentic_browse read action', () => {
@@ -39,12 +31,12 @@ test('buildBrowseArgs preserves explicit maxChars', () => {
   });
 });
 
-test('media tool removed; agent_poll registered in the freed slot', async () => {
+test('media tool removed; agent registered in the freed slot', async () => {
   const defs = await captureAllTools();
   assert.ok(!defs.media, 'media tool must not be registered');
-  assert.ok(defs.agent_poll, 'agent_poll must be registered');
-  const params = defs.agent_poll!.parameters as { properties?: Record<string, unknown> };
-  assert.ok(params.properties?.jobId, 'agent_poll must expose jobId');
+  assert.ok(defs.agent, 'agent must be registered');
+  const params = defs.agent!.parameters as { properties?: Record<string, unknown> };
+  assert.ok(params.properties?.jobId, 'agent must expose jobId');
 });
 
 test('buildFetchRoute empty params throw union error', () => {
@@ -158,33 +150,28 @@ test('buildFetchRoute rejects legacy crawl shapes and filesystem paths', () => {
   assert.throws(() => buildFetchRoute({ url: '/etc/passwd' } as never), /asset URL/);
 });
 
-test('fetch schema enforces the 5-branch union at validation', async () => {
+test('fetch schema is flat; field bounds stay in schema and combinations stay runtime-owned', async () => {
   const defs = await captureAllTools();
   const schema = defs.fetch!.parameters as Parameters<typeof Value.Check>[0];
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a' } }), true);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', query: 'q', topK: 3 } }), true);
-  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a'] } }), true);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'readable', query: 'q', topK: 3, maxChars: 1000 } }), true);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'raw' } }), true);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'raw', query: 'q' } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'raw', prompt: 'q?' } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer' } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer', prompt: 'what is this?' } }), true);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer', prompt: 'q?', topK: 3 } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', mode: 'answer', prompt: 'q?', maxChars: 1000 } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', prompt: 'q?' } }), false);
-  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a'], mode: 'answer', prompt: 'q?' } }), true);
-  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a'], mode: 'answer', prompt: 'q?', query: 'x' } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', urls: ['https://example.com/b'] } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', siteMap: true } }), true);
-  assert.equal(Value.Check(schema, { request: { responseId: 'r1' } }), true);
-  assert.equal(Value.Check(schema, { request: { responseId: 'r1', claims: ['c'] } }), true);
-  assert.equal(Value.Check(schema, { request: { mode: 'read', url: 'https://example.com/a' } }), false);
-  assert.equal(Value.Check(schema, { request: { mode: 'crawl', source: { type: 'url', url: 'https://example.com' }, query: 'q' } }), false);
-  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a', query: 'q', extra: 1 } }), false);
-  assert.equal(Value.Check(schema, { request: { url: '/tmp/operator-clip.mp4' } }), false, 'model-facing schema must reject local filesystem paths');
-  assert.equal(Value.Check(schema, { request: { url: 'file:///tmp/operator-clip.mp4' } }), false);
-  assert.equal(Value.Check(schema, { request: { urls: ['https://example.com/a', '/tmp/clip.mp4'] } }), false);
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a' }), true);
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a', query: 'q', topK: 3 }), true);
+  assert.equal(Value.Check(schema, { urls: ['https://example.com/a'] }), true);
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a', mode: 'raw', query: 'q' }), true);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/a', mode: 'raw', query: 'q' } as never));
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a', mode: 'answer' }), true);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/a', mode: 'answer' } as never), /prompt/);
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a', mode: 'answer', prompt: 'what is this?' }), true);
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a', urls: ['https://example.com/b'] }), true);
+  assert.throws(() => buildFetchRoute({ url: 'https://example.com/a', urls: ['https://example.com/b'] } as never));
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a', siteMap: true }), true);
+  assert.equal(Value.Check(schema, { responseId: 'r1' }), true);
+  assert.equal(Value.Check(schema, { responseId: 'r1', claims: ['c'] }), true);
+  assert.equal(Value.Check(schema, { mode: 'read', url: 'https://example.com/a' }), false);
+  assert.equal(Value.Check(schema, { url: 'https://example.com/a', query: 'q', extra: 1 }), false);
+  assert.equal(Value.Check(schema, { url: '/tmp/operator-clip.mp4' }), false, 'model-facing schema must reject local filesystem paths');
+  assert.equal(Value.Check(schema, { url: 'file:///tmp/operator-clip.mp4' }), false);
+  assert.equal(Value.Check(schema, { urls: ['https://example.com/a', '/tmp/clip.mp4'] }), false);
+  assert.equal(Value.Check(schema, { request: { url: 'https://example.com/a' } }), false);
 });
 
 
@@ -313,104 +300,47 @@ test('buildFetchRoute claim-check names offending slice fields', () => {
   assert.throws(() => buildFetchRoute({ responseId: 'r1', claims: ['c'], findText: 'x' } as never), /rejects 'findText'/);
 });
 
-type WebSearchBranch = { properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string };
-type WebSearchSchema = { properties?: { request?: { anyOf?: WebSearchBranch[] } }; anyOf?: WebSearchBranch[]; description?: string };
+type WebSearchField = {
+  maximum?: number;
+  minimum?: number;
+  description?: string;
+  properties?: Record<string, unknown>;
+};
+type WebSearchSchema = {
+  type?: string;
+  properties?: Record<string, WebSearchField>;
+  description?: string;
+};
 
-async function captureWebSearchUnion(): Promise<{ schema: WebSearchSchema; branches: WebSearchBranch[] }> {
+test('web_search schema is a flat top-level object with no request envelope', async () => {
   const defs = await captureAllTools();
-  const parameters = defs.web_search!.parameters as WebSearchSchema;
-  const schema = (parameters.properties?.request ?? parameters) as WebSearchSchema;
-  return { schema, branches: requestBranches(defs.web_search!.parameters) as WebSearchBranch[] };
-}
-
-function findWebSearchBranch(branches: WebSearchBranch[], kind: 'single' | 'batch' | 'agent'): WebSearchBranch | undefined {
-  if (kind === 'batch') return branches.find((branch) => branch.properties?.queries);
-  if (kind === 'agent') return branches.find((branch) => branch.properties?.mode);
-  return branches.find((branch) => branch.properties?.query && !branch.properties?.queries && !branch.properties?.mode);
-}
-
-test('web_search schema union branches', async () => {
-  const { schema, branches } = await captureWebSearchUnion();
-  // Strict union: single/batch plain (limit max 20) + single research
-  // (category research, limit max 30) + research continuation
-  // {query, category, source, cursor} + agent {query, mode:"agent"}.
-  // No batch-research branch: the router rejects multi-query research.
-  assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
-  assert.ok(/Exactly one of query/i.test(schema.description ?? ''), 'union must state the query/queries XOR');
-  const branchCases = [
-    { kind: 'single' as const, missingMessage: 'single branch must be present' },
-    { kind: 'batch' as const, missingMessage: 'batch branch must be present' },
-    { kind: 'agent' as const, missingMessage: 'agent branch must be present' },
-  ];
-  for (const { kind, missingMessage } of branchCases) {
-    assert.ok(findWebSearchBranch(branches, kind), missingMessage);
+  const schema = defs.web_search!.parameters as WebSearchSchema;
+  const props = schema.properties ?? {};
+  assert.equal(schema.type, 'object');
+  assert.ok(/Exactly one of query or queries/i.test(schema.description ?? ''));
+  for (const field of ['query', 'queries', 'limit', 'category', 'source', 'cursor', 'knowledge']) {
+    assert.ok(field in props, `web_search must expose flat field ${field}`);
   }
-  const single = findWebSearchBranch(branches, 'single')!;
-  const agent = findWebSearchBranch(branches, 'agent')!;
-  assert.ok(agent.properties.knowledge === undefined, 'agent branch must carry no knowledge');
-  assert.ok(single.properties.knowledge, 'single branch must carry knowledge');
-  const singles = branches.filter((branch) => branch.properties?.query && !branch.properties?.queries && !branch.properties?.mode && !branch.properties?.cursor);
-  assert.equal(singles.length, 2, 'single must branch into plain and research caps (continuation carries cursor)');
-  const researchSingle = singles.find((branch) => (branch.properties.category as { const?: string } | undefined)?.const === 'research');
-  assert.ok(researchSingle, 'research single branch must pin category to research');
-  assert.equal(researchSingle!.properties.limit?.maximum, 30);
-  assert.equal(single.properties.limit?.maximum, 20);
+  assert.ok(!('request' in props), 'legacy request envelope must be absent');
+  assert.ok(!('mode' in props), 'legacy agent mode must be absent');
+  assert.ok(!('depth' in props), 'agent depth belongs to the agent tool');
 });
 
-test('web_search schema research-visible limit cap', async () => {
-  const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
-  process.env.PI_SEARCH_BOOTSTRAP = 'off';
-  let captured: { name: string; parameters: unknown } | undefined;
-  const pi = {
-    on: () => {},
-    registerTool: (def: { name: string; parameters: unknown }) => {
-      if (def.name === 'web_search') captured = { name: def.name, parameters: def.parameters };
-    },
-    registerCommand: () => {},
-  };
-  try {
-    const mod = await import('../src/index.js');
-    (mod.default as (pi: unknown) => void)(pi);
-  } finally {
-    if (previousBootstrap === undefined) delete process.env.PI_SEARCH_BOOTSTRAP;
-    else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
-  }
-  assert.ok(captured, 'web_search tool must be registered');
-  const schema = captured!.parameters as {
-    properties?: { request?: { anyOf?: Array<{ properties: Record<string, { maximum?: number; minimum?: number; description?: string }>; description?: string }> } };
-    description?: string;
-  };
-  const branches = schema.properties?.request?.anyOf ?? [];
-  assert.equal(branches.length, 5);
-  for (const branch of branches) {
-    const isAgent = (branch.properties.mode as { const?: string } | undefined)?.const === 'agent';
-    if (isAgent) {
-      // Agent jobs take only query + mode + optional depth. Search filters such
-      // as limit/yearFrom are rejected by the route because the controller
-      // cannot honor them end to end; the public schema must not advertise them.
-      assert.equal(branch.properties.limit, undefined);
-      assert.equal(branch.properties.yearFrom, undefined);
-      continue;
-    }
-    // Per-category caps are schema-visible: 20 on plain branches and 30 on
-    // research-pinned branches, so out-of-range rejects at validation.
-    const isResearch = (branch.properties.category as { const?: string } | undefined)?.const === 'research';
-    assert.equal(branch.properties.limit?.maximum, isResearch ? 30 : 20, 'web_search limit cap must match the branch category');
-    assert.equal(branch.properties.limit?.minimum, 1);
-  }
+test('web_search flat schema advertises shared bounds and documents category caps', async () => {
+  const defs = await captureAllTools();
+  const props = (defs.web_search!.parameters as WebSearchSchema).properties ?? {};
+  assert.equal(props.limit?.minimum, 1);
+  assert.equal(props.limit?.maximum, 30);
+  assert.ok(/Plain web search: 1\.\.20/.test(props.limit?.description ?? ''));
+  assert.ok(/research.*1\.\.30/i.test(props.limit?.description ?? ''));
 });
 
-test('web_search schema knowledge placement', async () => {
-  const { branches } = await captureWebSearchUnion();
-  const knowledgeCases = [
-    { kind: 'agent' as const, present: false, message: 'agent branch must carry no knowledge' },
-    { kind: 'single' as const, present: true, message: 'single branch must carry knowledge' },
-  ];
-  for (const { kind, present, message } of knowledgeCases) {
-    const branch = findWebSearchBranch(branches, kind);
-    assert.ok(branch, `${kind} branch must be present`);
-    assert.equal(branch!.properties.knowledge !== undefined, present, message);
-  }
+test('web_search flat schema exposes knowledge but no agent fields', async () => {
+  const defs = await captureAllTools();
+  const props = (defs.web_search!.parameters as WebSearchSchema).properties ?? {};
+  assert.ok(props.knowledge, 'web_search must expose knowledge composition');
+  assert.ok(!props.mode, 'web_search must not expose mode');
+  assert.ok(!props.depth, 'web_search must not expose agent depth');
 });
 
 
@@ -493,15 +423,15 @@ test('browser tool registration: no maxChars param, browse action rejected', asy
   assert.ok(resultText.includes('Unsupported') || resultText.includes('error'), 'browse action should be rejected');
 });
 
-test('social strict schema stays canonical-only', async () => {
+test('social flat schema stays canonical-only', async () => {
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
 
-  const defs: Record<string, { parameters: Record<string, unknown> }> = {};
+  const defs: Record<string, { parameters: Record<string, any> }> = {};
   const pi = {
     on: () => {},
     registerTool: (def: { name: string; parameters: unknown }) => {
-      defs[def.name as string] = { parameters: def.parameters as Record<string, unknown> };
+      defs[def.name as string] = { parameters: def.parameters as Record<string, any> };
     },
     registerCommand: () => {},
   };
@@ -514,29 +444,15 @@ test('social strict schema stays canonical-only', async () => {
     else process.env.PI_SEARCH_BOOTSTRAP = previousBootstrap;
   }
 
-  assert.ok(defs.social, 'social tool must be registered');
-
-  // Strict social schema ({request: branch union}): one branch per
-  // advertised action with per-action platform enum.
-  const socialBranches = requestBranches(defs.social.parameters);
-  assert.ok(socialBranches.length > 0, 'social schema must expose request branches');
-  const socialProps = branchProperties(defs.social.parameters);
-  for (const key of ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']) assert.ok(key in socialProps, `social schema must expose ${key}`);
-  const socialActions = [...new Set(socialBranches.map((branch) => branch.properties?.action?.const).filter(Boolean))];
-  assert.deepEqual([...new Set(socialActions)].sort(), registryActionEnum('social'));
-  const advertisedPlatformsFor = (action: string): string[] =>
-    CHANNEL_CAPABILITIES
-      .filter((channel) => channel.family === 'social' && channel.availability === 'available' && canonicalActionsFor(channel.id).includes(action))
-      .map((channel) => channel.id)
-      .sort();
-  for (const action of socialActions) {
-    const actionBranch = socialBranches.find((entry) => entry.properties?.action?.const === action);
-    assert.ok(actionBranch, `social schema must expose branch for action ${action}`);
-    assert.deepEqual([...(actionBranch.properties?.platform?.enum ?? [])].sort(), advertisedPlatformsFor(action as string), `platform enum for action ${action} must equal advertised platforms`);
+  const params = defs.social?.parameters;
+  assert.ok(params, 'social tool must be registered');
+  assert.equal(params.properties?.request, undefined, 'social must not expose a request envelope');
+  for (const key of ['action', 'commentId', 'community', 'cursor', 'limit', 'platform', 'postId', 'query', 'topic', 'url', 'user']) {
+    assert.ok(key in (params.properties ?? {}), `social schema must expose ${key}`);
   }
-  const unionPlatforms = [...new Set(socialBranches.flatMap((entry) => entry.properties?.platform?.enum ?? []))];
-  assert.deepEqual([...unionPlatforms].sort(), [...registrySocialPlatforms()].sort());
-  // Canonical-only contract: legacy aliases are never advertised.
+  const socialActions = [...(params.properties?.action?.enum ?? [])].sort();
+  assert.deepEqual(socialActions, registryActionEnum('social'));
+  assert.deepEqual([...(params.properties?.platform?.enum ?? [])].sort(), [...registrySocialPlatforms()].sort());
   for (const legacy of ['tweet', 'topic', 'note', 'hot', 'popular', 'post', 'explore', 'user']) {
     assert.equal(socialActions.includes(legacy), false, `social action enum must not advertise legacy alias ${legacy}`);
   }
@@ -546,7 +462,7 @@ test('social schema rejects mutation verbs and legacy selectors', async () => {
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
 
-  const defs: Record<string, { parameters: Record<string, unknown> }> = {};
+  const defs: Record<string, { parameters: Record<string, any> }> = {};
   const pi = {
     on: () => {},
     registerTool: (def: { name: string; parameters: unknown }) => {
@@ -564,24 +480,23 @@ test('social schema rejects mutation verbs and legacy selectors', async () => {
   }
 
   assert.ok(defs.social, 'social tool must be registered');
-  const socialBranches = requestBranches(defs.social.parameters);
-  const socialActions = [...new Set(socialBranches.map((branch) => branch.properties?.action?.const).filter(Boolean))];
+  const socialProps = defs.social.parameters.properties ?? {};
+  const socialActions = socialProps.action?.enum ?? [];
   // Mutation verbs never appear in the social action schema.
   for (const mutation of ['like', 'follow', 'retweet']) {
     assert.equal(socialActions.includes(mutation), false, `social action enum must reject ${mutation}`);
   }
   // Canonical-only selectors: legacy spellings and generic bags removed.
-  const socialPropBag = branchProperties(defs.social.parameters);
   for (const legacySelector of ['id', 'username', 'subreddit', 'node', 'filter']) {
-    assert.equal(legacySelector in socialPropBag, false, `social schema must not advertise legacy selector ${legacySelector}`);
+    assert.equal(legacySelector in socialProps, false, `social schema must not advertise legacy selector ${legacySelector}`);
   }
 });
 
-test('media tool removed; agent_poll registered with jobId schema', async () => {
+test('media tool removed; agent registered with jobId schema', async () => {
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
 
-  const defs: Record<string, { parameters: Record<string, unknown> }> = {};
+  const defs: Record<string, { parameters: Record<string, any> }> = {};
   const pi = {
     on: () => {},
     registerTool: (def: { name: string; parameters: unknown }) => {
@@ -599,13 +514,13 @@ test('media tool removed; agent_poll registered with jobId schema', async () => 
   }
 
   assert.ok(!defs.media, 'media tool must not be registered');
-  const agentPoll = defs.agent_poll;
-  assert.ok(agentPoll, 'agent_poll must be registered');
-  const pollProps = Object.keys((agentPoll.parameters.properties ?? {})).sort();
-  assert.deepEqual(pollProps, ['jobId']);
-  const jobIdSchema = (agentPoll.parameters.properties as Record<string, Record<string, unknown>>).jobId;
-  assert.ok(jobIdSchema, 'agent_poll jobId schema must exist');
-  assert.equal(jobIdSchema.maxLength, 128);
+  const agent = defs.agent;
+  assert.ok(agent, 'agent must be registered');
+  const agentProps = Object.keys((agent.parameters.properties ?? {})).sort();
+  assert.deepEqual(agentProps, ['depth', 'jobId', 'query']);
+  const props = agent.parameters.properties as Record<string, Record<string, unknown>>;
+  assert.equal(props.jobId?.maxLength, 128);
+  assert.equal(props.query?.maxLength, 300);
 });
 
 
@@ -667,7 +582,7 @@ test('tool_result hook leaves non-external tools untouched and fences external e
 
 test('tool_result hook covers every external tool name', async () => {
   const handlers = await captureHooks();
-  for (const name of ['web_search', 'fetch', 'github', 'social', 'agent_poll', 'browser']) {
+  for (const name of ['web_search', 'fetch', 'github', 'social', 'agent', 'browser']) {
     const result = handlers.tool_result!({
       toolName: name,
       content: [{ type: 'text', text: 'plain' }],
@@ -696,8 +611,8 @@ test('before_agent_start appends policy once per call and says framing cannot au
 
 // ── Browser schema parity: compact, semanticAction, job, batch ──
 
-async function captureBrowserTool(): Promise<{ name: string; parameters: Record<string, unknown> } | undefined> {
-  let captured: { name: string; parameters: Record<string, unknown> } | undefined;
+async function captureBrowserTool(): Promise<{ name: string; parameters: Record<string, any> } | undefined> {
+  let captured: { name: string; parameters: Record<string, any> } | undefined;
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   const previousNativeTools = process.env.PI_SEARCH_NATIVE_TOOLS;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
@@ -705,7 +620,7 @@ async function captureBrowserTool(): Promise<{ name: string; parameters: Record<
   const pi = {
     on: () => {},
     registerTool: (def: { name: string; parameters: unknown }) => {
-      if (def.name === 'browser') captured = { name: def.name, parameters: def.parameters as Record<string, unknown> };
+      if (def.name === 'browser') captured = { name: def.name, parameters: def.parameters as Record<string, any> };
     },
     registerCommand: () => {},
   };
@@ -722,52 +637,51 @@ async function captureBrowserTool(): Promise<{ name: string; parameters: Record<
   return captured;
 }
 
-test('browser schema exposes compact, semanticAction, job, batch fields', async () => {
+test('browser flat schema exposes observe/action fields directly', async () => {
   const tool = await captureBrowserTool();
   assert.ok(tool, 'browser tool must be registered');
-  const observe = requestBranches(tool!.parameters).find((b) => b.properties?.op?.const === 'observe');
-  assert.ok(observe, 'observe branch must be present');
-  assert.deepEqual(observe.properties?.what?.enum ?? observe.properties?.what?.anyOf?.map((v: any) => v.const), ['status','tabs','get_url','get_title','text','html','snapshot','screenshot']);
-  assert.ok(observe.properties?.compact, 'observe compact field must be present');
-  assert.ok(observe.properties?.selector, 'observe selector field must be present');
-  assert.ok(requestBranches(tool!.parameters).some((b) => b.properties?.action?.const === 'semanticAction'), 'semanticAction branch must be present');
-  assert.ok(requestBranches(tool!.parameters).some((b) => b.properties?.action?.const === 'job'), 'job branch must be present');
-  assert.ok(requestBranches(tool!.parameters).some((b) => b.properties?.action?.const === 'batch'), 'batch branch must be present');
+  const props = tool!.parameters.properties ?? {};
+  assert.equal(props.request, undefined, 'browser must not expose a request envelope');
+  assert.deepEqual(props.what?.enum, ['status','tabs','get_url','get_title','text','html','snapshot','screenshot']);
+  for (const key of ['op', 'what', 'compact', 'selector', 'action', 'semanticAction', 'job', 'batch']) {
+    assert.ok(props[key], `browser schema must expose ${key}`);
+  }
+  const actions = props.action?.enum ?? [];
+  for (const action of ['semanticAction', 'job', 'batch']) assert.ok(actions.includes(action), `browser action enum must include ${action}`);
 });
 
 test('browser schema batch maxCommands capped at 20, not 100', async () => {
   const tool = await captureBrowserTool();
-  const batch = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'batch')!.properties.batch as { properties: Record<string, unknown> };
+  const batch = tool!.parameters.properties?.batch as { properties: Record<string, unknown> };
   const maxCommands = batch.properties.maxCommands as { maximum: number };
   assert.equal(maxCommands.maximum, 20, 'batch maxCommands must cap at 20');
 });
 
 test('browser schema job maxSteps capped at 20, not 100', async () => {
   const tool = await captureBrowserTool();
-  const job = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'job')!.properties.job as { properties: Record<string, unknown> };
+  const job = tool!.parameters.properties?.job as { properties: Record<string, unknown> };
   const maxSteps = job.properties.maxSteps as { maximum: number };
   assert.equal(maxSteps.maximum, 20, 'job maxSteps must cap at 20');
 });
 
 test('browser schema batch description states sensitive gate and loopback restriction', async () => {
   const tool = await captureBrowserTool();
-  const batch = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'batch');
-  assert.ok(batch, 'batch branch must be present');
-  assert.ok(/Sensitive|sensitive|gated/i.test(JSON.stringify(batch)) || /sensitive/i.test((await captureAllTools()).browser?.description ?? ''), 'batch must mention sensitive gate');
-  assert.ok(/loopback/i.test((await captureAllTools()).browser?.description ?? ''), 'batch must mention loopback restriction');
+  assert.ok(tool!.parameters.properties?.batch, 'batch field must be present');
+  const description = (await captureAllTools()).browser?.description ?? '';
+  assert.ok(/sensitive/i.test(description), 'batch must mention sensitive gate');
+  assert.ok(/loopback/i.test(description), 'batch must mention loopback restriction');
 });
 
 test('browser schema job description states loopback restriction', async () => {
   const tool = await captureBrowserTool();
-  const job = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'job');
-  assert.ok(job, 'job branch must be present');
+  assert.ok(tool!.parameters.properties?.job, 'job field must be present');
   assert.ok(/loopback/i.test((await captureAllTools()).browser?.description ?? ''), 'job must mention loopback restriction');
 });
 
 test('browser schema semanticAction exposes locator, query, verb subfields', async () => {
   const tool = await captureBrowserTool();
-  const sa = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'semanticAction')!.properties.semanticAction as { anyOf?: Array<{ properties: Record<string, unknown> }> };
-  const saBranches = sa.anyOf ?? [];
+  const sa = tool!.parameters.properties?.semanticAction as { anyOf?: Array<{ properties: Record<string, unknown> }> };
+  const saBranches = sa?.anyOf ?? [];
   assert.ok(saBranches.length > 0, 'semanticAction must be a closed locator/verb union');
   for (const branch of saBranches) {
     assert.ok(branch.properties.locator, 'semanticAction.locator must be present');
@@ -778,14 +692,14 @@ test('browser schema semanticAction exposes locator, query, verb subfields', asy
 
 test('browser schema batch commands exposes args subfield', async () => {
   const tool = await captureBrowserTool();
-  const batch = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'batch')!.properties.batch as { properties: Record<string, unknown> };
+  const batch = tool!.parameters.properties?.batch as { properties: Record<string, unknown> };
   const commands = batch.properties.commands as { items: { properties: Record<string, unknown> } };
   assert.ok(commands.items.properties.args, 'batch commands[].args must be present');
 });
 
 test('browser schema job steps exposes kind subfield', async () => {
   const tool = await captureBrowserTool();
-  const job = requestBranches(tool!.parameters).find((b) => b.properties?.action?.const === 'job')!.properties.job as { properties: Record<string, unknown> };
+  const job = tool!.parameters.properties?.job as { properties: Record<string, unknown> };
   const steps = job.properties.steps as { items: { anyOf?: Array<{ properties: Record<string, unknown> }>; properties?: Record<string, unknown> } };
   const kind = steps.items.properties?.kind ?? steps.items.anyOf?.[0]?.properties?.kind;
   assert.ok(kind, 'job steps[].kind must be present');
@@ -870,14 +784,14 @@ test('reachStatusCommandArgs rejects more than two arguments', () => {
 
 // ── kg tool registration (lowercase, action-aware, portable intent) ──
 
-async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Promise<Record<string, { description: string | undefined; promptSnippet: string | undefined; parameters: Record<string, unknown> }>> {
-  const defs: Record<string, { description: string | undefined; promptSnippet: string | undefined; parameters: Record<string, unknown> }> = {};
+async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Promise<Record<string, { description: string | undefined; promptSnippet: string | undefined; parameters: Record<string, any> }>> {
+  const defs: Record<string, { description: string | undefined; promptSnippet: string | undefined; parameters: Record<string, any> }> = {};
   const previousBootstrap = process.env.PI_SEARCH_BOOTSTRAP;
   const previousDiffbotToken = process.env.DIFFBOT_TOKEN;
   const previousSparqlEndpoint = process.env.GRAPH_SPARQL_ENDPOINT;
   const previousNativeTools = process.env.PI_SEARCH_NATIVE_TOOLS;
   process.env.PI_SEARCH_BOOTSTRAP = 'off';
-  process.env.PI_SEARCH_NATIVE_TOOLS = 'web_search,fetch,github,social,kg,graph,browser,desktop,agent_poll';
+  process.env.PI_SEARCH_NATIVE_TOOLS = 'web_search,fetch,github,social,kg,graph,browser,desktop,agent';
   process.env.DIFFBOT_TOKEN = diffbotToken;
   process.env.GRAPH_SPARQL_ENDPOINT = 'https://sparql.example.org/sparql';
   const pi = {
@@ -903,14 +817,13 @@ async function captureAllTools(diffbotToken = 'test-token-for-index-tests'): Pro
   return defs;
 }
 
-test('kg tool registered lowercase with action-aware schema', async () => {
+test('kg tool registered lowercase with flat canonical schema', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.kg, 'kg tool must be registered');
   assert.ok(!defs.KG && !defs.knowledge, 'only the lowercase kg name is registered');
-  const branches = requestBranches(defs.kg.parameters);
-  const props = branchProperties(defs.kg.parameters);
-  assert.deepEqual([...new Set(branches.map((b) => b.properties?.action?.const))].sort(), ['analyze_text', 'enhance', 'search']);
-  assert.equal(branches.length, 4, 'kg schema keeps 1 search + 2 enhance (Person, Organization) + 1 analyze_text branch');
+  const props = defs.kg.parameters.properties ?? {};
+  assert.equal(props.request, undefined, 'kg must not expose a request envelope');
+  assert.deepEqual([...(props.action?.enum ?? [])].sort(), ['analyze_text', 'enhance', 'search']);
   for (const key of ['query', 'type', 'text', 'cursor', 'providers', 'maxProviders', 'limit', 'maxEntities', 'confidenceThreshold', 'extractEntities', 'extractFacts', 'extractSentiment', 'extractTopics']) {
     assert.ok(key in props, `kg schema must expose portable field ${key}`);
   }
@@ -924,34 +837,18 @@ test('kg description requires user authorization before sensitive text submissio
   assert.ok(/sensitive/i.test(description), 'kg description must call out sensitive text');
 });
 
-test('web_search strict union exposes optional knowledge booleans; fetch schema unchanged by kg registration', async () => {
+test('web_search flat schema exposes knowledge booleans; fetch schema stays unchanged', async () => {
   const defs = await captureAllTools();
-  const webSchema = defs.web_search!.parameters as {
-    properties?: { request?: { anyOf?: Array<{ properties?: Record<string, { properties?: Record<string, unknown> }> }> } };
-    description?: string;
-  };
-  const branches = webSchema.properties?.request?.anyOf ?? [];
-  assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
-  const byBranch = (predicate: (props: Record<string, unknown>) => boolean): Record<string, { properties?: Record<string, unknown> }> => {
-    const found = branches.find((branch) => predicate((branch.properties ?? {}) as Record<string, unknown>));
-    assert.ok(found, 'expected web_search branch missing');
-    return (found!.properties ?? {}) as Record<string, { properties?: Record<string, unknown> }>;
-  };
-  const singleProps = byBranch((props) => 'query' in props && !('queries' in props) && !('mode' in props));
-  const batchProps = byBranch((props) => 'queries' in props);
-  const agentProps = byBranch((props) => 'mode' in props);
-  for (const key of ['query', 'knowledge']) {
-    assert.ok(key in singleProps, `web_search single branch must expose field ${key}`);
-  }
-  assert.ok(!('source' in singleProps), 'web_search plain single branch must not advertise source (research-only)');
-  assert.ok(!('cursor' in singleProps), 'web_search single branch must not advertise cursor (validateWebRequest rejects it)');
-  const researchSingle = branches.find((branch) => (branch.properties as Record<string, unknown>)?.category !== undefined && 'source' in ((branch.properties ?? {}) as Record<string, unknown>) && !('cursor' in ((branch.properties ?? {}) as Record<string, unknown>)));
-  assert.ok(researchSingle, 'research single branch must exist');
-  assert.ok(!('knowledge' in ((researchSingle!.properties ?? {}) as Record<string, unknown>)), 'web_search research branch must not advertise knowledge (web-only)');
-  assert.ok('queries' in batchProps, 'web_search batch branch must expose queries');
-  assert.ok(!('knowledge' in agentProps), 'web_search agent branch must not expose knowledge');
-  assert.deepEqual(Object.keys(singleProps.knowledge!.properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
-  assert.equal((defs.fetch!.parameters as { type?: string }).type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
+  const props = (defs.web_search!.parameters as WebSearchSchema).properties ?? {};
+  assert.ok(props.query);
+  assert.ok(props.queries);
+  assert.ok(props.knowledge);
+  assert.ok(props.source);
+  assert.ok(props.cursor);
+  assert.ok(!props.mode);
+  assert.ok(!props.depth);
+  assert.deepEqual(Object.keys((props.knowledge as { properties?: Record<string, unknown> }).properties ?? {}).sort(), ['enhance', 'entities', 'facts', 'sentiment', 'topics']);
+  assert.equal((defs.fetch!.parameters as { type?: string }).type, 'object', 'fetch schema must remain a top-level object');
 });
 
 test('buildSearchRoute preserves knowledge on non-research route', () => {
@@ -1069,71 +966,55 @@ test('guidance: kg description carries DQL examples, cursor and privacy notes', 
   assert.ok(/email\/phone/i.test(description), 'kg description must note email/phone transmission');
 });
 
-test('guidance: web_search description and promptSnippet document branches', async () => {
+test('guidance: web_search documents the flat schema and separate agent tool', async () => {
   const defs = await captureAllTools();
   const description = defs.web_search?.description ?? '';
-  assert.ok(/No provider selection input/i.test(description), 'web_search description must forbid provider selection input');
-  assert.ok(/queries\[1\.\.8\]/i.test(description), 'web_search description must document the batch selector');
+  assert.ok(/no provider[- ]selection input/i.test(description), 'web_search description must forbid provider selection input');
+  assert.ok(/flat parameters/i.test(description), 'web_search description must state the flat call shape');
+  assert.ok(/no request envelope/i.test(description), 'web_search description must reject the legacy envelope');
+  assert.ok(/No agent mode/i.test(description), 'web_search description must remove agent mode');
   const snippet = defs.web_search?.promptSnippet ?? '';
-  assert.ok(/single \{query\}/i.test(snippet), 'web_search promptSnippet must document the single branch');
-  assert.ok(/batch \{queries\[1\.\.8\]\}/i.test(snippet), 'web_search promptSnippet must document the batch branch');
-  assert.ok(/agent \{query, mode/i.test(snippet), 'web_search promptSnippet must document the agent branch');
-  assert.ok(/cursor needs category "research"/i.test(snippet), 'web_search promptSnippet must keep cursor field constraints');
+  assert.ok(/Exactly one of query or queries/i.test(snippet));
+  assert.ok(/separate agent tool/i.test(snippet));
 });
 
-test('guidance: web_search single-branch fields and research-only docs', async () => {
-  const { schema, branches } = await captureWebSearchUnion();
-  assert.equal(branches.length, 5, 'web_search schema must be a five-branch union');
-  assert.ok(/Exactly one of query/i.test(schema.description ?? ''), 'web_search schema must state the query/queries XOR');
-  const singleBranch = findWebSearchBranch(branches, 'single');
-  const props = singleBranch?.properties ?? {};
-  for (const key of ['query', 'limit', 'category', 'yearFrom']) {
-    assert.ok(key in props, `web_search single branch must expose flat field ${key}`);
+test('guidance: web_search flat fields retain research-only documentation', async () => {
+  const defs = await captureAllTools();
+  const schema = defs.web_search!.parameters as WebSearchSchema;
+  const props = schema.properties ?? {};
+  assert.ok(/Exactly one of query or queries/i.test(schema.description ?? ''));
+  for (const key of ['query', 'queries', 'limit', 'category', 'yearFrom', 'source', 'cursor']) {
+    assert.ok(key in props, `web_search must expose flat field ${key}`);
   }
-  assert.ok(!('source' in props), 'web_search plain single branch must not advertise source (research-only)');
-  assert.ok(!('cursor' in props), 'web_search single branch must not advertise cursor');
-  const researchProps = (branches.find((branch) => 'source' in (((branch as { properties?: unknown }).properties ?? {}) as Record<string, unknown>))?.properties ?? {}) as Record<string, { description?: string }>;
-  assert.ok('source' in researchProps, 'web_search research branch must expose source');
-  const docCases = [
-    { target: researchProps, field: 'source', pattern: /research-only/i, message: 'source param must say research-only' },
-    { target: props, field: 'yearFrom', pattern: /1900, current UTC year/i, message: 'yearFrom param must document the supported range' },
-  ];
-  for (const { target, field, pattern, message } of docCases) {
-    assert.ok(pattern.test(target[field]?.description ?? ''), message);
-  }
+  assert.ok(/research-only/i.test(props.source?.description ?? ''), 'source must say research-only');
+  assert.ok(/1900, current UTC year/i.test(props.yearFrom?.description ?? ''), 'yearFrom must document the supported range');
+  assert.ok(/Research continuation/i.test(props.cursor?.description ?? ''), 'cursor must document research continuation semantics');
 });
 
 
-test('guidance: fetch states the 5-branch union', async () => {
+test('guidance: fetch documents flat runtime families', async () => {
   const defs = await captureAllTools();
   const description = defs.fetch?.description ?? '';
-  assert.ok(/5-branch union/i.test(description), 'fetch description must state the 5-branch union');
-  assert.ok(/Legacy action\/source\/searchQuery\/followLinks\/maxDepth rejected/i.test(description), 'fetch description must document legacy rejection (mode is a valid read mode, not legacy)');
   assert.ok(/readable\|raw\|answer/i.test(description), 'fetch description must document the url/urls read modes');
   assert.ok(/urls\[1\.\.8\]/i.test(description), 'fetch description must note multi-url reads');
-  assert.ok(/per-URL isolation/i.test(description), 'multi branch must promise per-URL isolation');
-  assert.ok(/claims\[1\.\.20\]/i.test(description), 'claim-check branch must name claims[1..20]');
-  const params = defs.fetch!.parameters as { type?: string; properties?: Record<string, unknown> };
-  assert.equal(params.type, 'object', 'fetch schema must be a top-level object (Anthropic-compatible)');
-  const branches = requestBranches(params as any);
-  assert.equal(branches.length, 5, 'fetch schema must be a five-branch union');
-  const leafBranches = branches.flatMap((branch) => branch.anyOf ?? branch.oneOf ?? [branch]);
-  for (const branch of leafBranches) {
-    assert.equal(branch.additionalProperties, false, 'every concrete fetch branch must be closed');
+  assert.ok(/per-URL isolation/i.test(description), 'multi-url behavior must promise per-URL isolation');
+  assert.ok(/claims\[1\.\.20\]/i.test(description), 'claim-check family must name claims[1..20]');
+  const params = defs.fetch!.parameters as { type?: string; properties?: Record<string, unknown>; additionalProperties?: boolean };
+  assert.equal(params.type, 'object', 'fetch schema must be a top-level object');
+  assert.equal(params.additionalProperties, false, 'fetch schema must be closed');
+  const props = params.properties ?? {};
+  assert.equal(props.request, undefined, 'fetch must not expose a request envelope');
+  for (const key of ['url', 'urls', 'query', 'siteMap', 'responseId', 'claims', 'mode']) {
+    assert.ok(key in props, `fetch schema must expose field ${key}`);
   }
-  const keys = Object.keys(Object.assign({}, ...leafBranches.map((branch) => branch.properties ?? {})));
-  for (const key of ['url', 'urls', 'query', 'siteMap', 'responseId', 'claims']) {
-    assert.ok(keys.includes(key), `fetch schema must expose field ${key}`);
-  }
-  assert.ok(keys.includes('mode'), 'fetch schema must expose the read-mode field mode on the url/urls branches');
   for (const key of ['source', 'searchQuery', 'followLinks', 'maxDepth']) {
-    assert.ok(!keys.includes(key), `fetch schema must not expose legacy field ${key}`);
+    assert.ok(!(key in props), `fetch schema must not expose legacy field ${key}`);
   }
 });
 
 test('guidance: social limit documents reject-on-overflow', async () => {
   const defs = await captureAllTools();
-  const props = branchProperties(defs.social!.parameters);
+  const props = defs.social!.parameters.properties ?? {};
   assert.ok(/reject/i.test(props.limit?.description ?? '') || /reject/i.test((await captureAllTools()).social?.description ?? ''), 'social limit must document reject-on-overflow');
 });
 
@@ -1147,23 +1028,15 @@ test('tool_result hook fences kg output as external evidence', async () => {
   assert.ok(result && result.content[0]!.text.includes('<<<EXTERNAL_EVIDENCE_'), 'kg must be fenced');
 });
 
-test('buildSearchRoute agent mode returns a job pointer with 300s timeout', async () => {
-  const { __setAgentJobCreator } = await import('../src/web/agent/agent-job-seam.js');
-  __setAgentJobCreator(() => ({ jobId: 'job-index-1' }));
-  try {
-    const route = buildSearchRoute({ query: 'deep topic', mode: 'agent' });
-    assert.equal(route.tool, 'agent_job');
-    assert.equal(route.args.jobId, 'job-index-1');
-    assert.equal(route.timeout, 300_000);
-  } finally {
-    __setAgentJobCreator(undefined);
-  }
-});
-
-test('buildSearchRoute agent mode rejects research category and knowledge', () => {
-  assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', category: 'research' }), /not supported with category/);
-  assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', category: 'academic' }), /not supported with category/);
-  assert.throws(() => buildSearchRoute({ query: 'q', mode: 'agent', knowledge: { entities: true } }), /not supported with mode/);
+test('buildSearchRoute rejects removed agent fields with a direct migration error', () => {
+  assert.throws(
+    () => buildSearchRoute({ query: 'q', mode: 'agent' } as Record<string, unknown>),
+    /no longer supports agent mode or depth; use the agent tool/,
+  );
+  assert.throws(
+    () => buildSearchRoute({ query: 'q', depth: 'deep' } as Record<string, unknown>),
+    /no longer supports agent mode or depth; use the agent tool/,
+  );
 });
 
 test('buildSearchRoute default mode keeps 120s timeout and no mode arg', () => {
@@ -1174,14 +1047,13 @@ test('buildSearchRoute default mode keeps 120s timeout and no mode arg', () => {
 
 // ── graph tool registration (native DQL, provider-faithful, no hidden composition) ──
 
-test('graph tool registered with strict action/language branches', async () => {
+test('graph tool registered with flat action/language schema', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.graph, 'graph tool must be registered');
-  const branches = requestBranches(defs.graph.parameters);
-  assert.ok(branches.length > 0, 'graph schema must expose request branches');
-  const props = branchProperties(defs.graph.parameters);
-  assert.deepEqual([...new Set(branches.map((b) => b.properties?.action?.const))].sort(), ['probe', 'query', 'schema']);
-  assert.deepEqual([...new Set(branches.map((b) => b.properties?.language?.const))].sort(), ['dql', 'sparql']);
+  const props = defs.graph.parameters.properties ?? {};
+  assert.equal(props.request, undefined, 'graph must not expose a request envelope');
+  assert.deepEqual([...(props.action?.enum ?? [])].sort(), ['probe', 'query', 'schema']);
+  assert.deepEqual([...(props.language?.enum ?? [])].sort(), ['dql', 'sparql']);
   for (const key of ['action', 'language', 'query', 'queries', 'pageSize', 'cursor', 'view', 'name', 'includeDeprecated']) {
     assert.ok(key in props, `graph schema must expose field ${key}`);
   }
@@ -1190,32 +1062,29 @@ test('graph tool registered with strict action/language branches', async () => {
 test('graph schema exposes no excluded surfaces', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.graph, 'graph tool must be registered');
-  const props = branchProperties(defs.graph.parameters);
+  const props = defs.graph.parameters.properties ?? {};
   for (const forbidden of ['provider', 'providers', 'workers', 'refresh', 'format', 'export', 'crawl', 'threshold', 'filter']) {
     assert.ok(!(forbidden in props), `graph schema must not expose ${forbidden}`);
   }
 });
 
-test('graph sparql query carries no pageSize/cursor', async () => {
+test('graph SPARQL pagination fields are schema-visible but runtime-rejected', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.graph, 'graph tool must be registered');
-  const branches = requestBranches(defs.graph.parameters);
-  // Language narrowing: SPARQL query carries no pageSize/cursor.
-  const sparqlQuery = branches.find((b) => b.properties?.action?.const === 'query' && b.properties?.language?.const === 'sparql');
-  assert.ok(sparqlQuery, 'sparql query branch must be present');
-  assert.ok(!('pageSize' in (sparqlQuery.properties ?? {})), 'sparql query must not carry pageSize');
-  assert.ok(!('cursor' in (sparqlQuery.properties ?? {})), 'sparql query must not carry cursor');
+  const props = defs.graph.parameters.properties ?? {};
+  assert.ok(props.pageSize && props.cursor, 'flat graph schema exposes shared pagination fields');
+  const { validateGraphRequest } = await import('../src/graph/graph-contract.js');
+  assert.equal(validateGraphRequest({ action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', pageSize: 10 }).ok, false);
+  assert.equal(validateGraphRequest({ action: 'query', language: 'sparql', query: 'SELECT * WHERE { ?s ?p ?o }', cursor: 'x' }).ok, false);
 });
 
-test('graph dql query keeps pageSize/cursor', async () => {
+test('graph DQL query accepts pageSize/cursor at runtime', async () => {
   const defs = await captureAllTools();
   assert.ok(defs.graph, 'graph tool must be registered');
-  const branches = requestBranches(defs.graph.parameters);
-  // Language narrowing: DQL keeps both.
-  const dqlQuery = branches.find((b) => b.properties?.action?.const === 'query' && b.properties?.language?.const === 'dql');
-  assert.ok(dqlQuery, 'dql query branch must be present');
-  assert.ok('pageSize' in (dqlQuery.properties ?? {}), 'dql query must keep pageSize');
-  assert.ok('cursor' in (dqlQuery.properties ?? {}), 'dql query must keep cursor');
+  const props = defs.graph.parameters.properties ?? {};
+  assert.ok(props.pageSize && props.cursor, 'flat graph schema exposes DQL pagination fields');
+  const { validateGraphRequest } = await import('../src/graph/graph-contract.js');
+  assert.equal(validateGraphRequest({ action: 'query', language: 'dql', query: 'type:Person', pageSize: 10, cursor: 'opaque' }).ok, true);
 });
 
 
@@ -1228,34 +1097,32 @@ test('graph description states native language, provenance, probe countability, 
   assert.ok(/schema/i.test(description), 'graph description must mention schema');
 });
 
-const EXPECTED_WEB_SEARCH_BRANCHES = 5;
-
-test('graph registration adopts strict schemas; all union tools wrapped as {request}', async () => {
+test('all registered public tool schemas are flat top-level objects', async () => {
   const defs = await captureAllTools();
-  for (const toolName of ['kg', 'fetch', 'graph', 'web_search', 'social'] as const) {
-    assert.ok(defs[toolName], `${toolName} tool must be registered`);
-    assert.deepEqual(Object.keys((defs[toolName]!.parameters as { properties: object }).properties).sort(), ['request'], `${toolName} parameters must be Type.Object({request})`);
-    assert.equal((defs[toolName]!.parameters as { type?: string }).type, 'object', `${toolName} parameters must be type object`);
+  for (const toolName of ['web_search', 'fetch', 'github', 'social', 'kg', 'graph', 'browser', 'desktop', 'agent'] as const) {
+    const def = defs[toolName];
+    if (!def) continue;
+    const parameters = def.parameters as { type?: string; properties?: Record<string, unknown>; anyOf?: unknown; oneOf?: unknown };
+    assert.equal(parameters.type, 'object', `${toolName} parameters must be a top-level object`);
+    assert.equal(parameters.anyOf, undefined, `${toolName} must not expose a root anyOf union`);
+    assert.equal(parameters.oneOf, undefined, `${toolName} must not expose a root oneOf union`);
+    assert.ok(!('request' in (parameters.properties ?? {})), `${toolName} must not expose a request envelope`);
   }
-  if (defs.browser) {
-    assert.deepEqual(Object.keys((defs.browser!.parameters as { properties: object }).properties).sort(), ['request'], 'browser parameters must be Type.Object({request})');
-    assert.equal((defs.browser!.parameters as { type?: string }).type, 'object', 'browser parameters must be type object');
-  }
-  assert.equal(requestBranches(defs.graph!.parameters).length, 12, 'graph schema must be the 12-branch strict union');
-  assert.equal(requestBranches(defs.web_search!.parameters).length, EXPECTED_WEB_SEARCH_BRANCHES);
   const kgProps = defs.kg!.parameters.properties as Record<string, unknown>;
   assert.ok(!('pageSize' in kgProps), 'kg schema must not gain graph pageSize');
   assert.ok(!('view' in kgProps), 'kg schema must not gain graph view');
 });
 
-test('desktop registration wraps branches as {request} when automation is opted in', async () => {
+test('desktop registration is flat when automation is opted in', async () => {
   const previousDesktop = process.env.PI_SEARCH_DESKTOP_AUTOMATION;
   process.env.PI_SEARCH_DESKTOP_AUTOMATION = '1';
   try {
     const defs = await captureAllTools();
     assert.ok(defs.desktop, 'desktop tool must be registered when opted in');
-    assert.deepEqual(Object.keys((defs.desktop!.parameters as { properties: object }).properties).sort(), ['request']);
-    assert.equal((defs.desktop!.parameters as { type?: string }).type, 'object');
+    const parameters = defs.desktop!.parameters as { type?: string; properties?: Record<string, unknown> };
+    assert.equal(parameters.type, 'object');
+    assert.ok(parameters.properties?.action, 'desktop must expose action directly');
+    assert.ok(!parameters.properties?.request, 'desktop must not expose a request envelope');
   } finally {
     if (previousDesktop === undefined) delete process.env.PI_SEARCH_DESKTOP_AUTOMATION;
     else process.env.PI_SEARCH_DESKTOP_AUTOMATION = previousDesktop;
