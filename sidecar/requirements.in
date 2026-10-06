@@ -14,7 +14,7 @@
 
 fastapi==0.135.1
 uvicorn==0.41.0
-sentence-transformers==5.2.3
+sentence-transformers==5.6.0
 torch==2.13.0
 pydantic==2.12.3
 numpy==2.3.5
